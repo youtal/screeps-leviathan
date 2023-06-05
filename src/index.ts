@@ -1,8 +1,7 @@
-import { createApp } from '@/freamWork'
+import { createApp } from "@/freamWork";
+import { testModule1 } from "./testModuels/m1";
 
+const app = createApp();
+app.use(testModule1);
 
-
-
-const app = createApp()
-
-export const loop = app.run
+export const loop = app.run;

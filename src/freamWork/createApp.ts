@@ -7,7 +7,7 @@ import {
 import { errorMapper } from "./errorMapper";
 import { log, colorful, Color } from "@/utils";
 
-const logger = function(content: string) {
+const logger = function (content: string) {
   const prefix = colorful("App", Color.Green);
   log(content, prefix);
 };
@@ -25,8 +25,13 @@ const DEFAULT_OPTIONS: CreateOptions = {
 /**
  * 创建应用
  */
-export const createApp = function(opt: Partial<CreateOptions> = {}) {
-  const { name: appName, roomRunner, creepRunner, powerCreepRunner } = {
+export const createApp = function (opt: Partial<CreateOptions> = {}) {
+  const {
+    name: appName,
+    roomRunner,
+    creepRunner,
+    powerCreepRunner,
+  } = {
     ...DEFAULT_OPTIONS,
     ...opt,
   };
@@ -75,7 +80,7 @@ export const createApp = function(opt: Partial<CreateOptions> = {}) {
    *
    * @danger 请务必执行 next 方法！不然框架将无法正常使用
    */
-  const setMemoryCacher = function(newCatcher: MemoryCacher) {
+  const setMemoryCacher = function (newCatcher: MemoryCacher) {
     _memoryCacher = newCatcher;
   };
 
@@ -86,7 +91,7 @@ export const createApp = function(opt: Partial<CreateOptions> = {}) {
    * @param callbacks 要执行的生命周期回调
    * @returns 该组回调的唯一索引，用于取消监听
    */
-  const on = function(callbacks: AppLifecycleCallbacks): number {
+  const use = function (callbacks: AppLifecycleCallbacks): number {
     const id = getCallbackIndex();
     // 保存所有回调并分配唯一索引（不同分组间唯一）
     Object.keys(callbacks).forEach((type) => {
@@ -100,7 +105,7 @@ export const createApp = function(opt: Partial<CreateOptions> = {}) {
    *
    * @param deleteTarget 要取消监听的分组索引
    */
-  const close = function(deleteTarget: number) {
+  const close = function (deleteTarget: number) {
     // 遍历所有的回调
     Object.values(lifecycleCallbacks).forEach((callbackList) => {
       // 查找每个阶段，找到对应的 id 并删除
@@ -112,32 +117,40 @@ export const createApp = function(opt: Partial<CreateOptions> = {}) {
   /**
    * 获取唯一的索引
    */
-  const getCallbackIndex = function(): number {
+  const getCallbackIndex = function (): number {
     return callbackIndex++;
   };
 
   /**
    * 运行 bot
    */
-  const run = function(): void {
+  const run = function (): void {
     // 有内存缓存的话就包裹一下，否则就直接运行
     if (_memoryCacher) _memoryCacher(_run);
     else _run();
   };
 
-  const runAllRoom = () =>
-    Object.values(Game.rooms).map((room) => errorMapper(roomRunner, room));
-  const runAllCreep = () =>
-    Object.values(Game.creeps).map((creep) => errorMapper(creepRunner, creep));
-  const runAllPowerCreep = () =>
-    Object.values(Game.powerCreeps).map((creep) =>
-      errorMapper(powerCreepRunner, creep)
-    );
+  const runAllRoom = () => {
+    if (roomRunner)
+      Object.values(Game.rooms).map((room) => errorMapper(roomRunner, room));
+  };
+  const runAllCreep = () => {
+    if (creepRunner)
+      Object.values(Game.creeps).map((creep) =>
+        errorMapper(creepRunner, creep)
+      );
+  };
+  const runAllPowerCreep = () => {
+    if (powerCreepRunner)
+      Object.values(Game.powerCreeps).map((powerCreep) =>
+        errorMapper(powerCreepRunner, powerCreep)
+      );
+  };
 
   /**
    * 实际的框架工作
    */
-  const _run = function(): void {
+  const _run = function (): void {
     // 检查是否是第一次全局重置
     if (!Memory[appName]) {
       execLifecycleCallback("born");
@@ -162,7 +175,7 @@ export const createApp = function(opt: Partial<CreateOptions> = {}) {
    *
    * @param lifecycleType
    */
-  const execLifecycleCallback = function(
+  const execLifecycleCallback = function (
     lifecycleType: keyof AppLifecycleCallbacks
   ) {
     for (const { callback } of lifecycleCallbacks[lifecycleType]) {
@@ -170,5 +183,5 @@ export const createApp = function(opt: Partial<CreateOptions> = {}) {
     }
   };
 
-  return { setMemoryCacher, on, close, run };
+  return { setMemoryCacher, use, close, run };
 };
