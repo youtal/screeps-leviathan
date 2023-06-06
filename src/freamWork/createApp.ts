@@ -43,7 +43,7 @@ export const createApp = function (opt: Partial<CreateOptions> = {}) {
     born: [],
     tickStart: [],
     tickEnd: [],
-    mount: [],
+    reload: [],
   };
 
   /**
@@ -158,7 +158,7 @@ export const createApp = function (opt: Partial<CreateOptions> = {}) {
     }
     //检查是否需要进行挂载
     if (!global.mounted) {
-      execLifecycleCallback("mount");
+      execLifecycleCallback("reload");
       logger("挂载拓展完成");
       global.mounted = true;
     }

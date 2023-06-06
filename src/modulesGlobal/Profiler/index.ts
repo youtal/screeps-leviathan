@@ -12,9 +12,10 @@ export const {
   showMore,
   showLess,
 } = createProfiler();
+export { profileFunction } from "./Profiler";
 
 export const profilerModule: AppLifecycleCallbacks = {
-  mount: () => {
+  reload: () => {
     init();
   },
 };
