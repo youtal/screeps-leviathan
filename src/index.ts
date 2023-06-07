@@ -1,12 +1,13 @@
 import { createApp } from "@/freamWork";
-import { testModule1 } from "./testModuels/m1";
-import { testModule2 } from "./testModuels/m2";
 import { roomShortcutsPlugin } from "./mountWork";
 import { profilerModule } from "./modulesGlobal/Profiler";
+import { visPlusPlugin } from "./modulesGlobal/roomVisiualPlus";
+import { m3 } from "./testModuels/m3";
 
 const app = createApp();
-//app.use(testModule2);
 app.use(roomShortcutsPlugin);
+app.use(visPlusPlugin);
+app.use(m3);
 
 app.use(profilerModule);
 
