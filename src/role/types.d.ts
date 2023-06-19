@@ -60,12 +60,14 @@ interface CreepMemory {
   role: RoleConstant;
   actionStage: CreepActionStage;
   stand?: boolean;
+  targetId?: Id<RoomObject>;
 }
 
 interface PowerCreepMemory {
   role: RoleConstant;
   actionStage: CreepActionStage;
   stand?: boolean;
+  targetId?: Id<RoomObject>;
 }
 
 interface RoleData {
