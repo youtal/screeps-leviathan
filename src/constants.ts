@@ -1,4 +1,4 @@
-declare const Obstacles_Structuretype: [
+export const Obstacles_Structuretype = [
   "spawn",
   "controller",
   "constructedWall",
@@ -12,5 +12,5 @@ declare const Obstacles_Structuretype: [
   "terminal",
   "nuker",
   "factory",
-  "invaderCore"
+  "invaderCore",
 ];

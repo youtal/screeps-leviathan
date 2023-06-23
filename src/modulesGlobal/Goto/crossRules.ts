@@ -1,6 +1,16 @@
 import { dirToPos, isPosWalkable } from "@/utils";
+import {
+  RoleConstant,
+  CreepActionStage,
+  RoleWorker,
+  workTask,
+  Role,
+} from "@/role/types";
 
-type AllowCrossRule = (creep: Creep | PowerCreep) => boolean;
+type AllowCrossRule = (
+  //creep: RoleCreep<RoleConstant> | PowerRoleCreep<RoleConstant>
+  creep: Creep | PowerCreep
+) => boolean;
 
 /**
  * 默认的对穿规则
@@ -11,13 +21,23 @@ const defaultCrossRule: AllowCrossRule = (creep) => !creep.memory?.stand;
  * 通用对穿规则1，StageWork 阶段不允许对穿
  */
 const refuseWhenWork: AllowCrossRule = (creep) =>
-  creep.memory.actionStage !== StageWork;
+  creep.memory.actionStage !== CreepActionStage.Work;
+
+/**
+ * 适用于worker的对穿规则，执行harvest任务时不允许对穿
+ */
+const CrossRuleWorker: AllowCrossRule = (creep: RoleCreep<RoleWorker>) => {
+  const { data } = creep.memory;
+  return data.taskType === workTask.Harvest
+    ? refuseWhenWork(creep)
+    : defaultCrossRule(creep);
+};
 
 type CrossRuleMap = Partial<Record<RoleConstant | "default", AllowCrossRule>>;
 
 const crossRuleMap: CrossRuleMap = {
-  [RoleWorker]: defaultCrossRule,
-  [RoleManager]: defaultCrossRule,
+  [Role.Worker]: CrossRuleWorker,
+  [Role.Manager]: defaultCrossRule,
   default: defaultCrossRule,
 };
 
@@ -49,18 +69,16 @@ const defaultCrossDirectionRule: CrossDirectionRule = (
     : ((direction + 4) as DirectionConstant);
 };
 
-/**
- * 靠近目标的对穿方向规则，用于worker工作时使用，该规则会尽量让creep靠近目标，确保worker响应对穿后能够继续工作
- */
-const closeToTargetCrossDirectionRule: CrossDirectionRule = (
-  creep: Creep | PowerCreep,
+const crossDirectionRuleWorker: CrossDirectionRule = (
+  creep: RoleCreep<RoleWorker>,
   direction: DirectionConstant
 ) => {
+  const { data } = creep.memory;
   // 如果没有目标或者目标已经不存在，则使用默认的对穿方向规则
-  if (!creep.memory.targetId || !Game.getObjectById(creep.memory.targetId))
+  if (!data.targetId || !Game.getObjectById(data.targetId))
     return defaultCrossDirectionRule(creep, direction);
 
-  const target = Game.getObjectById(creep.memory.targetId);
+  const target = Game.getObjectById(data.targetId);
   let dir = creep.pos.getDirectionTo(target.pos);
   if (dir) {
     const resArr: DirectionConstant[] = [
@@ -77,14 +95,22 @@ const closeToTargetCrossDirectionRule: CrossDirectionRule = (
   // 如果没有找到合适的方向，则使用默认的对穿方向规则
   return defaultCrossDirectionRule(creep, direction);
 };
-
 type CrossDirectionRuleMap = Partial<
   Record<RoleConstant | "default", CrossDirectionRule>
 >;
 
 const crossDirectionRuleMap: CrossDirectionRuleMap = {
-  [RoleWorker]: closeToTargetCrossDirectionRule,
+  [Role.Worker]: crossDirectionRuleWorker,
   default: defaultCrossDirectionRule,
 };
 
-export { crossRuleMap, crossDirectionRuleMap };
+const getCrossRule = (role?: RoleConstant): AllowCrossRule => {
+  if (!role) return crossRuleMap.default;
+  return crossRuleMap[role] || crossRuleMap.default;
+};
+
+const getCrossDirectionRule = (role?: RoleConstant): CrossDirectionRule => {
+  if (!role) return crossDirectionRuleMap.default;
+  return crossDirectionRuleMap[role] || crossDirectionRuleMap.default;
+};
+export { getCrossRule, getCrossDirectionRule };

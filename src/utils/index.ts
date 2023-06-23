@@ -1,4 +1,5 @@
 export * from "./console";
+import { Obstacles_Structuretype } from "@/constants";
 
 const dirToPos = function (
   oriPos: RoomPosition,
@@ -62,4 +63,20 @@ const isPosWalkable = function (position: RoomPosition): boolean {
   return true;
 };
 
-export { dirToPos, isPosWalkable };
+const getNearPos = function (oriPos: RoomPosition): RoomPosition[] {
+  let res: RoomPosition[] = [];
+  const tmpArr = [-1, 0, 1];
+  const { x, y, roomName } = oriPos;
+  for (let i of tmpArr)
+    for (let j of tmpArr) {
+      //跳过自身
+      if (i === 0 && j === 0) continue;
+      let [dx, dy] = [x + i, y + j];
+      //跳过边界
+      if (dx > 49 || dy > 49 || dx < 0 || dy < 0) continue;
+      res.push(new RoomPosition(dx, dy, roomName));
+    }
+  return res;
+};
+
+export { dirToPos, isPosWalkable, getNearPos };

@@ -26,5 +26,3 @@ interface Profiler {
   showMore(): void;
   showLess(): void;
 }
-
-declare const __PROFILER_ENABLED__: boolean;

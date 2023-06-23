@@ -87,7 +87,7 @@ interface Room {
   STRUCTURE_PORTAL: StructurePortal[];
   STRUCTURE_INVADER_CORE: StructureInvaderCore;
   source: Source[];
-  mineral: Mineral[];
+  mineral: Mineral;
 }
 
 //type ShortcutsCache<T extends ALL_CACHED_KEY> = Record<T, CachedMap[T]>;
