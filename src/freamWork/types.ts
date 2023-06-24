@@ -1,7 +1,7 @@
 /**
  * 生命周期回调
  */
-type AnyCallback = () => unknown;
+export type AnyCallback = () => unknown;
 
 /**
  * 框架的生命周期回调

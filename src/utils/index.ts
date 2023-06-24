@@ -1,5 +1,6 @@
 export * from "./console";
 import { Obstacles_Structuretype } from "@/constants";
+import { AppLifecycleCallbacks, AnyCallback } from "@/freamWork/types";
 
 const dirToPos = function (
   oriPos: RoomPosition,
@@ -79,4 +80,32 @@ const getNearPos = function (oriPos: RoomPosition): RoomPosition[] {
   return res;
 };
 
-export { dirToPos, isPosWalkable, getNearPos };
+const assmblePlugins = (Plugins: AppLifecycleCallbacks[]) => {
+  const bornCallbacks: AnyCallback[] = [];
+  const raloadCallbacks: AnyCallback[] = [];
+  const tickStartCallbacks: AnyCallback[] = [];
+  const tickEndCallbacks: AnyCallback[] = [];
+  const res: AppLifecycleCallbacks = {
+    born: () => {
+      bornCallbacks.forEach((callback) => callback());
+    },
+    reload: () => {
+      raloadCallbacks.forEach((callback) => callback());
+    },
+    tickStart: () => {
+      tickStartCallbacks.forEach((callback) => callback());
+    },
+    tickEnd: () => {
+      tickEndCallbacks.forEach((callback) => callback());
+    },
+  };
+  Plugins.forEach((plugin) => {
+    plugin.born && bornCallbacks.push(plugin.born);
+    plugin.reload && raloadCallbacks.push(plugin.reload);
+    plugin.tickStart && tickStartCallbacks.push(plugin.tickStart);
+    plugin.tickEnd && tickEndCallbacks.push(plugin.tickEnd);
+  });
+  return res;
+};
+
+export { dirToPos, isPosWalkable, getNearPos, assmblePlugins };
