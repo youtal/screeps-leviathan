@@ -138,7 +138,7 @@ const visConnectRoads = function (room: Room | string, opts) {
   recordArgs(room, "connectRoads", { opts });
 };
 
-const visStructure = function (room: Room | string, x, y, type, opts) {
+const visStructure = function (room: Room | string, x, y, type, opts = {}) {
   if (typeof room !== "string") {
     room = room.name;
   }
@@ -182,6 +182,7 @@ let execute = function () {
         structure.opts
       );
     }
+    roomVisual.connectRoads();
   }
   toDraw = {};
 };

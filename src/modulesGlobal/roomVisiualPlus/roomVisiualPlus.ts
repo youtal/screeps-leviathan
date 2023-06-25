@@ -519,6 +519,39 @@ const StructureDrawingMap: Record<
       opacity: opts.opacity,
     });
   },
+  [STRUCTURE_EXTRACTOR]: function (
+    x: number,
+    y: number,
+    visual: RoomVisual,
+    opts: any
+  ) {
+    visual.circle(x, y, {
+      fill: colors.outline,
+      radius: 0.45,
+      stroke: colors.light,
+      strokeWidth: 0.05,
+      opacity: opts.opacity,
+    });
+    visual.circle(x, y, {
+      fill: colors.dark,
+      radius: 0.35,
+      opacity: opts.opacity,
+    });
+    let inline: Array<[number, number]> = [
+      [0.225, -0.3],
+      [0, -0.4],
+      [-0.225, -0.3],
+      [0, 0.4],
+      [0.225, -0.3],
+    ];
+    inline = relPoly(x, y, inline);
+    visual.poly(inline, {
+      stroke: colors.light,
+      strokeWidth: 0.05,
+      fill: undefined,
+      opacity: opts.opacity,
+    });
+  },
 };
 
 const drawStructure = function (

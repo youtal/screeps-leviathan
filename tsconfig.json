@@ -12,7 +12,8 @@
       "@test/*": ["./test/*"],
       "@modules/*": ["./src/modules/*"],
       "@utils/*": ["./src/utils/*"]
-    }
+    },
+    "experimentalDecorators": true
   },
   "exclude": ["node_modules"],
   "include": ["./src/", "./test/"]

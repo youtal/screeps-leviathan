@@ -13,7 +13,8 @@ type DrawableStructure =
   | STRUCTURE_STORAGE
   | STRUCTURE_OBSERVER
   | STRUCTURE_NUKER
-  | STRUCTURE_CONTAINER;
+  | STRUCTURE_CONTAINER
+  | STRUCTURE_EXTRACTOR;
 
 interface RoomVisual {
   speech(text: string, x: number, y: number, opts?: TextStyle): void;
