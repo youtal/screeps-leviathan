@@ -1,0 +1,16 @@
+node_modules/
+
+dist/
+
+.secret.json
+
+.tscache/
+
+.nyc_output
+coverage
+
+server
+
+.history
+
+npminstall-debug.log
