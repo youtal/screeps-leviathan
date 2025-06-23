@@ -11,7 +11,8 @@
       "@/*": ["./src/*"],
       "@test/*": ["./test/*"],
       "@modules/*": ["./src/modules/*"],
-      "@utils/*": ["./src/utils/*"]
+      "@utils/*": ["./src/utils/*"],
+      "@setting/*": ["./src/setting/*"]
     },
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true
