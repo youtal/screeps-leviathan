@@ -14,3 +14,6 @@ server
 .history
 
 npminstall-debug.log
+
+.idea/
+.vscode/

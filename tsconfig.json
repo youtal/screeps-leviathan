@@ -2,6 +2,7 @@
   "compilerOptions": {
     "target": "es2019",
     "moduleResolution": "Node",
+    "module": "commonjs",
     "outDir": "dist/",
     "baseUrl": "./",
     "sourceMap": true,
