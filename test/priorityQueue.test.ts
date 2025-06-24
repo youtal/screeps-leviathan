@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from '@jest/globals';
-import { PriorityQueue } from '@/utils'; // 修改路径以符合你的项目结构
+import { PriorityQueue } from '@utils/priorityQueue'; // 修改路径以符合你的项目结构
 
 describe('PriorityQueue', () => {
   let minHeap: PriorityQueue<number>;
