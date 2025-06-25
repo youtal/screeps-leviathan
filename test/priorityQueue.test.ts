@@ -68,4 +68,14 @@ describe('PriorityQueue', () => {
     expect(pq.pop()).toBe(4);
     expect(pq.pop()).toBe(7);
   });
+
+  it('should throw error on invalid comparator', () => {
+    expect(() => new PriorityQueue([], null as any)).toThrow('Comparator must be a function');
+  })
+
+  it('should use [] in constructor', () => {
+    const pq = new PriorityQueue(undefined, (a: number, b: number) => a < b);
+    expect(pq.size).toBe(0);
+    expect(pq.isEmpty).toBe(true);
+  });
 });
