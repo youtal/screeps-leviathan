@@ -70,8 +70,10 @@ describe('PriorityQueue', () => {
   });
 
   it('should throw error on invalid comparator', () => {
-    expect(() => new PriorityQueue([], null as any)).toThrow('Comparator must be a function');
-  })
+    expect(() => new PriorityQueue([], null as any)).toThrow(
+      'Comparator must be a function'
+    );
+  });
 
   it('should use [] in constructor', () => {
     const pq = new PriorityQueue(undefined, (a: number, b: number) => a < b);
