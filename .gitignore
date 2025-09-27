@@ -12,6 +12,7 @@ coverage
 server
 
 .history
+package-lock.json
 
 npminstall-debug.log
 

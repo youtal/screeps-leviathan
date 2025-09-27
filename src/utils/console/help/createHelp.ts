@@ -8,7 +8,7 @@ import {
   dyeBlue,
 } from '../utils';
 import { ModuleDescribe, FunctionDescribe } from './types';
-
+console.log(`template: ${template}`); // 调试输出，查看模板内容
 const [
   moduleContainerTemplate,
   moduleTemplate,

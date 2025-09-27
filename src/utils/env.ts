@@ -9,7 +9,7 @@ import {
   dyeViolet,
   createLog,
 } from './console';
-import { EnvMethods, EnvContext } from './types';
+import { EnvMethods } from './types';
 
 const staticMethods: Omit<EnvMethods, 'log'> = {
   getGame: () => Game,
