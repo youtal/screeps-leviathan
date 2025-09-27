@@ -1,4 +1,4 @@
-import createBus from '@utils/eventBus';
+import { createBus } from '@utils/eventBus';
 import { eventList } from '@utils/eventBus/constants';
 
 describe('EventBus', () => {

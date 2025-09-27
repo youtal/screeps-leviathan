@@ -1,6 +1,4 @@
 import { eventList } from './constants';
-import { createBus } from './createBus';
+export { createBus } from './createBus';
 
 (globalThis as any).EventList = eventList;
-
-export default createBus;
