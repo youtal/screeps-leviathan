@@ -18,16 +18,16 @@ export interface EnvMethods {
   getPowerCreep: (powerCreepName: string) => PowerCreep | undefined;
   getObjectById: typeof Game.getObjectById;
   log: ReturnType<typeof createLog>;
-  dye: {
-    green: typeof dyeGreen;
-    yellow: typeof dyeYellow;
-    blue: typeof dyeBlue;
-    cyan: typeof dyeCyan;
-    magenta: typeof dyeMagenta;
-    orange: typeof dyeOrange;
-    red: typeof dyeRed;
-    violet: typeof dyeViolet;
-  };
+  // dye: {
+  //   green: typeof dyeGreen;
+  //   yellow: typeof dyeYellow;
+  //   blue: typeof dyeBlue;
+  //   cyan: typeof dyeCyan;
+  //   magenta: typeof dyeMagenta;
+  //   orange: typeof dyeOrange;
+  //   red: typeof dyeRed;
+  //   violet: typeof dyeViolet;
+  // };
 }
 
 export interface EnvContext {

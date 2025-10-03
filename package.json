@@ -1,6 +1,6 @@
 {
   "name": "screeps-leviathan",
-  "version": "0.0.21",
+  "version": "0.0.22",
   "description": "an AI for the game Screeps",
   "main": "src/index.ts",
   "scripts": {

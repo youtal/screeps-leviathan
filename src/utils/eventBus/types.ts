@@ -1,4 +1,5 @@
 import { eventCategory, eventList } from './constants';
+import { createBus } from './createBus';
 
 interface EventDataMap {
   [eventCategory.Resource]: {
@@ -35,3 +36,5 @@ type ExtractBase<T> = T extends `${infer B}:${infer _}` ? B : never;
 
 export type DataByEvent<T extends EventType = EventType> =
   EventDataMap[ExtractBase<T>];
+
+export type Bus = ReturnType<typeof createBus>;
