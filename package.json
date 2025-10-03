@@ -20,6 +20,7 @@
     "@screeps/common": "^2.15.3",
     "@types/jest": "^26.0.20",
     "@types/lodash": "3.10.1",
+    "@types/minimatch": "^5.1.2",
     "@types/node": "^14.0.24",
     "@types/screeps": "^3.2.3",
     "cross-env": "^7.0.3",
