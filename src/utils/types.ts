@@ -1,14 +1,4 @@
-import {
-  dyeGreen,
-  dyeYellow,
-  dyeBlue,
-  dyeCyan,
-  dyeMagenta,
-  dyeOrange,
-  dyeRed,
-  dyeViolet,
-  createLog,
-} from './console';
+import { createLog } from './console';
 
 export interface EnvMethods {
   getGame: () => Game;
@@ -18,18 +8,18 @@ export interface EnvMethods {
   getPowerCreep: (powerCreepName: string) => PowerCreep | undefined;
   getObjectById: typeof Game.getObjectById;
   log: ReturnType<typeof createLog>;
-  // dye: {
-  //   green: typeof dyeGreen;
-  //   yellow: typeof dyeYellow;
-  //   blue: typeof dyeBlue;
-  //   cyan: typeof dyeCyan;
-  //   magenta: typeof dyeMagenta;
-  //   orange: typeof dyeOrange;
-  //   red: typeof dyeRed;
-  //   violet: typeof dyeViolet;
-  // };
+  profiler?: HasWrap;
 }
 
 export interface EnvContext {
   env: EnvMethods;
+}
+
+export type Wrap = <F extends (...args: any[]) => any>(
+  label: string,
+  fn: F
+) => F;
+
+export interface HasWrap {
+  wrap: Wrap;
 }

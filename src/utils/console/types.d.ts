@@ -12,4 +12,5 @@ type LogOptions = {
   error?: boolean;
   success?: boolean;
   info?: boolean;
+  report?: boolean;
 };

@@ -151,6 +151,7 @@ export const createLog = (
     error: defaultError,
     success: defaultSuccess,
     info: defaultInfo,
+    report: defaultReport,
   } = DEFAULT_LOG_CONFIG;
 
   return {
@@ -164,5 +165,7 @@ export const createLog = (
       log(content, prefix, Color.Green, success ?? defaultSuccess, false),
     info: (content: string) =>
       log(content, prefix, Color.Cyan, info ?? defaultInfo, false),
+    report: (content: string) =>
+      log(content, prefix, Color.Violet, defaultReport, false),
   };
 };

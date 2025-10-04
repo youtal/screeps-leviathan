@@ -7,4 +7,11 @@ export const DEFAULT_LOG_CONFIG = {
   error: true,
   success: false,
   info: false,
+  report: true,
 };
+
+/**
+ * 默认不启用Profiler
+ */
+
+export const DEFAULT_PROFILER_ENABLE = false;
