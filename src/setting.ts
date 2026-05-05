@@ -15,3 +15,5 @@ export const DEFAULT_LOG_CONFIG = {
  */
 
 export const DEFAULT_PROFILER_ENABLE = false;
+
+export const MAX_GROUP_EVENTBUS_TTL = 15000;

@@ -26,8 +26,5 @@ const eventList = {
   combatDefeat: `${eventCategory.Combat}:defeat`,
 } as const;
 
-declare global {
-  let EventList: typeof eventList;
-}
 
 export { eventCategory, eventList };

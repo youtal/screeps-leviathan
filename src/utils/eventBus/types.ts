@@ -6,13 +6,13 @@ interface EventDataMap {
     resourceType: ResourceConstant;
     amount: number;
     from: Id<ObjectWithStore>;
-    to: Id<ObjectWithStore>;
+    to?: Id<ObjectWithStore>;
   };
   [eventCategory.Creep]: {
     creepName: string;
   };
   [eventCategory.Structure]: {
-    structureId: Id<Structure>;
+    id: Id<Structure>| Id<Ruin>;
   };
   [eventCategory.Room]: {
     roomName: string;
@@ -28,6 +28,7 @@ export type ListenersMap = Map<EventType, Map<string, (data: any) => void>>;
 export interface ListenersStore {
   global: ListenersMap;
   rooms: Map<string, ListenersMap>;
+  group: Map<string, ListenersMap>;
 }
 
 export type EventType = (typeof eventList)[keyof typeof eventList];
