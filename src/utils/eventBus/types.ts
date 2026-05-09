@@ -1,27 +1,44 @@
-import { eventCategory, eventList } from './constants';
+import { eventList } from './constants';
 import { createBus } from './createBus';
 
-interface EventDataMap {
-  [eventCategory.Resource]: {
+type ResourceEventData = {
     resourceType: ResourceConstant;
     amount: number;
     from: Id<ObjectWithStore>;
     to?: Id<ObjectWithStore>;
-  };
-  [eventCategory.Creep]: {
-    creepName: string;
-  };
-  [eventCategory.Structure]: {
-    id: Id<Structure>| Id<Ruin>;
-  };
-  [eventCategory.Room]: {
-    roomName: string;
-  };
-  [eventCategory.Combat]: {
+};
+
+type EventDataMap = {
+  [eventList.resourceLow]: ResourceEventData;
+  [eventList.resourceTransfer]: ResourceEventData;
+  [eventList.resourceHarvest]: ResourceEventData;
+  [eventList.creepSpawn]: { creepName: string };
+  [eventList.creepDeath]: { creepName: string };
+  [eventList.structureBuilt]: { structureId: Id<Structure> };
+  [eventList.structureDamaged]: { structureId: Id<Structure> };
+  [eventList.structureDestroyed]: { structureId: Id<Structure> | Id<Ruin> };
+  [eventList.roomClaimed]: { roomName: string };
+  [eventList.roomScouted]: { roomName: string };
+  [eventList.roomLevelUp]: { roomName: string };
+  [eventList.roomLevelDown]: { roomName: string };
+  [eventList.roomLost]: { roomName: string };
+  [eventList.combatStarted]: {
     roomName: string;
     warType: 'defense' | 'invasion' | 'raid';
   };
-}
+  [eventList.combatEnded]: {
+    roomName: string;
+    warType: 'defense' | 'invasion' | 'raid';
+  };
+  [eventList.combatVictory]: {
+    roomName: string;
+    warType: 'defense' | 'invasion' | 'raid';
+  };
+  [eventList.combatDefeat]: {
+    roomName: string;
+    warType: 'defense' | 'invasion' | 'raid';
+  };
+};
 
 export type ListenersMap = Map<EventType, Map<string, (data: any) => void>>;
 
@@ -33,9 +50,6 @@ export interface ListenersStore {
 
 export type EventType = (typeof eventList)[keyof typeof eventList];
 
-type ExtractBase<T> = T extends `${infer B}:${infer _}` ? B : never;
-
-export type DataByEvent<T extends EventType = EventType> =
-  EventDataMap[ExtractBase<T>];
+export type DataByEvent<T extends EventType = EventType> = EventDataMap[T];
 
 export type Bus = ReturnType<typeof createBus>;

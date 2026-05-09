@@ -33,18 +33,24 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
       );
     }
 
-    const cache: CachedMap = {} as any;
+    const cache: Partial<CachedMap> = {};
 
     //将房间内的所有建筑按类型分组
-    const grouped = _.groupBy(room.find(FIND_STRUCTURES), 'structureType');
-    Object.assign(grouped, {
+    const grouped = {
+      ...(_.groupBy(room.find(FIND_STRUCTURES), 'structureType') as Partial<
+        Record<STRUCTURE_KEY, Structure[]>
+      >),
       source: room.find(FIND_SOURCES),
       mineral: room.find(FIND_MINERALS),
-    });
+    };
 
     //将各结构id存入缓存
-    Object.keys(grouped).forEach((key) => {
-      cache[key] = grouped[key].map((s) => s.id);
+    const setCache = <K extends keyof CachedMap>(key: K, ids: CachedMap[K]) => {
+      cache[key] = ids;
+    };
+
+    (Object.keys(grouped) as (keyof typeof grouped)[]).forEach((key) => {
+      setCache(key, grouped[key]!.map((s) => s.id) as CachedMap[typeof key]);
     });
 
     //更新缓存
@@ -95,7 +101,7 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
     key: K,
     roomName: string,
     isSingle?: boolean
-  ): CachedObject<K> | CachedObject<K>[] => {
+  ): CachedObject<K> | CachedObject<K>[] | undefined | null => {
     //先检查房间是否有视野
     if (!getRoom(roomName)) {
       log.error(

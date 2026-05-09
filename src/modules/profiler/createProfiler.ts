@@ -2,7 +2,7 @@ import { ProfilerContext, Profiler } from './types';
 import { createMemoryAccessor } from './memory';
 import { Wrap } from '@/utils';
 
-export const createProfiler = (context: ProfilerContext): Profiler => {
+export const createProfiler = (context: ProfilerContext): Profiler | null => {
   let { getMemory, enable: enableProfiler } = context;
   const { log, getGame } = context.env;
 
@@ -21,7 +21,10 @@ export const createProfiler = (context: ProfilerContext): Profiler => {
   const stack: { label: string; start: number; childTime: number }[] = [];
 
   //核心实现，用于包裹函数
-  const wrap: Wrap = <T extends (...args: any[]) => any>(label, fn: T) => {
+  const wrap: Wrap = <T extends (...args: any[]) => any>(
+    label: string,
+    fn: T
+  ) => {
     if (!enableProfiler) return fn;
     if (usedLabel[label]) {
       log.warn(`Profiler: label "${label}" 已被使用，未执行包裹`);

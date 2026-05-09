@@ -1,11 +1,19 @@
 {
   "compilerOptions": {
-    "target": "es2019",
-    "ignoreDeprecations": "5.0",
+    "target": "es2022",
     "outDir": "dist/",
     "sourceMap": true,
     "removeComments": true,
     "allowSyntheticDefaultImports": true,
+    "moduleResolution": "node",
+    "baseUrl": ".",
+    "ignoreDeprecations": "6.0",
+    "types": [
+      "screeps",
+      "lodash",
+      "node",
+      "jest"
+    ],
     "paths": {
       "@/*": [
         "./src/*"
@@ -32,6 +40,5 @@
   "include": [
     "./src/",
     "./test/"
-  ],
-  "types":["screeps","node", "jest"]
+  ]
 }

@@ -74,9 +74,9 @@ interface CachedMap {
 }
 
 interface ShortcutsCache {
-  [roomName: string]: {
+  [roomName: string]: Partial<{
     [key in ALL_CACHED_KEY]: CachedMap[key];
-  };
+  }>;
 }
 
 export {

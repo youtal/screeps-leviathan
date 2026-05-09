@@ -17,20 +17,9 @@ export const createBus = () => {
     roomName?: string
   ) => {
     if (roomName !== undefined) {
-      if (!store.rooms.has(roomName)) {
-        store.rooms.set(roomName, new Map());
-      }
-      const roomListeners = store.rooms.get(roomName)!;
-      if (!roomListeners.has(eventType)) {
-        roomListeners.set(eventType, new Map());
-      }
-      //如果已经存在同名订阅者，发出警告
-      if (roomListeners.get(eventType)!.has(subscriber)) {
-        log.warn(
-          `event ${eventType} already has subscriber ${subscriber} in room ${roomName}, subscriber will be overwritten`
-        );
-      }
-      roomListeners.get(eventType)!.set(subscriber, listener);
+      subscribeByRoom(eventType, subscriber, listener, roomName);
+    } else {
+      subscribeByGlobal(eventType, subscriber, listener);
     }
   };
 

@@ -7,7 +7,7 @@ const staticMethods: Omit<EnvMethods, 'log'> = {
   getFlag: (flagName: string) => Game.flags[flagName],
   getCreep: (creepName: string) => Game.creeps[creepName],
   getPowerCreep: (powerCreepName: string) => Game.powerCreeps[powerCreepName],
-  getObjectById: Game.getObjectById,
+  getObjectById: (id: Id<_HasId>) => Game.getObjectById(id),
 };
 
 export const createEnvMethods = (
