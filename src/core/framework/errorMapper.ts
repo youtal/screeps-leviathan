@@ -1,2 +1,2 @@
 import { SourceMapConsumer } from 'source-map';
-import { dyeRed } from '@/utils';
+import { dyeRed } from '@/utils/console';

@@ -1,3 +1,3 @@
-import { createBus } from '@/utils';
+import { createBus } from '@/core/eventBus';
 
 export const bus = createBus();

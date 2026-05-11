@@ -1,5 +1,4 @@
-import { createBus } from '@utils/eventBus';
-import { eventList } from '@utils/eventBus/constants';
+import { createBus } from '@/core/eventBus';
 
 describe('EventBus', () => {
   afterEach(() => {
@@ -9,7 +8,7 @@ describe('EventBus', () => {
   it('should subscribe and publish global events', () => {
     const bus = createBus();
     const mockListener = jest.fn();
-    const event = eventList.creepSpawn;
+    const event = 'creep:spawn';
     const data = { creepName: 'testCreep' };
 
     bus.subscribe(event, 'testSubscriber', mockListener);
@@ -22,7 +21,7 @@ describe('EventBus', () => {
   it('should subscribe and publish room-specific events', () => {
     const bus = createBus();
     const mockListener = jest.fn();
-    const event = eventList.resourceTransfer;
+    const event = 'resource:transfer';
     const roomName = 'W1N1';
     const data = {
       resourceType: 'energy' as ResourceConstant,
@@ -42,7 +41,7 @@ describe('EventBus', () => {
     const bus = createBus();
     const globalListener = jest.fn();
     const roomListener = jest.fn();
-    const event = eventList.structureDestroyed;
+    const event = 'structure:destroyed';
     const roomName = 'W1N1';
     const data = { structureId: 'sid1' as Id<Structure> };
 
@@ -57,7 +56,7 @@ describe('EventBus', () => {
   it('should unsubscribe from global events', () => {
     const bus = createBus();
     const mockListener = jest.fn();
-    const event = eventList.creepSpawn;
+    const event = 'creep:spawn';
     const data = { creepName: 'abc' };
 
     bus.subscribe(event, 'sub', mockListener);
@@ -70,7 +69,7 @@ describe('EventBus', () => {
   it('should unsubscribe from room-specific events', () => {
     const bus = createBus();
     const mockListener = jest.fn();
-    const event = eventList.resourceTransfer;
+    const event = 'resource:transfer';
     const roomName = 'W1N2';
     const data = {
       resourceType: 'energy' as ResourceConstant,
@@ -88,14 +87,14 @@ describe('EventBus', () => {
 
   it('should handle publishing to an event with no subscribers (global)', () => {
     const bus = createBus();
-    const event = eventList.combatStarted;
+    const event = 'combat:started';
     const data = { roomName: 'W2N2', warType: 'invasion' as const };
     expect(() => bus.publish(event, data)).not.toThrow();
   });
 
   it('should handle publishing to an event with no subscribers (room)', () => {
     const bus = createBus();
-    const event = eventList.combatEnded;
+    const event = 'combat:ended';
     const data = { roomName: 'W3N3', warType: 'defense' as const };
     expect(() => bus.publish(event, data, 'NO_ROOM')).not.toThrow();
   });
@@ -104,7 +103,7 @@ describe('EventBus', () => {
     const bus = createBus();
     const listener1 = jest.fn();
     const listener2 = jest.fn();
-    const event = eventList.creepSpawn;
+    const event = 'creep:spawn';
     const data = { creepName: 'dupCreep' };
 
     const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
@@ -125,7 +124,7 @@ describe('EventBus', () => {
 
   it('should continue notifying other subscribers if one throws', () => {
     const bus = createBus();
-    const event = eventList.creepDeath;
+    const event = 'creep:death';
     const bad = jest.fn(() => {
       throw new Error('boom');
     });

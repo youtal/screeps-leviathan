@@ -1,6 +1,5 @@
 import { EventType, DataByEvent, ListenersStore, ListenersMap } from './types';
-import { createLog } from '@/utils';
-import {MAX_GROUP_EVENTBUS_TTL} from '@/setting';
+import { createLog } from '@/utils/console';
 
 export const createBus = () => {
   const log = createLog('EventBus', {});
@@ -37,7 +36,7 @@ export const createBus = () => {
     if (eventListeners.has(subscriber)) {
       log.warn(`event ${eventType} already has subscriber ${subscriber} in global, subscriber will be overwritten`);
     }
-    eventListeners.set(subscriber, listener);
+    eventListeners.set(subscriber, listener as (data: unknown) => void);
     log.info(`subscribe ${subscriber} to event ${eventType} in global`);
   };
 
@@ -68,7 +67,9 @@ export const createBus = () => {
     }
 
     //将订阅者添加到订阅列表中
-    roomListeners.get(eventType)!.set(subscriber, listener);
+    roomListeners
+      .get(eventType)!
+      .set(subscriber, listener as (data: unknown) => void);
     log.info(`subscribe ${subscriber} to event ${eventType} in room ${roomName}`);
   }
 
@@ -99,7 +100,9 @@ export const createBus = () => {
     }
     
     //将订阅者添加到订阅列表中
-    groupListeners.get(eventType)!.set(subscriber, listener);
+    groupListeners
+      .get(eventType)!
+      .set(subscriber, listener as (data: unknown) => void);
     log.info(`subscribe ${subscriber} to event ${eventType} in group ${groupName}`);
   }
     

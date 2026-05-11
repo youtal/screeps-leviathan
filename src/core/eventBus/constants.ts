@@ -1,3 +1,5 @@
+import type { EventType } from './types';
+
 const eventCategory = {
   Resource: 'resource',
   Creep: 'creep',
@@ -24,7 +26,7 @@ const eventList = {
   combatEnded: `${eventCategory.Combat}:ended`,
   combatVictory: `${eventCategory.Combat}:victory`,
   combatDefeat: `${eventCategory.Combat}:defeat`,
-} as const;
+} as const satisfies Record<string, EventType>;
 
 
 export { eventCategory, eventList };

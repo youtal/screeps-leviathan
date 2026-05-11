@@ -1,5 +1,5 @@
 import { Record, ProfilerMemory } from './types';
-import { createLog } from '@/utils';
+import { createLog } from '@/utils/console';
 
 export const createMemoryAccessor = (
   getMemory: () => ProfilerMemory,

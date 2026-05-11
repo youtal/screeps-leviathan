@@ -1,5 +1,5 @@
 import { createEnvMethods } from '@/utils';
-import { createProfiler, ProfilerMemory } from '@/modules/profiler';
+import { createProfiler, ProfilerMemory } from '@/core/profiler';
 import { DEFAULT_PROFILER_ENABLE } from '@/setting';
 
 declare global {

@@ -7,7 +7,6 @@ import {
   ALL_CACHED_KEY,
   CachedObject,
 } from './types';
-import { eventList } from '@/utils/eventBus/constants';
 
 export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
   const { getRoom, getObjectById, log } = opt.env;
@@ -58,7 +57,7 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
     initedRooms[roomName] = true;
     //订阅建筑建造事件
     bus.subscribe(
-      eventList.structureBuilt,
+      'structure:built',
       'roomShortcuts',
       (data) => updateStructure(data.structureId),
       roomName

@@ -1,4 +1,4 @@
-import { HasWrap, EnvContext } from '@/utils';
+import { HasWrap, EnvContext } from '@/utils/types';
 
 interface Profiler extends HasWrap {
   enable(): void;

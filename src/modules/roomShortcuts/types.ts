@@ -1,4 +1,5 @@
-import { EnvContext, Bus } from '@/utils';
+import { EnvContext } from '@/utils';
+import { Bus } from '@/core/eventBus';
 
 interface RoomShortcutsOpt extends EnvContext {
   bus: Bus;
