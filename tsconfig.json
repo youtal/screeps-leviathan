@@ -1,12 +1,10 @@
 {
   "compilerOptions": {
-    "target": "es2022",
+    "target": "es2017",
     "outDir": "dist/",
     "sourceMap": true,
     "removeComments": true,
     "allowSyntheticDefaultImports": true,
-    "module": "esnext",
-    "moduleResolution": "node16",
     "ignoreDeprecations": "6.0",
     "types": [
       "screeps",
