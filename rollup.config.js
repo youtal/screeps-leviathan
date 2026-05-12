@@ -64,7 +64,10 @@ export default {
       },
     }),
     // 编译 ts
-    typescript({ tsconfig: "./tsconfig.json" }),
+    typescript({
+      tsconfig: "./tsconfig.json",
+      include: ["src/**/*.ts"],
+    }),
     // 执行上传或者复制
     deployPlugin,
   ],
