@@ -1,7 +1,16 @@
-import { ProfilerContext, Profiler } from './types';
+import type { ProfilerContext, Profiler } from './types';
 import { createMemoryAccessor } from './memory';
-import { Wrap } from '@/utils/types';
+import type { Wrap } from '@/core/runtime/types';
 
+/**
+ * 创建性能统计器。
+ *
+ * Profiler 的核心思路是用 wrap 包裹函数，在函数执行前后读取
+ * Game.cpu.getUsed，并把结果累计到 ProfilerMemory 中。
+ *
+ * 它支持嵌套调用：子调用耗时会累加到父调用的 childTime，父调用的
+ * selfTime 会扣除这部分时间，从而区分“自身耗时”和“包含子调用的总耗时”。
+ */
 export const createProfiler = (context: ProfilerContext): Profiler | null => {
   let { getMemory, enable: enableProfiler } = context;
   const { log, getGame } = context.env;
@@ -17,10 +26,28 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
   const disable = () => (enableProfiler = false);
   const reset = () => db.clear();
 
+  /**
+   * 已使用的 label 集合。
+   *
+   * 同一个 label 被重复 wrap 会让统计结果难以理解，因此这里选择拒绝二次包裹，
+   * 并返回原函数。若未来需要支持同名函数，可以在 label 层引入模块前缀。
+   */
   const usedLabel: Record<string, boolean> = {};
+
+  /**
+   * 当前调用栈。
+   *
+   * 每进入一个被包裹函数就 push 一条记录；finally 中 pop 并计算耗时。
+   * childTime 用于记录 profiler 能感知到的子调用耗时。
+   */
   const stack: { label: string; start: number; childTime: number }[] = [];
 
-  //核心实现，用于包裹函数
+  /**
+   * 包裹函数并返回同签名函数。
+   *
+   * enableProfiler 在执行时判断，而不是 wrap 时判断。这样 enable/disable
+   * 可以影响已经包裹过的函数。
+   */
   const wrap: Wrap = <T extends (...args: any[]) => any>(
     label: string,
     fn: T
@@ -31,6 +58,11 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
     }
     usedLabel[label] = true;
     return ((...args: any[]) => {
+      /**
+       * 禁用状态下直接执行原函数。
+       *
+       * 仍然返回 wrapper，是为了让 enable/disable 对已包裹函数即时生效。
+       */
       if (!enableProfiler) return fn(...args);
 
       //将本层调用信息入栈
@@ -41,6 +73,11 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
         //执行被包裹的函数
         return fn(...args);
       } finally {
+        /**
+         * 使用 finally 保证原函数抛错时也能正确出栈。
+         *
+         * 这避免一次异常污染整个 profiler 调用栈，后续统计仍然可靠。
+         */
         //出栈，并计算时间
         const end = getGame().cpu.getUsed();
         const record = stack.pop()!;
@@ -58,7 +95,12 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
     }) as T;
   };
 
-  //TODO: 实现细节输出与一般输出
+  /**
+   * 输出 profiler 报告。
+   *
+   * filter 存在时只输出单个 label；否则按 selfTime 降序输出全部记录。
+   * detailed 参数目前预留，后续可以用于输出调用树或更细粒度信息。
+   */
   const report = (detailed = false, filter = ''): void => {
     if (filter) {
       log.info(`Profiler 报告 (过滤器: ${filter})`);

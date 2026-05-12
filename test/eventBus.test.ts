@@ -11,18 +11,19 @@ describe('EventBus', () => {
     const event = 'creep:spawn';
     const data = { creepName: 'testCreep' };
 
-    bus.subscribe(event, 'testSubscriber', mockListener);
-    bus.publish(event, data);
+    bus.subscribe({ scope: 'global' }, event, 'testSubscriber', mockListener);
+    bus.publish({ scope: 'global' }, event, data);
 
     expect(mockListener).toHaveBeenCalledTimes(1);
     expect(mockListener).toHaveBeenCalledWith(data);
   });
 
-  it('should subscribe and publish room-specific events', () => {
+  it('should publish room events to room and global subscribers', () => {
     const bus = createBus();
-    const mockListener = jest.fn();
+    const globalListener = jest.fn();
+    const roomListener = jest.fn();
+    const otherRoomListener = jest.fn();
     const event = 'resource:transfer';
-    const roomName = 'W1N1';
     const data = {
       resourceType: 'energy' as ResourceConstant,
       amount: 100,
@@ -30,27 +31,74 @@ describe('EventBus', () => {
       to: 'id2' as Id<ObjectWithStore>,
     };
 
-    bus.subscribe(event, 'roomSub', mockListener, roomName);
-    bus.publish(event, data, roomName);
+    bus.subscribe({ scope: 'global' }, event, 'globalSub', globalListener);
+    bus.subscribe(
+      { scope: 'room', roomName: 'W1N1' },
+      event,
+      'roomSub',
+      roomListener
+    );
+    bus.subscribe(
+      { scope: 'room', roomName: 'W2N2' },
+      event,
+      'otherRoomSub',
+      otherRoomListener
+    );
 
-    expect(mockListener).toHaveBeenCalledTimes(1);
-    expect(mockListener).toHaveBeenCalledWith(data);
+    bus.publish({ scope: 'room', roomName: 'W1N1' }, event, data);
+
+    expect(globalListener).toHaveBeenCalledWith(data);
+    expect(roomListener).toHaveBeenCalledWith(data);
+    expect(otherRoomListener).not.toHaveBeenCalled();
   });
 
-  it('should not notify global listeners for room-specific events', () => {
+  it('should publish global events only to global subscribers', () => {
     const bus = createBus();
     const globalListener = jest.fn();
     const roomListener = jest.fn();
     const event = 'structure:destroyed';
-    const roomName = 'W1N1';
     const data = { structureId: 'sid1' as Id<Structure> };
 
-    bus.subscribe(event, 'globalSub', globalListener);
-    bus.subscribe(event, 'roomSub', roomListener, roomName);
-    bus.publish(event, data, roomName);
+    bus.subscribe({ scope: 'global' }, event, 'globalSub', globalListener);
+    bus.subscribe(
+      { scope: 'room', roomName: 'W1N1' },
+      event,
+      'roomSub',
+      roomListener
+    );
+    bus.publish({ scope: 'global' }, event, data);
 
+    expect(globalListener).toHaveBeenCalledWith(data);
+    expect(roomListener).not.toHaveBeenCalled();
+  });
+
+  it('should publish group events only to matching group subscribers', () => {
+    const bus = createBus();
+    const groupListener = jest.fn();
+    const otherGroupListener = jest.fn();
+    const globalListener = jest.fn();
+    const event = 'combat:started';
+    const data = { roomName: 'W1N1', warType: 'raid' as const };
+
+    bus.subscribe({ scope: 'global' }, event, 'globalSub', globalListener);
+    bus.subscribe(
+      { scope: 'group', groupId: 'squad-alpha' },
+      event,
+      'groupSub',
+      groupListener
+    );
+    bus.subscribe(
+      { scope: 'group', groupId: 'squad-beta' },
+      event,
+      'otherGroupSub',
+      otherGroupListener
+    );
+
+    bus.publish({ scope: 'group', groupId: 'squad-alpha' }, event, data);
+
+    expect(groupListener).toHaveBeenCalledWith(data);
+    expect(otherGroupListener).not.toHaveBeenCalled();
     expect(globalListener).not.toHaveBeenCalled();
-    expect(roomListener).toHaveBeenCalledWith(data);
   });
 
   it('should unsubscribe from global events', () => {
@@ -59,9 +107,9 @@ describe('EventBus', () => {
     const event = 'creep:spawn';
     const data = { creepName: 'abc' };
 
-    bus.subscribe(event, 'sub', mockListener);
-    bus.unsubscribe(event, 'sub');
-    bus.publish(event, data);
+    bus.subscribe({ scope: 'global' }, event, 'sub', mockListener);
+    bus.unsubscribe({ scope: 'global' }, event, 'sub');
+    bus.publish({ scope: 'global' }, event, data);
 
     expect(mockListener).not.toHaveBeenCalled();
   });
@@ -70,36 +118,32 @@ describe('EventBus', () => {
     const bus = createBus();
     const mockListener = jest.fn();
     const event = 'resource:transfer';
-    const roomName = 'W1N2';
     const data = {
       resourceType: 'energy' as ResourceConstant,
       amount: 50,
       from: 'id3' as Id<ObjectWithStore>,
       to: 'id4' as Id<ObjectWithStore>,
     };
+    const scope = { scope: 'room', roomName: 'W1N2' } as const;
 
-    bus.subscribe(event, 'roomSub', mockListener, roomName);
-    bus.unsubscribe(event, 'roomSub', roomName);
-    bus.publish(event, data, roomName);
+    bus.subscribe(scope, event, 'roomSub', mockListener);
+    bus.unsubscribe(scope, event, 'roomSub');
+    bus.publish(scope, event, data);
 
     expect(mockListener).not.toHaveBeenCalled();
   });
 
-  it('should handle publishing to an event with no subscribers (global)', () => {
-    const bus = createBus();
-    const event = 'combat:started';
-    const data = { roomName: 'W2N2', warType: 'invasion' as const };
-    expect(() => bus.publish(event, data)).not.toThrow();
-  });
-
-  it('should handle publishing to an event with no subscribers (room)', () => {
+  it('should handle publishing to an event with no subscribers', () => {
     const bus = createBus();
     const event = 'combat:ended';
     const data = { roomName: 'W3N3', warType: 'defense' as const };
-    expect(() => bus.publish(event, data, 'NO_ROOM')).not.toThrow();
+
+    expect(() =>
+      bus.publish({ scope: 'room', roomName: 'NO_ROOM' }, event, data)
+    ).not.toThrow();
   });
 
-  it('should warn (log) when overwriting a subscriber (global)', () => {
+  it('should warn when overwriting a subscriber', () => {
     const bus = createBus();
     const listener1 = jest.fn();
     const listener2 = jest.fn();
@@ -108,16 +152,15 @@ describe('EventBus', () => {
 
     const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 
-    bus.subscribe(event, 'dupSub', listener1);
-    bus.subscribe(event, 'dupSub', listener2); // overwrite
+    bus.subscribe({ scope: 'global' }, event, 'dupSub', listener1);
+    bus.subscribe({ scope: 'global' }, event, 'dupSub', listener2);
 
-    // 查找包含 already has subscriber 的日志
     const matched = logSpy.mock.calls.some((c) =>
       c.join(' ').includes('already has subscriber')
     );
     expect(matched).toBe(true);
 
-    bus.publish(event, data);
+    bus.publish({ scope: 'global' }, event, data);
     expect(listener1).not.toHaveBeenCalled();
     expect(listener2).toHaveBeenCalledWith(data);
   });
@@ -133,10 +176,10 @@ describe('EventBus', () => {
 
     const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 
-    bus.subscribe(event, 'bad', bad);
-    bus.subscribe(event, 'good', good);
+    bus.subscribe({ scope: 'global' }, event, 'bad', bad);
+    bus.subscribe({ scope: 'global' }, event, 'good', good);
 
-    expect(() => bus.publish(event, data)).not.toThrow();
+    expect(() => bus.publish({ scope: 'global' }, event, data)).not.toThrow();
     expect(bad).toHaveBeenCalled();
     expect(good).toHaveBeenCalledWith(data);
 

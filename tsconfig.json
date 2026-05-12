@@ -5,6 +5,8 @@
     "sourceMap": true,
     "removeComments": true,
     "allowSyntheticDefaultImports": true,
+    "moduleResolution": "node",
+    "baseUrl": ".",
     "ignoreDeprecations": "6.0",
     "types": [
       "screeps",

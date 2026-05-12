@@ -1,4 +1,3 @@
-import { bus } from '@/instance';
 import {
   RoomShortcutsOpt,
   ShortcutsCache,
@@ -9,6 +8,7 @@ import {
 } from './types';
 
 export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
+  const { bus } = opt;
   const { getRoom, getObjectById, log } = opt.env;
   const { forceReInit = false } = opt;
 
@@ -57,10 +57,10 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
     initedRooms[roomName] = true;
     //订阅建筑建造事件
     bus.subscribe(
+      { scope: 'room', roomName },
       'structure:built',
       'roomShortcuts',
-      (data) => updateStructure(data.structureId),
-      roomName
+      (data) => updateStructure(data.structureId)
     );
     log.info(`Room ${roomName} shortcuts initialized.`);
   };

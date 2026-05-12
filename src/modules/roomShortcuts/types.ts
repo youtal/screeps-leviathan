@@ -1,8 +1,6 @@
-import { EnvContext } from '@/utils';
-import { Bus } from '@/core/eventBus';
+import type { ModuleContext } from '@/core/runtime/types';
 
-interface RoomShortcutsOpt extends EnvContext {
-  bus: Bus;
+interface RoomShortcutsOpt extends ModuleContext {
   forceReInit?: boolean;
 }
 
