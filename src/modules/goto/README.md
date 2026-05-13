@@ -17,7 +17,8 @@
 
 - 支持同房和跨房移动。
 - 支持跨房 A* 路线搜索。
-- 支持按房间、按房间边界调整通行成本和通行状态。
+- 支持按房间、按房间边界调整通行成本和通行状态，并支持**持久化到 Memory**。
+- 支持有向边权重，即 A->B 与 B->A 的通行成本可独立设置。
 - 支持每个房间 4 套基础 CostMatrix。
 - 支持 CostMatrix 二次加工，降低热门结构周围拥堵。
 - 支持基于 Flow Field 的房内移动。
@@ -28,7 +29,9 @@
 - 支持 tick 间移动结果检查和 stuck 统计。
 - 支持 debug 信息和可选房间可视化。
 
-所有缓存只存在于 heap 中。模块不将 CostMatrix、Flow Field、跨房路径或避让请求持久化到 `Memory`。脚本重新载入后，模块从空缓存开始运行，避免继承上一次 global 生命周期中的副作用。
+**持久化说明**：
+- 用户手动定义的房间偏好、边界（有向边）偏好存储在 `Memory` 中，确保在脚本重启或 global reset 后依然有效。
+- 所有的性能开销项（CostMatrix、Flow Field、跨房路径缓存、避让请求等）只存在于 heap 中。脚本重新载入后，这些数据从空缓存开始运行，避免继承上一次 global 生命周期中的副作用。
 
 ## 3. 模块结构
 
@@ -135,12 +138,12 @@ type GotoTarget =
 
 ```ts
 interface GotoOptions {
+  /** 目标范围。到达距离目标该范围内的位置即视为到达。默认为 0。 */
   range?: number;
+  /** 跨房间搜索的最大房间数量。默认为 16。 */
   maxRooms?: number;
+  /** 是否允许跨房间寻路。 */
   allowCrossRoom?: boolean;
-
-  roomProfile?: string;
-  matrixProfile?: string;
 
   /**
    * 是否允许用现有流场构建新流场。
@@ -160,18 +163,28 @@ interface GotoOptions {
    */
   considerSwamps?: boolean;
 
+  /** 是否避开有敌对建筑或控制者的房间。 */
   avoidHostileRooms?: boolean;
+  /** 是否在寻路时尝试避开敌对 creep。 */
   avoidHostileCreeps?: boolean;
+  /** 是否避开 Source Keeper 房间。 */
   avoidKeeperRooms?: boolean;
+  /** 寻路时是否忽略其它 creep。注意这不影响移动时的动态碰撞检查。 */
   ignoreCreeps?: boolean;
 
+  /** 强制重新寻路的间隔时间（ticks）。 */
   repathInterval?: number;
+  /** 判定为卡住（stuck）的连续 tick 数阈值。 */
   stuckThreshold?: number;
 
+  /** 是否允许向阻挡自己的 creep 发出避让请求。 */
   allowAvoidanceRequest?: boolean;
+  /** 避让策略名称。决定当自己被别人请求避让时使用的决策逻辑。 */
   avoidancePolicy?: string;
 
+  /** 是否开启房间可视化渲染。 */
   visualize?: boolean;
+  /** 是否开启调试日志输出。 */
   debug?: boolean;
 }
 ```
@@ -258,24 +271,31 @@ W/E 与 N/S 边界不存在 `-0` 房间。解析与反解析必须使用同一�
 
 ### 5.3 房间偏好
 
+用户可以通过接口设置房间或边界的通行权重，这些信息将持久化存储在 `Memory` 中。
+
 ```ts
 interface RoomPreference {
+  /** 是否可通行。false 时寻路算法将完全避开该房间。 */
   passable?: boolean;
+  /** 通行成本倍率。默认 1.0。 */
   cost?: number;
+  /** 是否尽量避开。 */
   avoid?: boolean;
   reason?: string;
-  expiresAt?: number;
 }
 
 interface BoundaryPreference {
+  /** 该方向是否可通行。 */
   passable?: boolean;
+  /** 该方向的通行成本权重。 */
   cost?: number;
   reason?: string;
-  expiresAt?: number;
 }
 ```
 
-房间偏好描述某个房间整体是否可走、是否危险、是否应尽量绕开。边界偏好描述两个相邻房间之间的出口是否可走、是否被墙或敌方单位封锁。
+房间偏好描述某个房间整体是否可走、是否危险、是否应尽量绕开。
+
+**有向边界偏好**描述从房间 A 到房间 B 的特定出口是否可走。存储在 Memory 中时，以 `${fromRoom}->${toRoom}` 作为 key，实现非对称的通行控制。
 
 ### 5.4 跨房路线缓存
 
@@ -295,7 +315,7 @@ interface CachedRoomRoute {
 缓存 key：
 
 ```text
-startRoom -> targetRoom + roomProfile + preferenceVersion
+startRoom -> targetRoom + preferenceVersion
 ```
 
 失效条件：
@@ -314,7 +334,6 @@ CostMatrix 由以下维度决定：
 
 ```text
 roomName
-matrixProfile
 considerRoads
 considerSwamps
 eventStamp
@@ -351,7 +370,6 @@ CostMatrix 缓存值记录生成时的 `eventStamp`：
 interface CachedCostMatrix {
   matrix: CostMatrix;
   roomName: string;
-  profile: string;
   considerRoads: boolean;
   considerSwamps: boolean;
   eventStamp: number;
@@ -440,7 +458,7 @@ CostMatrix 缓存只存在 heap 中：
 
 ```ts
 type CostMatrixKey =
-  `${string}:${string}:roads=${boolean}:swamps=${boolean}:stamp=${number}`;
+  `${string}:roads=${boolean}:swamps=${boolean}:stamp=${number}`;
 ```
 
 清理规则：
@@ -460,7 +478,6 @@ interface FlowField {
   roomName: string;
   targetKey: string;
   range: number;
-  matrixProfile: string;
   considerRoads: boolean;
   considerSwamps: boolean;
   costMatrixEventStamp: number;
@@ -728,11 +745,11 @@ fallback 用于保证模块在缓存失效、流场构建失败或特殊地形�
 
 fallback 路径只做短期 heap 缓存，TTL 很短，并且不写入 Memory。
 
-## 11. 缓存管理
+## 11. 缓存与持久化管理
 
-### 11.1 缓存范围
+### 11.1 缓存范围 (Heap)
 
-模块维护以下 heap 缓存：
+模块维护以下 heap 缓存，脚本重载后清空：
 
 - `roomRouteCache`
 - `costMatrixCache`
@@ -742,9 +759,14 @@ fallback 路径只做短期 heap 缓存，TTL 很短，并且不写入 Memory。
 - `blockedStats`
 - `debugStats`
 
-这些缓存不进入 `Memory`。脚本重载后缓存全部清空。
+### 11.2 持久化数据 (Memory)
 
-### 11.2 缓存上限
+以下数据存储在 `Memory` 中，用于跨 global 生命周期保留用户配置：
+
+- `roomPreferences`: 房间通行成本与可见性偏好。
+- `boundaryPreferences`: 房间间有向边的通行偏好。
+
+### 11.3 缓存上限与清理
 
 ```ts
 interface CacheLimits {
@@ -810,6 +832,7 @@ interface GotoDebugInfo {
 `goto` 复用当前项目基础设施：
 
 - 使用 `ModuleContext.env` 访问 `Game`、`Room`、`getObjectById` 和日志。
+- **Memory 挂载**：模块需要访问 `Memory.goto`（或其它指定位置）以读写持久化的房间与边界偏好。
 - 使用 `bus.subscribe` 监听建筑相关事件，并更新 CostMatrix 事件戳。
 - 使用 `profiler.wrap` 包裹 A*、CostMatrix 构建、Flow Field 构建等高 CPU 函数。
 - 使用 `src/utils/priorityQueue.ts` 实现 A* 与 Dijkstra。
