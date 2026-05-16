@@ -24,7 +24,7 @@
 - 支持基于 Flow Field 的房内移动。
 - 支持强制完整建场，禁用现有流场复用。
 - 支持 Flow Field 缓存、TTL、质量分数和活跃时间清理。
-- 支持 CostMatrix 事件戳与 Flow Field 生成时间的双重失效。
+- 支持 `updateCostMatrix` 主动失效与 Flow Field TTL 的双重失效。
 - 支持 creep 阻塞检测、避让请求与避让策略注册。
 - 支持 tick 间移动结果检查和 stuck 统计。
 - 支持 debug 信息和可选房间可视化。
@@ -55,6 +55,7 @@ src/modules/goto/
     flowFieldCache.ts
     compression.ts
     reuse.ts
+    reuseIndex.ts
   movement/
     goto.ts
     step.ts
@@ -80,7 +81,7 @@ export const createGoto = (context: ModuleContext, config?: GotoConfig) => {
     unregisterAvoidance,
     setRoomPreference,
     setRoomBoundaryPreference,
-    invalidateRoom,
+    updateCostMatrix,
     getDebugInfo,
   };
 };
@@ -117,9 +118,17 @@ interface GotoModule {
     preference: BoundaryPreference
   ): void;
 
-  invalidateRoom(roomName: string, reason?: string): void;
+  updateCostMatrix(
+    roomName: string,
+    options?: CostMatrixUpdateOptions
+  ): void;
 
   getDebugInfo(): GotoDebugInfo;
+}
+
+interface CostMatrixUpdateOptions {
+  reason?: string;
+  critical?: boolean;
 }
 ```
 
@@ -171,16 +180,6 @@ interface GotoOptions {
   avoidKeeperRooms?: boolean;
   /** 寻路时是否忽略其它 creep。注意这不影响移动时的动态碰撞检查。 */
   ignoreCreeps?: boolean;
-
-  /** 强制重新寻路的间隔时间（ticks）。 */
-  repathInterval?: number;
-  /** 判定为卡住（stuck）的连续 tick 数阈值。 */
-  stuckThreshold?: number;
-
-  /** 是否允许向阻挡自己的 creep 发出避让请求。 */
-  allowAvoidanceRequest?: boolean;
-  /** 避让策略名称。决定当自己被别人请求避让时使用的决策逻辑。 */
-  avoidancePolicy?: string;
 
   /** 是否开启房间可视化渲染。 */
   visualize?: boolean;
@@ -362,7 +361,7 @@ interface RoomCostMatrixStamp {
 - rampart public/private 状态变化。
 - 房间控制权变化。
 - source keeper lair、hostile structure 等危险信息变化。
-- 手动调用 `invalidateRoom(roomName)`。
+- 手动调用 `updateCostMatrix(roomName, options)`。
 
 CostMatrix 缓存值记录生成时的 `eventStamp`：
 
@@ -379,6 +378,17 @@ interface CachedCostMatrix {
 ```
 
 当缓存中的 `eventStamp` 小于房间当前 `eventStamp` 时，该 CostMatrix 过期并被丢弃。
+
+外部通行环境变化统一通过 `updateCostMatrix` 通知 goto：
+
+```ts
+goto.updateCostMatrix(roomName, {
+  reason: 'structureChanged',
+  critical: true,
+});
+```
+
+调用该方法时，模块递增本房间 `eventStamp`，并清理该房间旧版本 CostMatrix。`critical=true` 表示重大更新，例如建筑阻挡、rampart 状态、房间控制权、危险结构等足以改变已有方向场正确性的变化；模块会立即清空本房间 Flow Field 缓存。这样 Flow Field 的 CostMatrix 失效由更新入口主动完成，`goto` 主流程不需要在每次移动时额外比较 Flow Field 与 CostMatrix 的版本。
 
 ### 6.3 基础构建规则
 
@@ -487,11 +497,13 @@ interface FlowField {
   score: number;
   buildType: 'full' | 'reused' | 'partial';
   reusedFrom?: string;
-  data: Uint8Array;
+  reusedDepth?: number;
+  patch?: ReusedFlowFieldPatch;
+  data?: Uint8Array;
 }
 ```
 
-`data` 使用 `Uint8Array` 存储压缩后的方向数据。每个格子只需要保存一个方向值：
+`data` 使用 `Uint8Array` 存储压缩后的完整方向数据。完整建场直接读取 `data`；复用建场可以不复制完整 `data`，而是通过 `patch` 覆盖局部差异区域，patch 外读取 `reusedFrom` 指向的基础 Flow Field。每个格子只需要保存一个方向值：
 
 ```text
 0: unreachable / none
@@ -554,7 +566,28 @@ reuseFlowField=false:
   生成结果是 full Flow Field。
 ```
 
-复用流场不保证全局最优，因此复用结果质量分数低于完整建场：
+#### 7.4.1 复用候选索引
+
+为了避免每次建场时遍历本房间所有 Flow Field，模块维护独立的复用候选索引。只有满足资格条件的 Flow Field 会进入索引：
+
+- `score >= minReusableScore`。
+- 未 TTL 过期。
+- `reusedDepth < maxReuseDepth`。
+- 与新目标使用同一个房间、`matrixProfile`、`considerRoads`、`considerSwamps` 和 CostMatrix 版本。
+- 目标类型兼容。普通位置目标只复用普通位置目标场；出口目标按出口方向分组。
+
+低于复用分数阈值的 Flow Field 不进入索引，也不会在查询候选时被扫描。
+
+索引使用目标位置的空间哈希：
+
+```text
+bucketSize = 5 或 10
+bucketX = floor(target.x / bucketSize)
+bucketY = floor(target.y / bucketSize)
+bucketKey = roomName + profileKey + targetType + bucketX + bucketY
+```
+
+查找候选时，从新目标所在 bucket 开始，按半径扩展查询附近 bucket，并只保留前 `maxReuseCandidates` 个候选。最终候选再按精确评分排序：
 
 ```ts
 interface FlowFieldScoreInput {
@@ -568,28 +601,117 @@ interface FlowFieldScoreInput {
 初始评分公式：
 
 ```text
-score = sourceScore
+reuseScore = sourceScore
   - targetDistance * 4
   - reusedDepth * 10
   - agePenalty
 ```
 
-当评分低于阈值时，不复用，改为完整建场。
+当最高评分低于阈值时，不复用，改为完整建场。
+
+```ts
+interface FlowFieldReuseConfig {
+  minReusableScore: number;
+  minReuseScore: number;
+  maxTargetDistance: number;
+  maxReuseCandidates: number;
+  bucketSize: number;
+  maxReuseDepth: number;
+  maxPatchCells: number;
+}
+```
+
+#### 7.4.2 边界收敛式局部复用
+
+复用建场不尝试从旧方向场直接推导完整新方向场，而是使用 **边界收敛式局部复用**。
+
+设旧 Flow Field 为 `T`，旧目标为 `P`；新 Flow Field 为 `T'`，新目标为 `P'`。两者必须使用同一个 CostMatrix `C`。算法从 `P'` 开始反向 Dijkstra，只生成 `T'` 与 `T` 不同的差异区域；当扩散到某个位置后，新方向与旧方向收敛，并且该方向的后继路径已经接入新场可信区域时，将该位置作为边界，边界外继续复用 `T`。
+
+生成流程：
+
+```text
+1. 将 P' 的可接受终点格压入优先队列，distance = 0。
+2. 使用 CostMatrix C 反向 Dijkstra，逐步生成新距离场 D'。
+3. 每次确定某个位置 pos 的 T'[pos] 后，与 T[pos] 比较。
+4. 如果 T'[pos] 与 T[pos] 不同，pos 属于差异区域，继续向外扩散。
+5. 如果 T'[pos] 与 T[pos] 相同，还需要检查 next(pos, T[pos]) 是否已经接入可信区域。
+6. 通过检查后，pos 成为复用边界，不再从 pos 向外扩散。
+7. 扩散直到所有外沿都被复用边界闭合。
+```
+
+可信区域包括：
+
+- 新目标 `P'` 的可接受终点格。
+- 已生成并确认属于差异区域的 `T'` 格。
+- 已确认的复用边界格。
+
+边界判断不能只比较当前格方向是否相同，还必须保证后继路径可接入新场：
+
+```text
+isConverged(pos):
+  T'[pos] == T[pos]
+  and next(pos, T[pos]) is trusted
+```
+
+这样可以避免某个格子的第一步方向虽然相同，但后续进入旧场后仍被带回旧目标 `P`。
+
+复用结果保存为旧场加局部覆盖层：
+
+```ts
+interface Rect {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+interface ReusedFlowFieldPatch {
+  baseFieldId: string;
+  targetKey: string;
+  range: number;
+  bounds: Rect;
+  directions: Uint8Array;
+  trusted: Uint8Array;
+  reusedDepth: number;
+}
+```
+
+读取方向时：
+
+```text
+当前位置在 patch bounds 内且 patch 有方向：读取 patch direction。
+否则：读取 base Flow Field direction。
+```
+
+边界收敛式复用失败时，必须回退完整建场。失败条件包括：
+
+- 新目标与旧目标距离超过 `maxTargetDistance`。
+- 扩散格数超过 `maxPatchCells`。
+- 无法形成可信闭合边界。
+- 扩散触及房间边界或不可达区域后仍无法收敛。
+- patch 质量评分低于 `minReuseScore`。
+
+复用流场不保证全局最优，因此复用结果质量分数低于完整建场，并且 TTL 短于完整建场。复用深度越高、patch 越大、目标距离越远，质量分数越低。
 
 ### 7.5 双重失效机制
 
 Flow Field 使用双重失效机制：
 
-1. **CostMatrix 事件戳失效**。
+1. **CostMatrix 更新主动失效**。
 2. **Flow Field TTL 失效**。
 
-事件戳失效规则：
+CostMatrix 更新失效规则：
 
 ```text
-flowField.costMatrixEventStamp < currentRoomCostMatrix.eventStamp
+updateCostMatrix(roomName, { critical: true })
+  -> increment room costMatrix eventStamp
+  -> delete room costMatrix cache
+  -> delete room flowField cache
 ```
 
-当流场生成时间对应的 CostMatrix 事件戳早于当前 CostMatrix 事件戳时，该流场过期。过期流场不能继续使用，也不能作为复用源。
+`critical=false` 或未传入时，只递增本房间 CostMatrix `eventStamp` 并清理旧 CostMatrix。适用于成本微调、统计权重变化等不要求立即废弃已有方向场的更新。
+
+`critical=true` 用于会改变通行性或明显改变方向场正确性的更新。此时本房间所有 Flow Field 立即清空，后续 creep 会按当前 CostMatrix 重新建场。由于重大更新已经在 `updateCostMatrix` 入口完成 Flow Field 清理，主流程只需要读取现存 Flow Field 并检查 TTL，不再进行每 tick 的 CostMatrix eventStamp 对比。
 
 TTL 规则：
 
@@ -618,9 +740,8 @@ evictScore = flowField.score + activeBonus(flowField.activeAt) - agePenalty
 清理优先级：
 
 1. 已过期流场。
-2. CostMatrix 事件戳落后的流场。
-3. 低质量、长时间未活跃的复用流场。
-4. 低活跃度完整流场。
+2. 低质量、长时间未活跃的复用流场。
+3. 低活跃度完整流场。
 
 ## 8. creep 阻塞与避让
 
@@ -675,7 +796,7 @@ interface AvoidanceContext {
 }
 ```
 
-`goto` 提供避让请求、候选方向和安全性判断。具体是否避让由业务策略决定。不同 creep 通过 `avoidancePolicy` 选择不同 resolver。
+`goto` 提供避让请求、候选方向和安全性判断。所有 creep 都允许在被阻挡时发出避让请求；具体是否做出避让行为，由挡路 creep 结合避让策略仓库中的 resolver 决定。
 
 候选避让方向过滤条件：
 
@@ -720,12 +841,13 @@ stuck 计数触发以下动作：
 5. 获取或计算 Room Route。
 6. 将 Room Route 转换成当前房间 RouteSegment。
 7. 按 matrixProfile + considerRoads + considerSwamps 获取 CostMatrix。
-8. 检查 CostMatrix eventStamp，必要时重建 CostMatrix。
+8. CostMatrix 不存在或版本已更新时重建 CostMatrix。
 9. 获取匹配 Flow Field。
 10. 如果无匹配 Flow Field：
-    10.1 reuseFlowField=true 时尝试复用高质量相近流场。
-    10.2 reuseFlowField=false 或复用失败时完整建场。
-11. 检查 Flow Field 是否被 CostMatrix eventStamp 或 TTL 失效。
+    10.1 reuseFlowField=true 时从复用索引查询高质量相近流场。
+    10.2 对候选场尝试边界收敛式局部复用。
+    10.3 reuseFlowField=false 或复用失败时完整建场。
+11. 检查 Flow Field 是否 TTL 失效。
 12. 从 Flow Field 读取当前位置方向。
 13. 检查目标格动态阻塞。
 14. 无阻塞时执行 creep.move(direction)。
@@ -754,6 +876,7 @@ fallback 路径只做短期 heap 缓存，TTL 很短，并且不写入 Memory。
 - `roomRouteCache`
 - `costMatrixCache`
 - `flowFieldCache`
+- `flowFieldReuseIndex`
 - `pendingMoves`
 - `avoidanceRequests`
 - `blockedStats`
@@ -780,12 +903,12 @@ interface CacheLimits {
 清理顺序：
 
 1. 删除过期项。
-2. 删除事件戳落后的 CostMatrix 与 Flow Field。
+2. 删除事件戳落后的 CostMatrix。
 3. 删除低分且长时间未活跃的 Flow Field。
 4. 删除最久未使用的 Room Route。
 5. 删除低频房间的 CostMatrix。
 
-### 11.3 CPU 预算
+### 11.4 CPU 预算
 
 同一 tick 内限制新建 CostMatrix 和 Flow Field 的数量。超过预算后，模块使用 fallback 或延迟建场。
 
@@ -805,7 +928,7 @@ interface GotoDebugInfo {
   costMatricesBuilt: number;
   flowFieldsBuilt: number;
   flowFieldsReused: number;
-  flowFieldsExpiredByStamp: number;
+  flowFieldsInvalidatedByCostMatrixUpdate: number;
   flowFieldsExpiredByTtl: number;
   cacheHits: number;
   cacheMisses: number;
@@ -833,7 +956,7 @@ interface GotoDebugInfo {
 
 - 使用 `ModuleContext.env` 访问 `Game`、`Room`、`getObjectById` 和日志。
 - **Memory 挂载**：模块需要访问 `Memory.goto`（或其它指定位置）以读写持久化的房间与边界偏好。
-- 使用 `bus.subscribe` 监听建筑相关事件，并更新 CostMatrix 事件戳。
+- 使用 `bus.subscribe` 监听建筑相关事件，并调用 `updateCostMatrix(roomName, { critical })` 更新 CostMatrix 版本；重大通行变化传入 `critical=true`，由入口清理本房间 Flow Field。
 - 使用 `profiler.wrap` 包裹 A*、CostMatrix 构建、Flow Field 构建等高 CPU 函数。
 - 使用 `src/utils/priorityQueue.ts` 实现 A* 与 Dijkstra。
 
@@ -842,7 +965,7 @@ interface GotoDebugInfo {
 - 检查 PendingMove。
 - 清理过期 AvoidanceRequest。
 - 清理过期 Flow Field。
-- 清理事件戳落后的 CostMatrix 与 Flow Field。
+- 清理事件戳落后的 CostMatrix。
 - 更新 debug 统计。
 
 ## 14. 开发计划
@@ -855,11 +978,11 @@ interface GotoDebugInfo {
 4. 实现房间偏好与边界偏好。
 5. 实现 4 套 CostMatrix 构建规则。
 6. 实现 CostMatrix 二次加工。
-7. 实现 CostMatrix heap 缓存与事件戳。
+7. 实现 CostMatrix heap 缓存、事件戳与 `updateCostMatrix` 更新入口。
 8. 实现完整 Flow Field 构建。
 9. 实现 Flow Field `Uint8Array` 存储。
 10. 实现 Flow Field heap 缓存、TTL、质量分数和活跃时间清理。
-11. 实现 `reuseFlowField` 控制与复用建场。
+11. 实现 `reuseFlowField` 控制、复用候选索引与边界收敛式局部复用建场。
 12. 实现 `goto(creep, target, options)` 主流程。
 13. 实现动态阻塞检查、本地绕行和避让请求。
 14. 实现避让策略注册与 resolver 调用。
@@ -876,7 +999,10 @@ interface GotoDebugInfo {
 - 不可通行建筑被正确阻挡。
 - Source、Mineral、Storage、Spawn 等热门结构周围路径成本被抬高。
 - `reuseFlowField=false` 时强制完整建场。
-- CostMatrix 事件戳变化后旧流场失效。
+- 复用候选查询不会遍历本房间所有 Flow Field。
+- 目标相近时能通过边界收敛式局部复用生成 patch。
+- 边界收敛失败时能回退完整建场。
+- `updateCostMatrix(..., { critical: true })` 后本房间旧流场失效。
 - Flow Field TTL 到期后失效。
 - 活跃流场不会被优先清理。
 - global reset 后没有 Memory 缓存副作用。
@@ -887,8 +1013,9 @@ interface GotoDebugInfo {
 
 - 出口 Flow Field 需要避免 creep 在房间边界来回横跳。
 - 热门结构周围加权不能导致目标不可达。
-- CostMatrix 事件戳必须覆盖所有影响通行的变化。
-- 复用流场可能非最优，必须受 `reuseFlowField` 和质量分数约束。
+- `updateCostMatrix` 必须覆盖所有影响通行的变化，重大变化必须传入 `critical=true`。
+- 复用流场可能非最优，必须受 `reuseFlowField`、质量分数、复用深度和 patch 大小约束。
+- 边界收敛式复用必须保证边界后继路径接入可信区域，否则可能把 creep 带回旧目标。
 - 避让请求可能导致两个 creep 互相让路，需要 resolver 处理优先级和预定格。
 - 同 tick 大量新目标可能造成建场峰值，需要 build budget 限制。
 - heap-only 缓存会在 global reset 后冷启动，首批移动需要 fallback 和预算保护。
