@@ -1,3 +1,9 @@
+/**
+ * 文件摘要：把 Screeps 全局对象包装成可注入的环境方法，并为模块创建独立日志器。
+ *
+ * Game 查询函数保持为共享的无状态闭包；只有日志器按模块创建。业务模块依赖
+ * EnvMethods 而非直接散布全局访问，便于单元测试替换运行环境。
+ */
 import { createLog } from '@/utils/console';
 import type { EnvMethods } from './types';
 

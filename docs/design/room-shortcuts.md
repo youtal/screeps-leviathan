@@ -1,4 +1,4 @@
-# RoomShortcuts
+# RoomShortcuts 设计
 
 RoomShortcuts 为有视野的房间建立建筑、Source 和 Mineral 的 ID 缓存。集合查询无结果时返回 `[]`，单对象查询无结果时返回 `undefined`；房间尚未建设某类建筑属于正常状态，不记录警告。
 

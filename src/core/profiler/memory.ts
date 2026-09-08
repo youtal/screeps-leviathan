@@ -1,3 +1,9 @@
+/**
+ * 文件摘要：封装 Profiler 对持久化统计对象的读取、累加和清空操作。
+ *
+ * 访问器在创建时取得一次 Memory 引用并存入闭包，减少重复属性寻址；项目未来
+ * 引入跨 tick Memory 映射后，应由该机制保证引用在 tick 切换时仍然有效。
+ */
 import type { Record, ProfilerMemory } from './types';
 import { createLog } from '@/utils/console';
 

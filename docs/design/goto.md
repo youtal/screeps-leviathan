@@ -1,5 +1,7 @@
 # goto 模块技术设计
 
+> 2026-05-19 完成首轮设计收敛，跨房路由场、CostMatrix 事件戳、Flow Field 保留性评分、Dijkstra 成本语义和轻量避让方案已纳入本文。后续实现与评审以本文为准。
+
 ## 1. 模块定位
 
 `goto` 是 Screeps creep 移动系统的基础模块。它负责跨房间路由选择、房间内移动决策、路径缓存、动态阻塞处理和 creep 避让协调。
@@ -30,6 +32,7 @@
 - 支持 debug 信息和可选房间可视化。
 
 **持久化说明**：
+
 - 用户手动定义的房间偏好、边界（有向边）偏好存储在 `Memory` 中，确保在脚本重启或 global reset 后依然有效。
 - 所有的性能开销项（CostMatrix、Flow Field、跨房路由场缓存、避让请求等）只存在于 heap 中。脚本重新载入后，这些数据从空缓存开始运行，避免继承上一次 global 生命周期中的副作用。
 
@@ -37,7 +40,6 @@
 
 ```text
 src/modules/goto/
-  README.md
   createGoto.ts
   types.ts
   roomRoute/
@@ -69,6 +71,8 @@ src/modules/goto/
     visual.ts
     stats.ts
 ```
+
+设计文档位于 `docs/design/goto.md`，不作为源码目录的一部分。
 
 模块工厂保持当前项目的 `createXxx(context)` 风格：
 
@@ -103,10 +107,7 @@ interface GotoModule {
 
   onTickEnd(): void;
 
-  registerAvoidance(
-    policyName: string,
-    resolver: AvoidanceResolver
-  ): void;
+  registerAvoidance(policyName: string, resolver: AvoidanceResolver): void;
 
   unregisterAvoidance(policyName: string): void;
 
@@ -118,10 +119,7 @@ interface GotoModule {
     preference: BoundaryPreference
   ): void;
 
-  updateCostMatrix(
-    roomName: string,
-    options?: CostMatrixUpdateOptions
-  ): void;
+  updateCostMatrix(roomName: string, options?: CostMatrixUpdateOptions): void;
 
   getDebugInfo(): GotoDebugInfo;
 }

@@ -1,3 +1,9 @@
+/**
+ * 文件摘要：组合 EventBus、Profiler 与环境适配器，创建应用级模块上下文工厂。
+ *
+ * 根工厂用闭包保存共享服务；每次调用 createContext 只创建带模块名前缀的环境
+ * 对象。该设计把框架单例的生命周期限制在 app 层，同时允许测试注入替代实现。
+ */
 import { createBus } from '@/core/eventBus';
 import { createProfiler } from '@/core/profiler';
 import type { ProfilerMemory } from '@/core/profiler';

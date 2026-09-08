@@ -1,23 +1,29 @@
 /**
- * HTML 元素基类
+ * 文件摘要：声明控制台表单的控件描述、按钮参数和构造器类型。
+ *
+ * 每种控件以 `type` 字符串作为判别字段，HTMLElementDetail 因而形成判别联合；
+ * createForm 可以据此选择对应构造器，调用方也能获得精确的字段检查。
+ */
+/**
+ * 所有表单控件共享的基础描述。
  */
 interface ElementDetail {
     /**
-     * 该元素的 name 属性
+     * 控件的 name 属性，也是提交结果对象中的键。
      */
     name: string
     /**
-     * 该元素的前缀（用于 form 中）
+     * 显示在控件前方的可选标签。
      */
     label?: string
     /**
-     * 每个基础元素都要有这个字段来标志自己描述的那个元素
+     * 判别字段；具体接口会把它收窄为固定字符串字面量。
      */
     type: string
 }
 
 /**
- * 所有的 html 元素描述对象
+ * 所有合法控件描述的联合类型。
  */
 export type HTMLElementDetail = HTMLElements[keyof HTMLElements]
 
@@ -107,7 +113,7 @@ export interface ButtonDetail {
 }
 
 /**
- * 所有的 html 元素描述对象
+ * 控件种类到具体描述接口的映射。
  */
 export interface HTMLElements {
     input: InputDetail
@@ -117,6 +123,6 @@ export interface HTMLElements {
 }
 
 /**
- * 所有 html 元素的构造器
+ * 通用 HTML 构造器签名；输入是任一合法控件描述，输出是 HTML 字符串。
  */
 export type HTMLCreator = (detail: HTMLElements[keyof HTMLElements]) => string

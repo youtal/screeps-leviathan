@@ -1,3 +1,9 @@
+/**
+ * 文件摘要：预留 source map 堆栈还原功能所需的依赖与实现位置。
+ *
+ * 当前尚未导出运行时行为；保留导入是为了明确后续错误映射将使用
+ * `source-map` 解析位置，并复用控制台的红色文本格式。
+ */
 import { SourceMapConsumer } from 'source-map';
 import { dyeRed } from '@/utils/console';
 

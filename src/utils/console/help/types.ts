@@ -1,5 +1,11 @@
 /**
- * 绘制帮助时需要的模块信息
+ * 文件摘要：声明控制台帮助渲染器接收的模块、函数和参数描述结构。
+ *
+ * 所有字段均为可序列化描述数据，不持有游戏对象；可选字段用于省略没有说明、
+ * 参数或特殊调用形式的部分。
+ */
+/**
+ * 单个模块的帮助元数据。
  */
 export interface ModuleDescribe {
     /**
@@ -17,7 +23,7 @@ export interface ModuleDescribe {
 }
 
 /**
- * 描述一个函数
+ * 单个函数或控制台命令的帮助元数据。
  */
 export interface FunctionDescribe {
     /**

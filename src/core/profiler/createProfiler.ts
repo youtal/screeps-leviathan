@@ -1,3 +1,10 @@
+/**
+ * 文件摘要：创建可开关的函数级 CPU Profiler，并统计嵌套调用的总耗时与自身耗时。
+ *
+ * Profiler 以闭包保存开关、标签集合和调用栈，通过 `Game.cpu.getUsed()` 在函数
+ * 前后取样。只有启用时才承担取样和 Memory 累加成本；禁用时包装函数直接转调
+ * 原函数。统计数据由 memory.ts 提供的访问器统一维护。
+ */
 import type { ProfilerContext, Profiler } from './types';
 import { createMemoryAccessor } from './memory';
 import type { Wrap } from '@/core/runtime/types';
@@ -21,7 +28,7 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
     return null;
   }
 
-  //profiler 开关函数
+  /** 运行时开关只修改闭包变量，因此已经创建的 wrapper 会立即响应。 */
   const enable = () => (enableProfiler = true);
   const disable = () => (enableProfiler = false);
   const reset = () => db.clear();
@@ -65,7 +72,7 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
        */
       if (!enableProfiler) return fn.apply(this, args);
 
-      //将本层调用信息入栈
+      /** 记录本层起点并入栈，使嵌套 wrapper 能把耗时归入父层 childTime。 */
       const start = getGame().cpu.getUsed();
       stack.push({ label, start, childTime: 0 });
 
@@ -78,16 +85,16 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
          *
          * 这避免一次异常污染整个 profiler 调用栈，后续统计仍然可靠。
          */
-        //出栈，并计算时间
+        /** 后进先出恢复当前记录，并以差值计算本层总耗时和自身耗时。 */
         const end = getGame().cpu.getUsed();
         const record = stack.pop()!;
         const totalTime = end - record.start;
         const selfTime = totalTime - record.childTime;
 
-        //记录到Memory
+        /** 将本次样本累加进持久化统计记录。 */
         db.update(record.label, selfTime, totalTime);
 
-        //将本次调用时间加入到上一层的子调用时间中
+        /** 若仍有父调用，将本次总耗时计入父层的子调用时间。 */
         if (stack.length > 0) {
           stack[stack.length - 1].childTime += totalTime;
         }
@@ -115,7 +122,7 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
 
     const memory = db.getAll();
     const entries = Object.entries(memory);
-    //按自身时间排序
+    /** 默认按自身耗时降序排列，优先暴露最值得直接优化的函数。 */
     entries.sort((a, b) => b[1].selfTime - a[1].selfTime);
 
     log.info(`Profiler 报告 (共 ${entries.length} 项)`);

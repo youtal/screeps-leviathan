@@ -1,3 +1,9 @@
+/**
+ * 文件摘要：声明 Profiler 的公共控制接口、创建上下文和持久化数据结构。
+ *
+ * 类型声明只约束模块边界，不生成运行时代码；实现位于 createProfiler.ts 和
+ * memory.ts。
+ */
 import type { HasWrap, EnvContext } from '@/core/runtime/types';
 
 /**

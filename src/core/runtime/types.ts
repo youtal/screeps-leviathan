@@ -1,3 +1,9 @@
+/**
+ * 文件摘要：定义 Runtime 的环境适配器、模块上下文、包装器和依赖注入选项。
+ *
+ * 这些接口把业务模块对 Game、日志、EventBus 与 Profiler 的依赖集中为显式
+ * 上下文，既保留 TypeScript 推导能力，也不产生额外运行时代码。
+ */
 import type { Bus } from '@/core/eventBus';
 import type { Profiler, ProfilerMemory } from '@/core/profiler';
 import { createLog } from '@/utils/console';

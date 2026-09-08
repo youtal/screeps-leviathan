@@ -1,3 +1,9 @@
+/**
+ * 文件摘要：定义 EventBus 的事件注册表、数据推导规则、作用域和公共接口。
+ *
+ * 本文件主要使用映射类型、条件类型与模板字符串类型，在编译期建立事件名和
+ * 负载数据的一一对应；这些类型不会增加 Screeps 运行时 CPU 或 Memory 开销。
+ */
 import type { createBus } from './createBus';
 
 /**

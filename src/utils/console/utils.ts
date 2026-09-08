@@ -1,11 +1,20 @@
+/**
+ * 文件摘要：提供控制台模板替换、文本着色、链接生成和分级日志工具。
+ *
+ * 所有格式化函数均返回字符串且不保存状态；只有 log/createLog 会产生控制台
+ * 输出，并可按配置调用 Game.notify。HTML 内容面向 Screeps 控制台渲染环境。
+ */
 import { DEFAULT_LOG_CONFIG } from '@/setting';
 
+/** 占位符名称到替换文本的映射。 */
 interface ReplaceContent {
   [placeholder: string]: string;
 }
 
 /**
- * 将内容插入到 html 模板
+ * 将内容插入 HTML 模板。
+ *
+ * reduce 按映射键依次执行全局正则替换；模板占位符采用 `{name}` 形式。
  *
  * @param html 要进行替换的模板 html
  * @param replaceContent 要替换的内容
@@ -21,7 +30,7 @@ export const replaceHtml = function (
 };
 
 /**
- * 修复 js 内容缩进引起的问题
+ * 删除模板换行，避免控制台对多行 HTML/内嵌脚本的缩进解析产生干扰。
  *
  * @param html 要进行修复的 html 字符串
  * @returns 修复完成的 html 字符串
@@ -30,6 +39,7 @@ export const fixRetraction = (html: string): string => {
   return html.replace(/\n/g, '');
 };
 
+/** 控制台文本使用的固定调色板，值可直接写入 CSS color 属性。 */
 export enum Color {
   Yellow = '#b58a00',
   Orange = '#cc4c18',
@@ -42,7 +52,7 @@ export enum Color {
 }
 
 /**
- * 给指定文本添加颜色
+ * 用 span 包装文本，并按需添加颜色和粗体样式。
  *
  * @param content 要添加颜色的文本
  * @param colorName 要添加的颜色常量字符串
@@ -76,7 +86,7 @@ export const dyeOrange = (content: string, bold?: boolean): string =>
   dyeText(content, Color.Orange, bold);
 
 /**
- * 生成控制台链接
+ * 生成控制台可点击的 HTML 链接。
  * @param content 要显示的内容
  * @param url 要跳转到的 url
  * @param newTab 是否在新标签页打开
@@ -92,7 +102,7 @@ export function createLink(
 }
 
 /**
- * 给房间内添加跳转链接
+ * 为房间名生成指向当前 shard 对应房间的控制台链接。
  *
  * @param roomName 添加调整链接的房间名
  * @returns 打印在控制台上后可以点击跳转的房间名
@@ -106,7 +116,10 @@ export function createRoomLink(roomName: string): string {
 }
 
 /**
- * 全局日志
+ * 底层日志输出函数。
+ *
+ * `enable` 为 false 时立即返回，避免颜色拼接和 notify 开销；notify 启用时以
+ * 60 分钟分组间隔调用 Game.notify，降低重复通知频率。
  *
  * @param content 日志内容
  * @param prefix 日志前缀
@@ -134,7 +147,10 @@ export function log(
 }
 
 /**
- * 生成快捷日志方法
+ * 创建绑定模块前缀和日志配置的快捷方法集合。
+ *
+ * 空值合并运算符 `??` 允许调用方显式传入 false；只有 undefined 才回退到
+ * DEFAULT_LOG_CONFIG。错误等级可以独立开启 Game.notify。
  * @param prefix 模块日志前缀
  * @param opt 日志配置
  * @param notifyWhenError 是否在出现错误时发送邮件

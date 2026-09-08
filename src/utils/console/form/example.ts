@@ -1,7 +1,13 @@
+/**
+ * 文件摘要：提供覆盖全部表单控件的 createForm 使用示例。
+ *
+ * 示例在被调用时读取 Game.time 并生成 HTML，可用于开发期检查 input、select、
+ * radio 与 checkbox 的渲染和命令参数传递方式。
+ */
 import { createForm } from './createForm'
 
 /**
- * 创建一个包含所有可用表单项的 form 示例
+ * 创建一个包含所有可用控件的表单示例，返回值可直接输出到游戏控制台。
  */
 export const getForm = function () {
     return createForm('form 示例', [

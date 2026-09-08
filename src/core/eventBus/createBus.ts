@@ -1,3 +1,11 @@
+/**
+ * 文件摘要：实现支持 global、room 与 group 三种作用域的同步内存消息总线。
+ *
+ * 总线通过嵌套 Map 管理订阅者；发布时先取得监听器快照，再同步依次调用。
+ * 快照保证回调中的订阅变更只影响下一次发布，异常隔离保证一个监听器失败
+ * 不会阻断其他监听器。全部状态保存在工厂闭包内，不产生 Screeps Memory
+ * 序列化开销，但每次全局重置后会随模块重新初始化。
+ */
 import {
   DataByEvent,
   EventScope,
@@ -15,6 +23,7 @@ import { createLog } from '@/utils/console';
  * 仍然保持 `EventType -> DataByEvent<EventType>` 的精确对应关系。
  */
 type Listener<T extends EventType> = (data: DataByEvent<T>) => void;
+/** `[订阅者名称, 回调]` 数组；数组顺序继承 Map 的插入顺序。 */
 type ListenerSnapshot = [string, (data: unknown) => void][];
 
 /**
@@ -172,6 +181,10 @@ export const createBus = () => {
     scope: EventScope,
     eventType: EventType
   ): ListenerSnapshot | undefined => {
+    /**
+     * `Array.from` 复制当前条目，避免回调执行期间的 subscribe/unsubscribe
+     * 改变本轮遍历集合。没有监听器时返回 undefined，供发布路径快速退出。
+     */
     const eventListeners = getScopedListeners(scope)?.get(eventType);
     return eventListeners?.size
       ? Array.from(eventListeners.entries())
