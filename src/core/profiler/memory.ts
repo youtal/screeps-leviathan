@@ -16,6 +16,8 @@ export const createMemoryAccessor = (
   getMemory: () => ProfilerMemory,
   log: ReturnType<typeof createLog>
 ) => {
+  // TODO(framework-memory): framework 提供跨 tick 的 Memory 映射后，改由该映射
+  // 提供稳定引用；在此之前此访问器仍可能持有上一 tick 的 Memory 对象。
   const memory = getMemory();
   if (!memory) {
     log.error('无法获取 Profiler 内存');

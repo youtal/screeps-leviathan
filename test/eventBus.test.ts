@@ -12,8 +12,9 @@ describe('EventBus', () => {
     const data = { creepName: 'testCreep' };
 
     bus.subscribe({ scope: 'global' }, event, 'testSubscriber', mockListener);
-    bus.publish({ scope: 'global' }, event, data);
+    const notified = bus.publish({ scope: 'global' }, event, data);
 
+    expect(notified).toBe(1);
     expect(mockListener).toHaveBeenCalledTimes(1);
     expect(mockListener).toHaveBeenCalledWith(data);
   });
@@ -45,8 +46,13 @@ describe('EventBus', () => {
       otherRoomListener
     );
 
-    bus.publish({ scope: 'room', roomName: 'W1N1' }, event, data);
+    const notified = bus.publish(
+      { scope: 'room', roomName: 'W1N1' },
+      event,
+      data
+    );
 
+    expect(notified).toBe(2);
     expect(globalListener).toHaveBeenCalledWith(data);
     expect(roomListener).toHaveBeenCalledWith(data);
     expect(otherRoomListener).not.toHaveBeenCalled();
@@ -57,7 +63,11 @@ describe('EventBus', () => {
     const globalListener = jest.fn();
     const roomListener = jest.fn();
     const event = 'structure:destroyed';
-    const data = { structureId: 'sid1' as Id<Structure> };
+    const data = {
+      roomName: 'W1N1',
+      structureId: 'sid1' as Id<Structure>,
+      ruinId: 'rid1' as Id<Ruin>,
+    };
 
     bus.subscribe({ scope: 'global' }, event, 'globalSub', globalListener);
     bus.subscribe(
@@ -138,9 +148,22 @@ describe('EventBus', () => {
     const event = 'combat:ended';
     const data = { roomName: 'W3N3', warType: 'defense' as const };
 
-    expect(() =>
+    expect(
       bus.publish({ scope: 'room', roomName: 'NO_ROOM' }, event, data)
-    ).not.toThrow();
+    ).toBe(0);
+  });
+
+  it('should not log when an event has no subscribers', () => {
+    const bus = createBus();
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(
+      bus.publish({ scope: 'global' }, 'creep:spawn', {
+        creepName: 'NobodyListens',
+      })
+    ).toBe(0);
+
+    expect(logSpy).not.toHaveBeenCalled();
   });
 
   it('should warn when overwriting a subscriber', () => {
@@ -187,5 +210,30 @@ describe('EventBus', () => {
       c.join(' ').includes('error in subscriber bad')
     );
     expect(errorLogged).toBe(true);
+  });
+
+  it('should snapshot room and global listeners before invoking either scope', () => {
+    const bus = createBus();
+    const calls: string[] = [];
+    const event = 'creep:spawn';
+    const scope = { scope: 'room', roomName: 'W1N1' } as const;
+
+    bus.subscribe({ scope: 'global' }, event, 'oldGlobal', () => {
+      calls.push('oldGlobal');
+    });
+    bus.subscribe(scope, event, 'room', () => {
+      calls.push('room');
+      bus.unsubscribe({ scope: 'global' }, event, 'oldGlobal');
+      bus.subscribe({ scope: 'global' }, event, 'newGlobal', () => {
+        calls.push('newGlobal');
+      });
+    });
+
+    expect(bus.publish(scope, event, { creepName: 'SnapshotTest' })).toBe(2);
+    expect(calls).toEqual(['room', 'oldGlobal']);
+
+    calls.length = 0;
+    expect(bus.publish(scope, event, { creepName: 'NextPublish' })).toBe(2);
+    expect(calls).toEqual(['room', 'newGlobal']);
   });
 });

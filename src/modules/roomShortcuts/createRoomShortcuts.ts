@@ -9,11 +9,70 @@ import {
 
 export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
   const { bus } = opt;
-  const { getRoom, getObjectById, log } = opt.env;
-  const { forceReInit = false } = opt;
+  const { getGame, getRoom, getObjectById, log } = opt.env;
+  const { forceReInit = false, cacheLeaseTicks = 5000 } = opt;
+  const normalizedCacheLeaseTicks = Number.isFinite(cacheLeaseTicks)
+    ? Math.max(1, Math.floor(cacheLeaseTicks))
+    : 5000;
 
   const initedRooms: { [roomName: string]: boolean } = {};
+  const initializedAt: { [roomName: string]: number } = {};
   const shortcutsCache: ShortcutsCache = {};
+
+  const invalidate = (roomName: string): void => {
+    if (!initedRooms[roomName] && !shortcutsCache[roomName]) return;
+
+    delete shortcutsCache[roomName];
+    delete initedRooms[roomName];
+    delete initializedAt[roomName];
+    log.info(`Room ${roomName} shortcuts invalidated.`);
+  };
+
+  const removeDestroyedStructure = (
+    roomName: string,
+    structureId: Id<Structure>,
+    ruinId: Id<Ruin>
+  ): void => {
+    if (!initedRooms[roomName]) return;
+
+    const ruin = getObjectById(ruinId);
+    if (!ruin) {
+      log.warn(
+        `Ruin ${ruinId} not found; invalidating shortcuts for room ${roomName}.`
+      );
+      invalidate(roomName);
+      return;
+    }
+
+    if (ruin.pos.roomName !== roomName) {
+      log.warn(
+        `Ruin ${ruinId} belongs to room ${ruin.pos.roomName}, not subscribed room ${roomName}; invalidating shortcuts.`
+      );
+      invalidate(roomName);
+      return;
+    }
+
+    if (ruin.structure.id !== structureId) {
+      log.warn(
+        `Destroyed structure ${structureId} does not match ruin ${ruinId} (${ruin.structure.id}) in room ${roomName}; invalidating shortcuts.`
+      );
+      invalidate(roomName);
+      return;
+    }
+
+    const structureType = ruin.structure.structureType as STRUCTURE_KEY;
+    const cachedIds = shortcutsCache[roomName]?.[structureType] as
+      Id<Structure>[] | undefined;
+    if (!cachedIds) return;
+
+    const index = cachedIds.indexOf(structureId);
+    if (index !== -1) {
+      cachedIds.splice(index, 1);
+      log.info(
+        `Destroyed structure ${structureId} removed from shortcuts: ${roomName} ${structureType}.`
+      );
+    }
+  };
 
   //初始化房间，将各结构id存入缓存
   const init = (roomName: string, force: boolean = forceReInit) => {
@@ -55,28 +114,29 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
     //更新缓存
     shortcutsCache[roomName] = cache;
     initedRooms[roomName] = true;
-    //订阅建筑建造事件
-    bus.subscribe(
-      { scope: 'room', roomName },
-      'structure:built',
-      'roomShortcuts',
-      (data) => updateStructure(data.structureId)
-    );
+    initializedAt[roomName] = getGame().time;
     log.info(`Room ${roomName} shortcuts initialized.`);
   };
 
   //更新建筑至缓存中,用于监听建筑建造事件
-  const updateStructure = (id: Id<Structure>) => {
-    const obj = getObjectById(id);
-    if (!obj) {
-      log.error(`Object with id ${id} not found, cannot update shortcuts.`);
+  const updateStructure = (roomName: string, id: Id<Structure>) => {
+    if (!initedRooms[roomName]) {
+      log.info(`Room ${roomName} not initialized, cannot update shortcuts.`);
       return;
     }
 
-    const { roomName } = obj.pos;
+    const obj = getObjectById(id);
+    if (!obj) {
+      log.error(`Object with id ${id} not found, cannot update shortcuts.`);
+      invalidate(roomName);
+      return;
+    }
 
-    if (!initedRooms[roomName]) {
-      log.info(`Room ${roomName} not initialized, cannot update shortcuts.`);
+    if (obj.pos.roomName !== roomName) {
+      log.warn(
+        `Built structure ${id} belongs to room ${obj.pos.roomName}, not event room ${roomName}; invalidating shortcuts.`
+      );
+      invalidate(roomName);
       return;
     }
 
@@ -100,36 +160,63 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
     key: K,
     roomName: string,
     isSingle?: boolean
-  ): CachedObject<K> | CachedObject<K>[] | undefined | null => {
+  ): CachedObject<K> | CachedObject<K>[] | undefined => {
     //先检查房间是否有视野
     if (!getRoom(roomName)) {
       log.error(
         `no visual on Room ${roomName}, structure shortcuts unavailable.`
       );
-      return isSingle ? undefined : null;
+      invalidate(roomName);
+      return isSingle ? undefined : [];
     }
-    //检查房间是否初始化
-    if (!initedRooms[roomName]) {
-      log.info(`Room ${roomName} cache missed, initializing now.`);
-      init(roomName);
+    const leaseExpired =
+      !forceReInit &&
+      initedRooms[roomName] &&
+      getGame().time - initializedAt[roomName] >= normalizedCacheLeaseTicks;
+
+    //检查房间是否初始化或租约是否到期
+    if (!initedRooms[roomName] || forceReInit || leaseExpired) {
+      log.info(
+        `Room ${roomName} cache ${forceReInit ? 'refresh requested' : leaseExpired ? 'lease expired' : 'missed'}, initializing now.`
+      );
+      init(roomName, forceReInit || leaseExpired);
     }
 
     //拿到缓存
     const cacheMap = shortcutsCache[roomName];
     if (!cacheMap) {
       log.error(`an error occurred, room ${roomName} has no cacheMap.`);
-      return isSingle ? undefined : null;
+      return isSingle ? undefined : [];
     }
 
     if (!cacheMap[key] || cacheMap[key].length === 0) {
-      log.warn(`no structure ${key} was found in room ${roomName}.`);
-      return isSingle ? undefined : null;
+      return isSingle ? undefined : [];
     }
     //根据缓存id返回对象
-    return isSingle
-      ? (getObjectById(cacheMap[key][0]) as CachedObject<K>)
-      : (cacheMap[key].map((id) => getObjectById(id)) as CachedObject<K>[]);
+    if (isSingle) {
+      return (
+        (getObjectById(cacheMap[key][0]) as CachedObject<K> | null) ?? undefined
+      );
+    }
+
+    return cacheMap[key]
+      .map((id) => getObjectById(id) as CachedObject<K> | null)
+      .filter((object): object is CachedObject<K> => object !== null);
   };
+
+  bus.subscribe(
+    { scope: 'global' },
+    'structure:built',
+    'roomShortcuts',
+    (data) => updateStructure(data.roomName, data.structureId)
+  );
+  bus.subscribe(
+    { scope: 'global' },
+    'structure:destroyed',
+    'roomShortcuts',
+    (data) =>
+      removeDestroyedStructure(data.roomName, data.structureId, data.ruinId)
+  );
 
   return {
     getSpawn: (roomName: string) =>
@@ -157,32 +244,32 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
     getPowerBank: (roomName: string) =>
       createGetter(STRUCTURE_POWER_BANK, roomName) as StructurePowerBank[],
     getObserver: (roomName: string) =>
-      createGetter(STRUCTURE_OBSERVER, roomName, true) as StructureObserver,
+      createGetter(STRUCTURE_OBSERVER, roomName, true) as
+        StructureObserver | undefined,
     getPowerSpawn: (roomName: string) =>
-      createGetter(
-        STRUCTURE_POWER_SPAWN,
-        roomName,
-        true
-      ) as StructurePowerSpawn,
+      createGetter(STRUCTURE_POWER_SPAWN, roomName, true) as
+        StructurePowerSpawn | undefined,
     getExtractor: (roomName: string) =>
-      createGetter(STRUCTURE_EXTRACTOR, roomName, true) as StructureExtractor,
+      createGetter(STRUCTURE_EXTRACTOR, roomName, true) as
+        StructureExtractor | undefined,
     getNuker: (roomName: string) =>
-      createGetter(STRUCTURE_NUKER, roomName, true) as StructureNuker,
+      createGetter(STRUCTURE_NUKER, roomName, true) as
+        StructureNuker | undefined,
     getFactory: (roomName: string) =>
-      createGetter(STRUCTURE_FACTORY, roomName, true) as StructureFactory,
+      createGetter(STRUCTURE_FACTORY, roomName, true) as
+        StructureFactory | undefined,
     getStorage: (roomName: string) =>
-      createGetter(STRUCTURE_STORAGE, roomName, true) as StructureStorage,
+      createGetter(STRUCTURE_STORAGE, roomName, true) as
+        StructureStorage | undefined,
     getTerminal: (roomName: string) =>
-      createGetter(STRUCTURE_TERMINAL, roomName, true) as StructureTerminal,
+      createGetter(STRUCTURE_TERMINAL, roomName, true) as
+        StructureTerminal | undefined,
     getInVaderCore: (roomName: string) =>
-      createGetter(
-        STRUCTURE_INVADER_CORE,
-        roomName,
-        true
-      ) as StructureInvaderCore,
+      createGetter(STRUCTURE_INVADER_CORE, roomName, true) as
+        StructureInvaderCore | undefined,
     getSource: (roomName: string) =>
       createGetter('source', roomName) as Source[],
     getMineral: (roomName: string) =>
-      createGetter('mineral', roomName, true) as Mineral,
+      createGetter('mineral', roomName, true) as Mineral | undefined,
   };
 };

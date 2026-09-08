@@ -22,7 +22,7 @@ const createEnv = (cpuValues: number[]): EnvMethods => {
         cpu: {
           getUsed: () => cpuValues[index++] ?? cpuValues[cpuValues.length - 1],
         },
-      } as Game),
+      }) as Game,
     getRoom: jest.fn(),
     getFlag: jest.fn(),
     getCreep: jest.fn(),
@@ -129,6 +129,33 @@ describe('Profiler', () => {
     profiler.disable();
     expect(wrapped()).toBe('ok');
     expect(memory.toggle).toEqual({ totalTime: 4, selfTime: 4, calls: 1 });
+  });
+
+  it('should preserve this when wrapping object methods', () => {
+    const memory: ProfilerMemory = {};
+    const profiler = createProfiler({
+      env: createEnv([0, 3]),
+      getMemory: () => memory,
+      enable: false,
+    })!;
+    const worker = {
+      energy: 10,
+      consume(amount: number) {
+        this.energy -= amount;
+        return this.energy;
+      },
+    };
+
+    worker.consume = profiler.wrap('worker.consume', worker.consume);
+
+    expect(worker.consume(2)).toBe(8);
+    profiler.enable();
+    expect(worker.consume(3)).toBe(5);
+    expect(memory['worker.consume']).toEqual({
+      totalTime: 3,
+      selfTime: 3,
+      calls: 1,
+    });
   });
 
   it('should reject duplicate labels and report records', () => {

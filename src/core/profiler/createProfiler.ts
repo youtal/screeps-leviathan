@@ -57,13 +57,13 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
       return fn;
     }
     usedLabel[label] = true;
-    return ((...args: any[]) => {
+    return function (this: unknown, ...args: any[]) {
       /**
        * 禁用状态下直接执行原函数。
        *
        * 仍然返回 wrapper，是为了让 enable/disable 对已包裹函数即时生效。
        */
-      if (!enableProfiler) return fn(...args);
+      if (!enableProfiler) return fn.apply(this, args);
 
       //将本层调用信息入栈
       const start = getGame().cpu.getUsed();
@@ -71,7 +71,7 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
 
       try {
         //执行被包裹的函数
-        return fn(...args);
+        return fn.apply(this, args);
       } finally {
         /**
          * 使用 finally 保证原函数抛错时也能正确出栈。
@@ -92,7 +92,7 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
           stack[stack.length - 1].childTime += totalTime;
         }
       }
-    }) as T;
+    } as T;
   };
 
   /**

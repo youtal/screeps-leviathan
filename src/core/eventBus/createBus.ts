@@ -15,6 +15,7 @@ import { createLog } from '@/utils/console';
  * 仍然保持 `EventType -> DataByEvent<EventType>` 的精确对应关系。
  */
 type Listener<T extends EventType> = (data: DataByEvent<T>) => void;
+type ListenerSnapshot = [string, (data: unknown) => void][];
 
 /**
  * 将作用域转换为日志中可读的描述。
@@ -167,35 +168,34 @@ export const createBus = () => {
     log.info(`unsubscribe ${subscriber} from event ${eventType} in ${label}`);
   };
 
+  const createSnapshot = (
+    scope: EventScope,
+    eventType: EventType
+  ): ListenerSnapshot | undefined => {
+    const eventListeners = getScopedListeners(scope)?.get(eventType);
+    return eventListeners?.size
+      ? Array.from(eventListeners.entries())
+      : undefined;
+  };
+
   const notify = <T extends EventType>(
     scope: EventScope,
     eventType: T,
-    data: DataByEvent<T>
+    data: DataByEvent<T>,
+    snapshot: ListenerSnapshot | undefined
   ): number => {
     /**
      * notify 是单个作用域内的底层派发函数。
      *
      * 它不理解广播规则，只负责：
-     * - 找到指定 scope + eventType 的订阅者。
-     * - 对订阅者做快照。
+     * - 接收 publish 在任何回调执行前取得的订阅者快照。
      * - 逐个调用 listener，并隔离 listener 抛出的异常。
      *
      * 广播规则由 publish 负责组合 notify 调用。
      */
-    const listeners = getScopedListeners(scope);
-    const eventListeners = listeners?.get(eventType);
+    if (!snapshot) return 0;
+
     const label = scopeLabel(scope);
-
-    if (!eventListeners || eventListeners.size === 0) {
-      log.warn(`no subscribers for event ${eventType} in ${label}`);
-      return 0;
-    }
-
-    /**
-     * 派发前做快照，避免 listener 在回调中 subscribe/unsubscribe 时影响
-     * 当前这一轮遍历。被修改的订阅关系从下一次 publish 开始生效。
-     */
-    const snapshot = Array.from(eventListeners.entries());
     snapshot.forEach(([subscriber, listener]) => {
       log.info(`notifying subscriber ${subscriber} for event ${eventType}`);
       try {
@@ -217,9 +217,7 @@ export const createBus = () => {
     scope: EventScope,
     eventType: T,
     data: DataByEvent<T>
-  ) => {
-    log.info(`publish event ${eventType}, scope: ${scopeLabel(scope)}`);
-
+  ): number => {
     /**
      * 当前广播原则：
      * - global publish：只通知 global 订阅者。
@@ -228,14 +226,20 @@ export const createBus = () => {
      *
      * group 不自动上报 global，是为了让任务组、编队等内部消息保持隔离，
      * 避免污染全局事件流。
+     * 返回值是本次实际调用的监听器数量；无订阅时直接返回 0，不生成日志。
      */
     if (scope.scope === 'room') {
-      notify(scope, eventType, data);
-      notify({ scope: 'global' }, eventType, data);
-      return;
+      const roomSnapshot = createSnapshot(scope, eventType);
+      const globalScope = { scope: 'global' } as const;
+      const globalSnapshot = createSnapshot(globalScope, eventType);
+
+      return (
+        notify(scope, eventType, data, roomSnapshot) +
+        notify(globalScope, eventType, data, globalSnapshot)
+      );
     }
 
-    notify(scope, eventType, data);
+    return notify(scope, eventType, data, createSnapshot(scope, eventType));
   };
 
   return {

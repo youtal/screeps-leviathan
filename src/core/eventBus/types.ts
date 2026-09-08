@@ -16,9 +16,8 @@ import type { createBus } from './createBus';
  * - 特殊事件可以声明额外字段。
  * - 特殊事件也可以声明与 `categoryData` 同名的字段，此时具体事件字段会覆盖分类字段。
  *
- * 例如 structure 分类默认要求 `structureId: Id<Structure>`，但
- * `structure:destroyed` 可能发布废墟 id，因此它覆盖成
- * `structureId: Id<Structure> | Id<Ruin>`。
+ * 例如 structure 分类默认要求 `structureId: Id<Structure>`，
+ * `structure:destroyed` 可以在此基础上增加 `ruinId: Id<Ruin>`。
  *
  * 如果未来希望让业务模块扩展事件协议，可以利用 TypeScript 的
  * declaration merging，在其他 .d.ts 或模块文件里继续扩展此接口。
@@ -62,18 +61,19 @@ export interface EventRegistry {
   /**
    * 建筑相关事件。
    *
-   * 大多数建筑事件都可以用 `Id<Structure>` 表示目标对象。
-   * 少数事件，例如 destroyed，可能需要允许 Ruin id，所以在具体事件中覆盖。
+   * 所有建筑事件都保留来源房间和原建筑的 `Id<Structure>`。destroyed 事件
+   * 额外提供 `ruinId`，订阅者可以按需使用原建筑 id、废墟 id，或同时使用两者。
    */
   structure: {
     categoryData: {
+      roomName: string;
       structureId: Id<Structure>;
     };
     events: {
       built: {};
       damaged: {};
       destroyed: {
-        structureId: Id<Structure> | Id<Ruin>;
+        ruinId: Id<Ruin>;
       };
     };
   };
@@ -204,8 +204,7 @@ type CategoryData<T extends EventType> =
  *
  * 例如：
  * - `EventExtraData<'creep:spawn'>` 得到 `{}`
- * - `EventExtraData<'structure:destroyed'>`
- *   得到 `{ structureId: Id<Structure> | Id<Ruin> }`
+ * - `EventExtraData<'structure:destroyed'>` 得到 `{ ruinId: Id<Ruin> }`
  *
  * 条件类型里的检查用于让 TypeScript 正确理解：
  * `NameOf<T>` 是当前分类 `events` 下的合法 key。
@@ -240,8 +239,7 @@ type Merge<Base, Extra> = Omit<Base, keyof Extra> & Extra;
  *
  * 它是 EventBus 类型约束的核心：
  * - `DataByEvent<'resource:transfer'>` 使用 resource 的 categoryData。
- * - `DataByEvent<'structure:destroyed'>` 使用 structure 的 categoryData，
- *   但 `structureId` 会被具体事件覆盖为 `Id<Structure> | Id<Ruin>`。
+ * - `DataByEvent<'structure:destroyed'>` 同时包含 roomName、structureId 和 ruinId。
  *
  * 默认泛型参数是 `EventType`，因此不传具体事件时会得到所有事件 data 的联合类型。
  *

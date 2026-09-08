@@ -2,6 +2,7 @@ import type { ModuleContext } from '@/core/runtime/types';
 
 interface RoomShortcutsOpt extends ModuleContext {
   forceReInit?: boolean;
+  cacheLeaseTicks?: number;
 }
 
 type STRUCTURE_KEY =
