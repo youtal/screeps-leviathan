@@ -1,6 +1,21 @@
 <!--
   文件摘要：定义 Screeps 控制台帮助面板、模块区块和 API 折叠项的样式。
   createHelp 会把整个 style 标签与帮助 HTML 一并输出，类名仅供对应模板使用。
+
+  模块位置：src/utils/console/help 的样式资源，被 createHelp.ts 通过
+  `import style from './style.html'` 使用；本文件不含占位符，导入结果固定。
+
+  输入 / 输出与副作用：样式随每次 createHelp 输出重复下发，仅作用于控制台渲染出的
+  DOM，不写入游戏状态；构建期 htmlString 插件以 `minifyCSS: true` 压缩 style 内容，
+  以 `removeComments: true` 删除本注释块，因此说明文字不会进入上传产物。
+
+  两个 style 块的分工：
+  - 模块样式：.module-help 是整体竖向容器，.module-container 是单个模块区块，
+    .module-info/.module-title/.module-describe 排布标题行，.module-api-list 让 API
+    卡片横向换行排列；
+  - api 样式：.api-content-line 是单行内容；.api-container 及其 input/label 规则实现
+    纯 CSS 折叠——input 被隐藏，label 常驻显示，`input + .api-content` 默认 max-height
+    为 0，`:checked` 时才展开，因此不需要任何脚本即可查看 API 详情。
 -->
 <!-- 模块样式 -->
 <style>
@@ -31,7 +46,12 @@
     }
 </style>
 
-<!-- api 样式 -->
+<!--
+  api 样式：折叠交互由 input + label + 相邻兄弟选择器完成。
+  - label 的 for 与 input 的 id 由 createHelp 生成并保持一致，点击标题即切换选中态；
+  - max-height 过渡而非 display 切换，避免展开时重排抖动；
+  - 展开内容使用 overflow-x: auto，容纳较长的调用示例。
+-->
 <style>
     .api-content-line {
         width: max-content;

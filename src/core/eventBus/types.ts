@@ -1,8 +1,13 @@
 /**
  * 文件摘要：定义 EventBus 的事件注册表、数据推导规则、作用域和公共接口。
  *
+ * core/eventBus 的类型协议层，也是整个模块的“单一事实来源”：constants.ts 的
+ * 事件常量、createBus 的订阅/发布签名、以及使用总线的业务模块都从这里的类型
+ * 推导，因此新增事件只需要改本文件的 EventRegistry。
+ *
  * 本文件主要使用映射类型、条件类型与模板字符串类型，在编译期建立事件名和
- * 负载数据的一一对应；这些类型不会增加 Screeps 运行时 CPU 或 Memory 开销。
+ * 负载数据的一一对应；这些类型不会增加 Screeps 运行时 CPU 或 Memory 开销，
+ * 编译产物中不会留下任何对应代码。
  */
 import type { createBus } from './createBus';
 
@@ -16,6 +21,10 @@ import type { createBus } from './createBus';
  *
  * 事件最终会被表示为 `${category}:${eventName}` 格式的字符串字面量，
  * 例如 `resource:transfer`、`creep:spawn`、`structure:destroyed`。
+ *
+ * 因此修改此接口会同时影响三处：EventType 的合法事件名联合、DataByEvent 推导出
+ * 的载荷类型，以及 constants.ts 中 `satisfies Record<string, EventType>` 的编译
+ * 期校验。请按「先注册、再补常量、最后在业务里使用」的顺序维护。
  *
  * 维护规则：
  * - 普通事件如果只需要分类的通用 data，写成 `{}` 即可。
@@ -174,6 +183,10 @@ export type EventType = {
  *   得到 `['structure', 'destroyed']`
  *
  * 它只在类型层面工作，运行时不会生成任何代码。
+ *
+ * 模板字面量类型的推导按第一个 `:` 定位：`infer C` 取第一个 `:` 之前的部分，
+ * `infer E` 取剩余全部。因此该类型依赖事件名恰好只含一个 `:` 的约定，这正是
+ * `${category}:${eventName}` 协议所保证的；不满足约束的输入会让分支落到 never。
  */
 type SplitEvent<T extends EventType> = T extends `${infer C}:${infer E}`
   ? [C, E]
@@ -184,6 +197,9 @@ type SplitEvent<T extends EventType> = T extends `${infer C}:${infer E}`
  *
  * `SplitEvent<T>[0]` 得到的只是推导出来的字符串，因此再通过
  * `& Category` 告诉 TypeScript：这个结果一定是 EventRegistry 中的合法分类。
+ *
+ * 这是纯类型层面的收窄，不产生运行时断言；事件名若不是合法的
+ * `${category}:${eventName}` 组合，交集会退化成 never，并在后续索引时报错。
  */
 type CategoryOf<T extends EventType> = SplitEvent<T>[0] & Category;
 
@@ -251,6 +267,20 @@ type Merge<Base, Extra> = Omit<Base, keyof Extra> & Extra;
  *
  * `T extends EventType ? ... : never` 是分布式条件类型写法：
  * 当 T 是联合类型时，它会对联合中的每个事件分别计算 data，再合并为联合。
+ *
+ * 完整推导过程（以 `structure:destroyed` 为例）：
+ * 1. SplitEvent 把事件名拆成 `['structure', 'destroyed']`，CategoryOf 与 NameOf
+ *    分别取出分类 `'structure'` 和事件名 `'destroyed'`。
+ * 2. CategoryData 索引到 structure 的 categoryData，得到
+ *    `{ roomName: string; structureId: Id<Structure> }`。
+ * 3. EventExtraData 的 key 检查成立，取到 `{ ruinId: Id<Ruin> }`。
+ * 4. Merge 先用 `keyof Extra` 从 Base 中 Omit 掉同名字段，再并入 Extra；
+ *    对 `{}` 这类没有额外字段的事件，`Omit<Base, never>` 仍是 Base 本身。
+ *
+ * 所以 `DataByEvent<'structure:destroyed'>` 是
+ * `{ roomName; structureId; ruinId }`，而 `DataByEvent<'creep:spawn'>` 就是
+ * `{ creepName: string }`。createBus 用它约束 publish 的 data 与 subscribe 的
+ * listener 参数，事件名与载荷因此一一绑定，写错事件名或漏传字段都会编译失败。
  */
 export type DataByEvent<T extends EventType = EventType> = T extends EventType
   ? Merge<CategoryData<T>, EventExtraData<T>>
@@ -364,6 +394,9 @@ export type EventScope = GlobalScope | RoomScope | GroupScope;
  *
  * 注意：这个类型只描述存储能力。某个作用域是否已经暴露完整的
  * subscribe/publish/unsubscribe API，需要以 `createBus` 的返回值为准。
+ *
+ * 由 createBus 按此结构建立闭包仓库：global 在创建时初始化且始终存在；
+ * rooms/group 按需创建，并在最后一个订阅被移除后回收，避免长期运行时堆积空容器。
  */
 export interface ListenersStore {
   global: ListenersMap;
@@ -379,5 +412,9 @@ export interface ListenersStore {
  *
  * 代价是 types.ts 需要通过 `import type` 引用 createBus。`import type`
  * 只参与类型检查，不会生成运行时代码，因此不会引入实际循环依赖。
+ *
+ * 它是 ModuleContext.bus 的类型；Framework 构造插件作用域总线时也以它为契约
+ * （PluginContext.bus/events 都指向那个 scopedBus）。因为类型即实现签名的镜像，
+ * 调整 createBus 的返回值会立刻影响所有消费方。
  */
 export type Bus = ReturnType<typeof createBus>;

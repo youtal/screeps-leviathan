@@ -2,6 +2,16 @@
  * 文件摘要：集中保存项目级默认开关，供日志系统和 Runtime 初始化使用。
  *
  * 这些值只提供默认行为；模块仍可在创建上下文时覆盖自己的日志等级。
+ * 本文件只声明常量，不读取 Game/Memory，也没有模块级副作用，因此可以被任意层导入。
+ */
+
+/**
+ * createLog 的默认日志开关：warning/error/report 默认开启，debug/success/info 关闭。
+ *
+ * createLog 用 `??` 逐字段回退到这里的值，所以模块显式传 false 也能生效；键名 warning
+ * 对应 LogOptions 的 warn，report 只能由本对象控制（createLog 未从模块配置读取它）。
+ * 每个等级都会真实调用 console.log（error 还可触发 Game.notify），在热路径上输出
+ * 大量 debug/info 会直接消耗 tick CPU 并刷屏，因此默认保持关闭。
  */
 export const DEFAULT_LOG_CONFIG = {
   debug: false,
@@ -14,8 +24,19 @@ export const DEFAULT_LOG_CONFIG = {
 
 /**
  * Profiler 默认关闭，避免开发者未显式开启时承担每次函数调用的 CPU 取样成本。
+ *
+ * 目前只有独立 Runtime 工厂（core/runtime/createRuntime）读取该值；Framework 内置
+ * Profiler 的初始开关来自 createFramework 的 options.enableProfiler，内核默认同样是
+ * false。两处默认值需要保持一致，改动时请同时确认。
  */
 
 export const DEFAULT_PROFILER_ENABLE = false;
 
+/**
+ * group 作用域事件在 heap 中的默认存活上限，单位 tick（15000）。
+ *
+ * 分组消息只服务当前编队/任务，如果长期驻留会持续占用 heap 并拖慢订阅查找，因此用
+ * 该上限约束其生命周期。这里只声明上限值，过期语义与清理时机由消费方决定；截至本次
+ * 注释对齐，src/ 中还没有引用该常量的代码，接入前不要假定事件总线会自动过期。
+ */
 export const MAX_GROUP_EVENTBUS_TTL = 15000;

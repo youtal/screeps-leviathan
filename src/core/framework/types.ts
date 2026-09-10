@@ -1,15 +1,26 @@
 /**
- * 文件摘要：定义 Framework 的插件、生命周期、意图和持久化协议。
- * 上下文以泛型关联插件 Memory；JSON 数据与只能存活一个 tick 的执行闭包分离。
- * 类型只在编译期参与校验，运行时参数仍由各组件验证。
+ * 文件摘要：定义 Framework 的插件清单、生命周期钩子、上下文、意图与持久化协议，是全项目插件开发的类型契约。
+ * 本文件位于 core/framework 的类型层，被 createFramework、memoryInterceptor、intentBroker、pluginRegistry 与业务插件共同引用。
+ *
+ * 设计要点：上下文用泛型 M 关联插件 Memory 的静态形状，把可 JSON 序列化的持久数据与只能在单个 tick 内
+ * 使用的执行闭包（GameIntent.execute、onDispose 回调）在类型上分开；类型只在编译期参与校验，
+ * 运行时参数仍由各组件验证，因此此处不引入任何运行时代码或副作用。
  */
 import type { ModuleContext, CreateModuleContext } from '../runtime/types';
 import type { Profiler } from '../profiler';
 
-/** 持久化数据仅接受 JSON 值，禁止保存 Game 对象或执行函数。 */
+/**
+ * 持久化数据仅接受 JSON 值，禁止保存 Game 对象或执行函数。
+ * 这里是编译期的"可落盘"边界：undefined、Symbol、函数与循环引用都无法通过 JSON.stringify，
+ * 因此不允许出现在插件 Memory 的类型里；运行时的容器形状由 memoryInterceptor 校验。
+ */
 export type JsonValue =
   null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
-/** 递归只读视图阻止正常 TypeScript 代码绕过 commit；运行时不创建 Proxy。 */
+/**
+ * 递归只读视图阻止正常 TypeScript 代码绕过 commit；运行时不创建 Proxy，也不产生额外 CPU 开销。
+ * 条件类型先剥离数组分支，再用同态映射类型（homomorphic mapped type）保留各字段的可选性与
+ * 字面量类型；第三条分支让 number/string 等叶子类型原样通过，避免把原始值错误地映射成对象。
+ */
 export type DeepReadonly<T> = T extends JsonValue[]
   ? ReadonlyArray<DeepReadonly<T[number]>>
   : T extends { [key: string]: JsonValue }
@@ -18,12 +29,16 @@ export type DeepReadonly<T> = T extends JsonValue[]
 
 /** critical 变化后立即提交；checkpoint 按间隔合并提交。 */
 export type PersistenceLayer = 'critical' | 'checkpoint';
+/** 插件持久化声明；未声明时 Framework 不为该插件创建 Memory 分区，也不接受 migrate。 */
 export interface PluginPersistenceConfig {
   layer: PersistenceLayer;
   /** 仅 checkpoint 使用，表示 dirty 后允许延迟的最大 tick 数；默认 100。 */
   checkpointInterval?: number;
 }
-/** 诊断使用的执行位置；commit 是意图提交边界，framework 表示不属于插件的内核工作。 */
+/**
+ * 诊断使用的执行位置；commit 是意图提交边界，framework 表示不属于插件的内核工作。
+ * 该值同时是权限判据：订阅只允许在 setup，意图只允许在 tickExecute，Kernel 据此拒绝越权调用。
+ */
 export type Phase =
   | 'setup'
   | 'tickBegin'
@@ -44,7 +59,7 @@ export interface PluginManifest {
   optional?: readonly string[];
   /** 服务名全局独占；setup 成功前必须发布全部声明的服务。 */
   provides?: readonly string[];
-  /** 仅在依赖已满足的候选之间比较，大值先执行；不覆盖拓扑约束。 */
+  /** 仅在依赖已满足的候选之间比较，大值先执行；不覆盖拓扑约束。缺省 0，同值按注册顺序稳定排列。 */
   priority?: number;
   /** 仅基础服务使用；仍受硬 CPU 收尾边界限制。 */
   critical?: boolean;
@@ -118,8 +133,9 @@ export interface PersistenceNamespace<M extends object = Record<string, JsonValu
 }
 /**
  * 在基础 Runtime 上添加受生命周期约束的能力；M 关联插件 Memory 的静态形状。
- * 上下文跨 tick 缓存；Game 对象不能跨 tick 保存。插件状态只能经 persistence 访问，
- * 使 Framework 能准确决定哪些分区需要序列化与写回。
+ * 上下文由 Kernel 在首次 setup 时创建并按插件缓存，同一激活周期内跨 tick 复用（tick 字段是
+ * 访问器，每次读取当前 Game.time），global reset 或重新启用后重建。Game 对象不能跨 tick 保存，
+ * 插件状态只能经 persistence 的稳定句柄访问，使 Framework 能准确决定哪些分区需要序列化与写回。
  */
 export interface PluginContext<M extends object = Record<string, JsonValue>>
   extends ModuleContext {

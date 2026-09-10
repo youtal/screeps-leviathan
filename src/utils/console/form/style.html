@@ -2,6 +2,23 @@
   文件摘要：定义 Screeps 控制台表单控件的内联样式。
   createForm 将整个 style 标签与表单 HTML 拼接后输出；hopgoldy 前缀用于降低
   与游戏页面既有样式发生选择器冲突的概率。
+
+  模块位置：src/utils/console/form 的样式资源，仅被 createForm.ts 通过
+  `import style from './style.html'` 使用，不参与任何逻辑判断。
+
+  输入 / 输出：本文件不含占位符，导入结果就是一段固定字符串；createForm 把它原样
+  前置到表单 HTML 之前，因此样式随每次输出重复下发，不需要页面额外注入。
+
+  依赖与构建约定：Rollup 的 htmlString 插件在构建期用 html-minifier-terser 处理，
+  `minifyCSS: true` 会压缩 style 内容、`removeComments: true` 会删除本注释块，
+  因此下面的说明文字不会出现在上传产物里。
+
+  样式分组（按选择器）：
+  - .hopgoldy-field / .hopgoldy-field span：表单项容器与标签，横向排列并统一标签颜色；
+  - input.hopgoldy、select.hopgoldy：深色输入控件，用 !important 覆盖控制台页面对
+    输入元素的内边距与背景设定；
+  - button.hopgoldy：提交按钮，使用 pointer 光标提示可点击。
+  所有规则都是页面级内联样式，只在控制台渲染本次输出时生效，不写入游戏状态。
 -->
 <style>
     .hopgoldy-field {

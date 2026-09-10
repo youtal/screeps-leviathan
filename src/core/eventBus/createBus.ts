@@ -1,10 +1,19 @@
 /**
  * 文件摘要：实现支持 global、room 与 group 三种作用域的同步内存消息总线。
  *
+ * core/eventBus 的运行时实现：types.ts 定义事件协议与存储结构，本文件按协议
+ * 存取订阅者。总线由 createRuntime 或 Framework 创建一次并在模块间共享，事件
+ * 常量与类型可从模块入口导入。
+ *
+ * 输入是 subscribe/unsubscribe/publish 传入的作用域、事件名与数据；输出是三个
+ * 闭包方法，其中 publish 返回本轮尝试通知的监听器数量（含抛错者，没有订阅时为
+ * 0），便于调用方判断事件是否真的被消费。
+ *
  * 总线通过嵌套 Map 管理订阅者；发布时先取得监听器快照，再同步依次调用。
  * 快照保证回调中的订阅变更只影响下一次发布，异常隔离保证一个监听器失败
  * 不会阻断其他监听器。全部状态保存在工厂闭包内，不产生 Screeps Memory
- * 序列化开销，但每次全局重置后会随模块重新初始化。
+ * 序列化开销，但每次全局重置后会随模块重新初始化，因此订阅只在当前 global
+ * 生命周期内有效，跨 tick 依赖由持有总线的装配方在启动阶段重新注册。
  */
 import {
   DataByEvent,
@@ -45,7 +54,15 @@ const scopeLabel = (scope: EventScope): string => {
   }
 };
 
+/**
+ * 工厂本身只创建闭包状态，不订阅、不发布，也不访问 Game 或 Memory：
+ * 订阅表随实例驻留 heap，global reset 后由装配方（Runtime 或 Framework）重新创建。
+ */
 export const createBus = () => {
+  /**
+   * 总线日志使用 EventBus 前缀与默认日志配置（info 默认关闭），正常运行时不
+   * 会被订阅/发布明细刷屏；排错时在 setting 中打开对应等级即可观察调用链。
+   */
   const log = createLog('EventBus', {});
 
   /**
@@ -53,6 +70,9 @@ export const createBus = () => {
    *
    * global 是单个 ListenersMap；room 和 group 会按 roomName/groupId
    * 再分一层 Map。这样可以让不同 room/group 的同名事件彼此隔离。
+   *
+   * 仓库随闭包存在，不进入 Memory：订阅者的函数无法序列化，也没有跨 tick
+   * 持久化的意义；空容器会由 deleteEmptyScope 及时回收，避免长期运行时堆积。
    */
   const store: ListenersStore = {
     global: new Map(),
@@ -133,6 +153,14 @@ export const createBus = () => {
       log.info(`event ${eventType} added to ${label}`);
     }
 
+    /**
+     * 同一个作用域下，一个 subscriber 只保留一个回调：重复订阅会被覆盖并记录
+     * warn，让“以为注册了两份逻辑、实际只剩一份”的问题能立刻暴露。
+     *
+     * 存储层的值类型是 `(data: unknown) => void`，这里的断言把强类型 Listener<T>
+     * 擦除为存储层的通用签名；类型正确性由 subscribe 的泛型参数 T 保证，运行时
+     * 不做校验。
+     */
     const eventListeners = listeners.get(eventType)!;
     if (eventListeners.has(subscriber)) {
       log.warn(
@@ -154,6 +182,9 @@ export const createBus = () => {
      *
      * 如果作用域、事件或 subscriber 任意一层不存在，都按“没有这个订阅”
      * 处理并记录 warn。这样 unsubscribe 可以安全地重复调用。
+     *
+     * 删除后若事件级 Map 已空，会继续回收空容器；这条清理链让长期运行的
+     * heap 占用只与“当前有效订阅数”相关，而与历史上出现过的房间/分组数量无关。
      */
     const listeners = getScopedListeners(scope);
     const label = scopeLabel(scope);
@@ -184,6 +215,9 @@ export const createBus = () => {
     /**
      * `Array.from` 复制当前条目，避免回调执行期间的 subscribe/unsubscribe
      * 改变本轮遍历集合。没有监听器时返回 undefined，供发布路径快速退出。
+     *
+     * 复制成本与监听器数量线性相关（O(n) 时间与一次数组分配），且只在确有订阅者
+     * 时发生；快照只在本轮 publish 内有效，用完即被 GC 回收，不跨 tick 保留。
      */
     const eventListeners = getScopedListeners(scope)?.get(eventType);
     return eventListeners?.size
@@ -205,6 +239,11 @@ export const createBus = () => {
      * - 逐个调用 listener，并隔离 listener 抛出的异常。
      *
      * 广播规则由 publish 负责组合 notify 调用。
+     *
+     * 监听器同步执行，因此调用的 CPU 成本直接计入当前 tick；异常只记录 error
+     * 日志而不向上抛出，避免某个订阅者出错中断整轮派发或影响发布方的业务逻辑，
+     * 代价是发布方无法感知订阅者失败。
+     * 返回值是快照长度，即本轮尝试调用的监听器数量，包含执行中抛错的那些。
      */
     if (!snapshot) return 0;
 
@@ -239,7 +278,13 @@ export const createBus = () => {
      *
      * group 不自动上报 global，是为了让任务组、编队等内部消息保持隔离，
      * 避免污染全局事件流。
-     * 返回值是本次实际调用的监听器数量；无订阅时直接返回 0，不生成日志。
+     * 返回值是各次 notify 计数之和，即本轮尝试通知的监听器数量（含执行中抛错
+     * 的那些）；无订阅时直接返回 0，不生成日志。
+     *
+     * room 分支先取好两份快照再派发：room 回调里新增/取消的订阅即使命中
+     * global 作用域，也不会改变本轮 global 的调用集合。globalScope 只是为了让
+     * getScopedListeners/notify 复用同一套作用域接口而临时构造的判别对象，
+     * global 分支会直接返回 store.global，不产生 Map 查找。
      */
     if (scope.scope === 'room') {
       const roomSnapshot = createSnapshot(scope, eventType);
@@ -255,6 +300,10 @@ export const createBus = () => {
     return notify(scope, eventType, data, createSnapshot(scope, eventType));
   };
 
+  /**
+   * 只暴露这三个方法，store 与日志组件都被闭包封装，外部无法绕过作用域规则
+   * 直接篡改订阅表；同一实例应被所有模块复用，才能保证事件互通。
+   */
   return {
     subscribe,
     unsubscribe,

@@ -4,8 +4,14 @@
  * Profiler 以闭包保存开关、标签集合和调用栈，通过 `Game.cpu.getUsed()` 在函数
  * 前后取样。只有启用时才承担取样和 Memory 累加成本；禁用时包装函数直接转调
  * 原函数。统计数据由 memory.ts 提供的访问器统一维护。
- * 包装器和调用栈只驻留 heap，global reset 后重建；累计值从常驻 Memory 命名空间读取。
+ * 包装器和调用栈只驻留 heap，global reset 后重建；累计值写入宿主提供的统计命名空间，
+ * 本模块既不缓存该引用，也不隐式访问全局 Memory。
  * 只测量同步调用区间，不等待 Promise 完成；采样或写入故障不得改变业务返回/抛错行为。
+ *
+ * 存储来源完全由宿主的 getMemory 决定：Framework 传入检查点分区，独立 Runtime 传入
+ * 闭包 heap 对象，本模块自身不访问全局 Memory，也不负责序列化与写回（标脏只通过可选的
+ * markMemoryDirty 上报），因此累计值何时真正落盘属于宿主的生命周期。访问器无法建立时
+ * 返回 null，宿主据此整体降级为“不统计”，而不是保留一个永远不记录的实例。
  */
 import type { ProfilerContext, Profiler } from './types';
 import { createMemoryAccessor } from './memory';
@@ -19,11 +25,17 @@ import type { Wrap } from '@/core/runtime/types';
  *
  * 它支持嵌套调用：子调用耗时会累加到父调用的 childTime，父调用的
  * selfTime 会扣除这部分时间，从而区分“自身耗时”和“包含子调用的总耗时”。
+ *
+ * context.enable 只在创建时读取一次作为初始开关，之后的 enable()/disable() 只改内部
+ * 变量、不回写上下文对象；getMemory 则保持为访问器，每次统计操作都重新求值，因此宿主
+ * 迁移或替换统计命名空间后，后续样本自动写入新对象。
  */
 export const createProfiler = (context: ProfilerContext): Profiler | null => {
+  // 只在这里读取一次 context：getMemory 留作惰性访问器，enableProfiler 是闭包内的可变开关。
   let { getMemory, enable: enableProfiler } = context;
   const { log, getGame } = context.env;
 
+  // 第三个参数是可选的标脏回调：省略表示宿主不需要写回登记（独立 Runtime 的 heap 统计）。
   const db = createMemoryAccessor(getMemory, log, context.markMemoryDirty);
   if (!db) {
     log.error('无法创建 Profiler');
@@ -33,7 +45,10 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
   /** 运行时开关只修改闭包变量，因此已经创建的 wrapper 会立即响应。 */
   const enable = () => (enableProfiler = true);
   const disable = () => (enableProfiler = false);
-  /** 只清累计数据，标签占用和已创建包装器保留，不影响它们后续继续统计。 */
+  /**
+   * 只清累计数据，标签占用和已创建包装器保留，不影响它们后续继续统计。
+   * 清空同样先标脏，因此 reset 本身会触发宿主的下一次提交。
+   */
   const reset = () => db.clear();
 
   /**
@@ -41,6 +56,8 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
    *
    * 同一个 label 被重复 wrap 会让统计结果难以理解，因此这里选择拒绝二次包裹，
    * 并返回原函数。若未来需要支持同名函数，可以在 label 层引入模块前缀。
+   * 被拒绝的调用方拿到的是未包装函数，这部分调用不会产生统计，因此 label 必须全局唯一
+   * （框架按 framework.<phase> 与 plugin.<id>.<phase> 生成，业务包装时需自行加模块前缀）。
    */
   // 无原型对象允许 constructor 等普通字符串作为标签，不误命中继承属性。
   const usedLabel: Record<string, boolean> = Object.create(null);
@@ -50,6 +67,8 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
    *
    * 每进入一个被包裹函数就 push 一条记录；finally 中 pop 并计算耗时。
    * childTime 用于记录 profiler 能感知到的子调用耗时。
+   * 栈由本实例的所有 wrapper 共享，因此跨模块的嵌套调用也能正确归属；帧随调用结束出栈，
+   * 不写入 Memory，也不存在跨 tick 或跨 global 的残留帧。
    */
   const stack: { label: string; start: number; childTime: number }[] = [];
 
@@ -60,6 +79,7 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
    * 可以影响已经包裹过的函数。
    * T 与末尾 as T 保持参数/返回签名；普通 function 的动态 this 配合 apply 保留方法语义。
    * 包装层的 any 只用于转发未知参数，不转换业务输入或吞并业务异常。
+   * label 冲突时不抛错，只记 warn 并降级返回原函数，避免观测配置错误中断业务。
    */
   const wrap: Wrap = <T extends (...args: any[]) => any>(
     label: string,
@@ -75,6 +95,7 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
        * 禁用状态下直接执行原函数。
        *
        * 仍然返回 wrapper，是为了让 enable/disable 对已包裹函数即时生效。
+       * 该分支只有一次闭包变量判断和一次 apply，是关闭采样时的全部额外开销。
        */
       if (!enableProfiler) return fn.apply(this, args);
 
@@ -96,6 +117,8 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
          * 使用 finally 保证原函数抛错时也能正确出栈。
          *
          * 先出栈再采样，采样本身失败也不会遗留栈帧；失败样本不写入 Memory。
+         * 即使被包裹的是 async 函数，这里也只在返回 Promise 时同步执行一次，异步阶段
+         * 不计时，因此不会出现跨越 await 的悬挂帧。
          */
         /** 非空断言对应前面的同步 push；total 是包含子调用的区间，self 扣除已记录子区间。 */
         const record = stack.pop()!;
@@ -117,6 +140,11 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
    *
    * filter 存在时只输出单个 label；否则按 selfTime 降序输出全部记录。
    * detailed 参数目前预留，后续可以用于输出调用树或更细粒度信息。
+   *
+   * 报告是只读操作：过滤分支走 db.get，命中不存在的 label 会得到全零记录而不会创建 Memory 项。
+   * 全量分支对当前命名空间做一次 Object.entries 与排序，成本 O(n log n)，只在显式调用时发生，
+   * 不进入每 tick 热路径。输出经 log.info/log.report，受模块日志开关控制；平均时间用 `|| 0`
+   * 兜住 calls 为 0 时的 NaN。
    */
   const report = (detailed = false, filter = ''): void => {
     if (filter) {

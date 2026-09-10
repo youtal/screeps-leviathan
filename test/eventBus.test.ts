@@ -1,7 +1,24 @@
+/**
+ * 文件摘要：验证内存事件总线（@/core/eventBus 的 createBus）的作用域路由与容错行为。
+ *
+ * 覆盖模块：src/core/eventBus/createBus.ts。覆盖边界：global/room/group 三种作用域的
+ * 投递范围（room 事件同时投给本房间与 global 订阅者，group 事件不外泄给 global）、
+ * 按三元组取消订阅、无订阅者时返回 0 且不打日志、重名订阅覆盖旧监听器并告警、
+ * 单个监听器抛错不影响其他监听器、发布期使用监听器快照（回调内的订阅变更只对下一次
+ * 发布生效）。
+ *
+ * 替代实现：总线状态全部保存在工厂闭包内，用例无需 Screeps 全局对象；仅通过
+ * jest.fn 监听器与 console.log spy（createLog 的输出通道）观察调用与日志，
+ * afterEach 统一恢复 spy。
+ *
+ * 运行方式：npm test（ts-jest，testEnvironment=node）；不需要 .secret.json，
+ * 不执行构建与网络请求。
+ */
 import { createBus } from '@/core/eventBus';
 
 describe('EventBus', () => {
   afterEach(() => {
+    // 用例会 spy console.log，统一恢复以免日志断言跨用例互相污染。
     jest.restoreAllMocks();
   });
 
@@ -19,6 +36,7 @@ describe('EventBus', () => {
     expect(mockListener).toHaveBeenCalledWith(data);
   });
 
+  /** 同时挂 global、本房间与其他房间三个订阅，才能区分「广播」与「误投递到无关作用域」。 */
   it('should publish room events to room and global subscribers', () => {
     const bus = createBus();
     const globalListener = jest.fn();
@@ -82,6 +100,7 @@ describe('EventBus', () => {
     expect(roomListener).not.toHaveBeenCalled();
   });
 
+  /** group 与 global 是并列作用域而非包含关系：group 事件只投给同组订阅者，global 订阅者不应收到。 */
   it('should publish group events only to matching group subscribers', () => {
     const bus = createBus();
     const groupListener = jest.fn();
@@ -111,6 +130,7 @@ describe('EventBus', () => {
     expect(globalListener).not.toHaveBeenCalled();
   });
 
+  /** 取消订阅按「作用域 + 事件 + 订阅者名」三元组定位；两个用例分别覆盖 global 与 room 作用域。 */
   it('should unsubscribe from global events', () => {
     const bus = createBus();
     const mockListener = jest.fn();
@@ -166,6 +186,7 @@ describe('EventBus', () => {
     expect(logSpy).not.toHaveBeenCalled();
   });
 
+  /** 重名订阅会覆盖旧监听器：静默覆盖会让排错困难，因此既要有日志，也要确认实际生效的是新监听器。 */
   it('should warn when overwriting a subscriber', () => {
     const bus = createBus();
     const listener1 = jest.fn();
@@ -188,6 +209,7 @@ describe('EventBus', () => {
     expect(listener2).toHaveBeenCalledWith(data);
   });
 
+  /** 观测方（业务监听器）抛错不得中断本轮其他监听器，也不得让发布方抛出，错误只记录到日志。 */
   it('should continue notifying other subscribers if one throws', () => {
     const bus = createBus();
     const event = 'creep:death';
@@ -212,6 +234,10 @@ describe('EventBus', () => {
     expect(errorLogged).toBe(true);
   });
 
+  /**
+   * 发布时先取监听器快照再依次调用（room 快照先于 global），因此回调内的
+   * unsubscribe/subscribe 只影响下一次发布：同一轮通知既不会漏发也不会重发。
+   */
   it('should snapshot room and global listeners before invoking either scope', () => {
     const bus = createBus();
     const calls: string[] = [];

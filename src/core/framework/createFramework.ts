@@ -1,7 +1,12 @@
 /**
- * 文件摘要：组合 Framework 核心组件，提供可直接导出的同步 loop 与插件管理接口。
- * 注册变更在 tick 边界验证并应用；Memory 就绪后才创建 Runtime/Profiler 和执行 setup。
- * Kernel 持有 global 级服务和包装缓存，本 tick 的参与集合、失败状态与意图独立创建。
+ * 文件摘要：Framework 的装配层，组合 Memory 拦截器、CPU 准入、错误映射、插件注册表和意图仲裁，
+ * 对外提供可直接导出的同步 `loop`，以及 register/enable/disable/unregister/recover/getStatus 管理接口。
+ * 它是 core/framework 的入口：向下依赖 eventBus、profiler 与 runtime/env，向上由 app 层创建一次。
+ *
+ * 生命周期约定：注册变更只在 tick 边界统一验证并原子应用；Memory 挂载成功后才创建 Profiler、
+ * 生成 Context 并执行插件 setup。Kernel 闭包持有 global 级服务、Context 和包装缓存，本 tick 的
+ * 参与集合、失败状态与意图每 tick 重建。global reset 后本工厂重新执行，只有持久分区中的业务
+ * 数据和关键健康状态可恢复，Game 对象不得跨 tick 保存。
  */
 import { createBus } from '../eventBus';
 import type { Bus, EventScope, EventType, DataByEvent } from '../eventBus';
@@ -30,6 +35,7 @@ import type {
  */
 export const createFramework = (options: FrameworkOptions = {}) => {
   const getGame = options.getGame ?? (() => Game);
+  /** 默认端口直连 RawMemory；注入 memoryPort 可在测试中替换读写与挂载，完全不触碰宿主全局对象。 */
   const memory = createMemoryInterceptor(
     options.memoryPort ?? {
       read: () => RawMemory.get(),
@@ -47,6 +53,7 @@ export const createFramework = (options: FrameworkOptions = {}) => {
   const errors = createErrorMapper(options.loadSourceMap, options.report);
   const registry = createPluginRegistry();
   const bus = createBus();
+  /** 连续失败达到该值即熔断；熔断插件不参与后续 tick，必须显式 recover 才重新准入。 */
   const threshold = options.failureThreshold ?? 3;
   if (!Number.isInteger(threshold) || threshold < 1)
     throw new Error('Invalid failure threshold');
@@ -67,7 +74,10 @@ export const createFramework = (options: FrameworkOptions = {}) => {
   let profileReady = false;
   /** 每个固定标签只 wrap 一次；Profiler 延迟就绪时清空，之后随实例存活。 */
   const wrappers = new Map<string, (callback: () => any) => any>();
-  /** 包装器构造失败时降级，不能因观测初始化失败而跳过业务。 */
+  /**
+   * 包装器构造失败时降级，不能因观测初始化失败而跳过业务钩子。
+   * 命中缓存的包装器后，单次调用的额外开销只剩一次 Map 查询与一次函数调用。
+   */
   const measure = <T>(label: string, callback: () => T): T => {
     let wrapper = wrappers.get(label);
     if (!wrapper) {
@@ -82,6 +92,7 @@ export const createFramework = (options: FrameworkOptions = {}) => {
     }
     return wrapper(callback);
   };
+  // 错误映射与 report 回调同样走 Profiler 计时，避免故障路径的耗时在统计中隐形。
   errors.setMeasure(measure);
   /** 动态调用归属，用于限制 setup/submit 权限；嵌套事件回调退出后必须恢复外层值。 */
   let currentPhase: Phase = 'framework';
@@ -338,6 +349,7 @@ export const createFramework = (options: FrameworkOptions = {}) => {
     /** participants 已激活且获准参与；entered 确实进入 begin，决定谁必须得到 end。 */
     const participants: { plugin: LeviathanPlugin; ctx: PluginContext }[] = [];
     const entered: typeof participants = [];
+    /** 只有 begin 成功挂载后才允许 finally 写回；加载失败时保持 RawMemory 原样。 */
     let mounted = false;
     try {
       // 先摘下本批队列；执行期间新排队的命令留给下一 tick，失败批次丢弃而不自动重试。
@@ -478,6 +490,8 @@ export const createFramework = (options: FrameworkOptions = {}) => {
         });
       }
       if (!safeMode)
+        // 四个注入回调依次提供内核策略：依赖可用性判定、CPU 剩余预算、带错误边界的执行入口、
+        // 以及计时包装。仲裁顺序与锁语义由 broker 负责，Kernel 只决定"谁有资格参与本次提交"。
         broker.commit(
           (id) => {
             // 提交途中依赖可能新失败，递归检查整个必需依赖链；图已无环，无需环保护。
@@ -548,6 +562,7 @@ export const createFramework = (options: FrameworkOptions = {}) => {
         }
       }
       running = false;
+      // 无论本轮是否 safeMode，都恢复内核归属状态，避免污染下一次 loop 的权限判定。
       currentPhase = 'framework';
       currentPlugin = '';
       activeCleanup = undefined;

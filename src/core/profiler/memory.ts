@@ -4,6 +4,10 @@
  * 每次操作通过 getMemory 定位当前统计命名空间，兼容 Framework 初始化迁移；
  * Framework 的 Memory 在同一 global 生命周期常驻 heap，访问器不自行缓存第二份引用。
  * 更新和清空原地修改当前对象，不自行序列化；写回由宿主或 Framework 统一负责。
+ *
+ * 本模块是 Profiler 与宿主存储之间的适配层：可选的 markDirty 用于在修改前登记待提交
+ * （Framework 的 profiler 检查点分区），省略时统计只存活在调用者闭包中（独立 Runtime 的
+ * heap 模式）。访问器不校验记录结构、不做深拷贝，因此统计对象必须保持可 JSON 序列化。
  */
 import type { Record, ProfilerMemory } from './types';
 import { createLog } from '@/utils/console';
@@ -19,6 +23,9 @@ import { createLog } from '@/utils/console';
  *
  * 如果首次 getMemory 返回空值，则返回 null；不承担完整 schema 校验。
  * 访问器抛出的异常由调用方处理，Profiler 的计时路径会隔离这类观测故障。
+ *
+ * 参数约定：getMemory 必须同步返回当前命名空间（可能为空值）；markDirty 在每次原地修改
+ * 之前调用，默认空实现用于纯 heap 统计，接入持久化管理器时必须传入真实标脏回调。
  */
 export const createMemoryAccessor = (
   getMemory: () => ProfilerMemory,
@@ -34,6 +41,8 @@ export const createMemoryAccessor = (
    * 读取单个 label 的统计记录。
    *
    * 不直接写入默认记录，是为了让只读 report/filter 不改变 memory 内容。
+   * 用 hasOwnProperty 而不是真值判断，是为了不把原型链上的 constructor/toString 等
+   * 成员当成统计记录返回；代价是每次读取多一次自有属性检查。
    */
   const get = (key: string): Record => {
     const memory = getMemory();
@@ -45,7 +54,8 @@ export const createMemoryAccessor = (
   /**
    * 返回原始 memory 引用。
    *
-   * report 会基于它做 Object.entries 和排序；调用方不应在外部长期持有它。
+   * report 会基于它做 Object.entries 和排序；由于 getMemory 每次求值，这个引用只在
+   * 宿主下一次迁移命名空间前有效，调用方不应在外部长期持有它。
    */
   const getAll = (): ProfilerMemory => getMemory();
 
@@ -53,6 +63,8 @@ export const createMemoryAccessor = (
    * 累加一次调用的 profiler 数据。
    *
    * 第一次看到某个 label 时先初始化记录，再分别累加 total/self/calls。
+   * 单个样本只有常数次属性读写（O(1)），不产生新对象；记录字段保持数字类型，
+   * 因此整体 JSON.stringify 序列化开销与 label 数量成正比，而不是与调用次数成正比。
    */
   const update = (key: string, _selfTime: number, _totalTime: number) => {
     // 在任何原地修改之前标脏；后续写入抛错时仍保留保守的待提交状态。
@@ -76,6 +88,8 @@ export const createMemoryAccessor = (
    * 原地清空 memory。
    *
    * 不替换当前统计命名空间，以保留本次读取者的引用；成本与标签数线性相关。
+   * 标脏先于删除，避免删除过程中抛错留下“已改但未登记”的状态；标签占用记录保留在
+   * Profiler 的 usedLabel 中，因此已创建的 wrapper 会在后续调用里从 0 重新累计。
    */
   const clear = () => {
     markDirty();

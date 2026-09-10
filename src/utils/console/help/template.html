@@ -2,6 +2,25 @@
   文件摘要：保存帮助面板、模块区块和 API 行的 HTML 模板片段。
   createHelp 按 `;;` 顺序拆分本文件，再递归填入 `{占位符}`；checkbox 与 label
   组合提供无需脚本的 API 详情折叠交互。
+
+  模块位置：src/utils/console/help 的模板资源，由 createHelp.ts 通过
+  `import template from './template.html'` 导入，自身不含逻辑与状态。
+
+  输入 / 输出：createHelp 在模块求值期把整段文本切成 4 段，顺序为
+  模块帮助容器 / 单个模块区块 / API 折叠容器 / API 内容行，再由 replaceHtml 填充
+  `{占位符}`。片段定位完全依赖顺序，新增片段只能追加在末尾，否则会打乱既有映射。
+
+  结构约定：
+  - 模块区块里的 `<text>` 是非标准标签，浏览器按未知内联元素处理，样式完全依赖
+    style.html 中的类选择器；
+  - API 容器的 label 的 for 与 input 的 id 共用 `{checkboxId}`，二者必须一致，
+    否则点击标题不会展开内容；
+  - 折叠是纯 CSS 交互（:checked + .api-content），因此本模板没有任何内联脚本，
+    也不受 createHelp 末尾折叠换行（fixRetraction）的影响。
+
+  构建约定：htmlString 插件在构建期用 html-minifier-terser 压缩本文件，
+  removeComments 会删除所有 HTML 注释（包括本说明与下方各行注释中的分隔符字样），
+  因此产物里的分隔符只出现在真实片段之间。
 -->
 <!-- 模块帮助容器 -->
 <div class="module-help">{content}</div>
