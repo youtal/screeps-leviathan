@@ -110,10 +110,12 @@ export type CreateModuleContext = (
  * - profiler：允许禁用、替换或复用 profiler。
  * - enableProfiler：控制默认 profiler 初始开关。
  * - getProfilerMemory：控制 profiler 数据落在哪里。
+ * - markProfilerMemoryDirty：与访问器配套，在 Profiler 原地写入前显式标脏。
  */
 export interface RuntimeOptions {
   bus?: Bus;
   profiler?: Profiler | null;
   enableProfiler?: boolean;
   getProfilerMemory?: () => ProfilerMemory;
+  markProfilerMemoryDirty?: () => void;
 }

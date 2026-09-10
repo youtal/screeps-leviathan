@@ -49,7 +49,9 @@ describe('Runtime context factory', () => {
   it('should share bus and profiler while creating module-specific env', () => {
     const bus = createBus();
     const profiler: Profiler = {
-      wrap: jest.fn(<F extends (...args: any[]) => any>(_: string, fn: F) => fn),
+      wrap: jest.fn(
+        <F extends (...args: any[]) => any>(_: string, fn: F) => fn
+      ),
       enable: jest.fn(),
       disable: jest.fn(),
       reset: jest.fn(),
@@ -75,7 +77,7 @@ describe('Runtime context factory', () => {
     expect(listener).toHaveBeenCalledWith({ creepName: 'Worker1' });
   });
 
-  it('should create default profiler memory in Memory.profiler', () => {
+  it('should keep default profiler data out of global Memory', () => {
     const createContext = createRuntime({ enableProfiler: true });
     const context = createContext('Worker');
     const wrapped = context.profiler!.wrap('task', () => 'done');
@@ -86,16 +88,16 @@ describe('Runtime context factory', () => {
       .mockReturnValueOnce(6);
 
     expect(wrapped()).toBe('done');
-    expect(Memory.profiler).toEqual({
-      task: { totalTime: 5, selfTime: 5, calls: 1 },
-    });
+    expect((Memory as any).profiler).toBeUndefined();
   });
 
   it('should use injected profiler memory accessor', () => {
     const memory: ProfilerMemory = {};
+    const markDirty = jest.fn();
     const createContext = createRuntime({
       enableProfiler: true,
       getProfilerMemory: () => memory,
+      markProfilerMemoryDirty: markDirty,
     });
     const context = createContext('Worker');
 
@@ -107,6 +109,7 @@ describe('Runtime context factory', () => {
     context.profiler!.wrap('custom', () => undefined)();
 
     expect(memory.custom).toEqual({ totalTime: 3, selfTime: 3, calls: 1 });
-    expect(Memory.profiler).toBeUndefined();
+    expect(markDirty).toHaveBeenCalledTimes(1);
+    expect((Memory as any).profiler).toBeUndefined();
   });
 });

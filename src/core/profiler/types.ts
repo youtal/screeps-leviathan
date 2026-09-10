@@ -27,6 +27,8 @@ interface Profiler extends HasWrap {
  */
 interface ProfilerContext extends EnvContext {
   getMemory: () => ProfilerMemory;
+  /** 持久化管理器的显式标脏回调；仅存于调用者闭包的统计可省略。 */
+  markMemoryDirty?: () => void;
   enable: boolean;
 }
 

@@ -33,7 +33,7 @@
 
 **持久化说明**：
 
-- 用户手动定义的房间偏好、边界（有向边）偏好存储在 `Memory` 中，确保在脚本重启或 global reset 后依然有效。
+- 用户手动定义的房间偏好、边界（有向边）偏好计划通过 Framework 的统一持久化接口存储，确保在脚本重启或 global reset 后依然有效。
 - 所有的性能开销项（CostMatrix、Flow Field、跨房路由场缓存、避让请求等）只存在于 heap 中。脚本重新载入后，这些数据从空缓存开始运行，避免继承上一次 global 生命周期中的副作用。
 
 ## 3. 模块结构
@@ -927,7 +927,7 @@ fallback 路径只做短期 heap 缓存，并且不写入 Memory。
 
 ### 11.2 持久化数据 (Memory)
 
-以下数据存储在 `Memory` 中，用于跨 global 生命周期保留用户配置：
+以下数据计划存入插件的持久命名空间，用于跨 global 生命周期保留用户配置：
 
 - `roomPreferences`: 房间通行成本与可见性偏好。
 - `boundaryPreferences`: 房间间有向边的通行偏好。
@@ -998,7 +998,7 @@ interface GotoDebugInfo {
 `goto` 复用当前项目基础设施：
 
 - 使用 `ModuleContext.env` 访问 `Game`、`Room`、`getObjectById` 和日志。
-- **Memory 挂载**：模块需要访问 `Memory.goto`（或其它指定位置）以读写持久化的房间与边界偏好。
+- **持久化入口**：模块作为 Framework 插件运行时，只通过 `context.persistence` 读写房间与边界偏好，不直接访问 `Memory.goto` 或 RawMemory。
 - 使用 `bus.subscribe` 监听建筑相关事件，并由模块内部判断是否调用 `updateCostMatrix(roomName, { critical: true })`；重大通行变化由入口清理本房间 Flow Field。
 - 使用 `profiler.wrap` 包裹 A*、CostMatrix 构建、Flow Field 构建等高 CPU 函数。
 - 使用 `src/utils/priorityQueue.ts` 实现 A* 与 Dijkstra。
@@ -1061,7 +1061,7 @@ interface GotoDebugInfo {
 - 边界收敛式复用必须保证边界后继路径接入可信区域，否则可能把 creep 带回旧目标。
 - 首版不做两阶段移动调度，两个赶路 creep 争抢同一地块时可能有 1 tick 停顿；该代价被视为可接受。
 - 同 tick 大量新目标可能造成建场峰值，需要 build budget 限制。
-- heap-only 缓存会在 global reset 后冷启动，首批移动需要 fallback 和预算保护。
+- 模块闭包缓存会在 global reset 后冷启动，首批移动需要 fallback 和预算保护。
 
 ## 16. 术语
 

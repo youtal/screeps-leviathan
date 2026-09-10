@@ -1,9 +1,9 @@
 /**
- * 文件摘要：定义 Screeps 每 tick 调用的顶层 loop 入口。
- *
- * 当前入口仍处于项目骨架阶段，只输出 tick 编号；后续应用装配应从 app 层引入，
- * 并保持这里仅负责驱动运行时，避免在每个 tick 重建可复用模块。
+ * 文件摘要：导出 Framework 实例的 loop，作为 Screeps 每 tick 的主循环。
+ * app 层完成插件选择，框架依次驱动前处理、决策提交与后处理。
+ * loop 通过闭包访问实例，不依赖 this，游戏可直接调用导出函数。
  */
-export const loop = (): void => {
-  console.log(`Hello, world! ${Game.time}`);
-};
+import { framework } from './app';
+
+/** Screeps 每 tick 调用此导出；不在入口重复创建框架，初始化与后处理均交由实例管理。 */
+export const loop = framework.loop;

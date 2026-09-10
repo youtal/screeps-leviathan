@@ -2,11 +2,11 @@
  * 文件摘要：组合 EventBus、Profiler 与环境适配器，创建应用级模块上下文工厂。
  *
  * 根工厂用闭包保存共享服务；每次调用 createContext 只创建带模块名前缀的环境
- * 对象。该设计把框架单例的生命周期限制在 app 层，同时允许测试注入替代实现。
+ * 对象。默认 Profiler 只使用 runtime 闭包中的 heap 数据；需要持久化时必须注入
+ * Framework 统一持久化接口提供的访问器和标脏回调。
  */
 import { createBus } from '@/core/eventBus';
 import { createProfiler } from '@/core/profiler';
-import type { ProfilerMemory } from '@/core/profiler';
 import { DEFAULT_PROFILER_ENABLE } from '@/setting';
 import { createEnvMethods } from './env';
 import type {
@@ -15,31 +15,6 @@ import type {
   ModuleContextOptions,
   RuntimeOptions,
 } from './types';
-
-/**
- * 扩展 Screeps Memory 类型，让 runtime 可以为默认 Profiler 存储创建槽位。
- *
- * 这里放在 createRuntime.ts 中，是因为默认 profiler memory 的创建逻辑
- * 也在本文件中。类型声明和实际写入位置放在一起，后续维护时更容易追踪。
- */
-declare global {
-  interface Memory {
-    profiler?: ProfilerMemory;
-  }
-}
-
-/**
- * 默认 Profiler Memory 访问器。
- *
- * Screeps 的 Memory 是跨 tick 持久化对象。Profiler 需要把统计数据写入
- * Memory.profiler；如果这个字段尚不存在，就在首次创建 runtime 时初始化。
- */
-const createDefaultProfilerMemory = () => {
-  if (!Memory.profiler) {
-    Memory.profiler = {};
-  }
-  return Memory.profiler;
-};
 
 /**
  * 创建当前 AI 的 root runtime。
@@ -56,13 +31,16 @@ export const createRuntime = (
   options: RuntimeOptions = {}
 ): CreateModuleContext => {
   const bus = options.bus ?? createBus();
+  /** 独立 Runtime 没有 Framework 提交边界，默认统计仅驻留 heap。 */
+  const heapProfilerMemory = {};
   const profiler =
     options.profiler === undefined
       ? createProfiler({
           env: createEnvMethods('Profiler'),
-          getMemory: options.getProfilerMemory ?? createDefaultProfilerMemory,
+          getMemory: options.getProfilerMemory ?? (() => heapProfilerMemory),
+          markMemoryDirty: options.markProfilerMemoryDirty,
           enable: options.enableProfiler ?? DEFAULT_PROFILER_ENABLE,
-      })
+        })
       : options.profiler;
 
   const createContext = (

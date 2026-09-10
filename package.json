@@ -6,7 +6,7 @@
   "scripts": {
     "start": "rollup -c rollup.config.mjs --environment DEST:main",
     "build": "rollup -c rollup.config.mjs",
-    "test": "jest --runInBand && node test/buildPlugins.test.mjs",
+    "test": "jest --runInBand && node test/buildPlugins.test.mjs && node test/frameworkBundle.test.mjs",
     "upload": "node build/upload.mjs",
     "upload:validation": "node build/upload.mjs validation"
   },
@@ -36,6 +36,6 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "source-map": "^0.8.0"
+    "@jridgewell/trace-mapping": "0.3.31"
   }
 }

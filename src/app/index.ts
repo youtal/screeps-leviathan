@@ -1,8 +1,8 @@
 /**
- * 文件摘要：作为 App 层统一出口，暴露已完成依赖装配的 Runtime 与模块实例。
+ * 文件摘要：作为 App 层统一出口，暴露 Framework 实例和服务插件描述。
  *
- * core 与 modules 只提供工厂和协议；app 层负责创建当前 AI 使用的项目级
- * 单例。调用方通过本入口消费装配结果，无需了解各模块的内部文件路径。
+ * core 与 modules 提供工厂和协议；app 创建 Framework 单例，服务实例在
+ * 首次 loop 的 setup 中创建。调用方通过本入口取得可直接导出的 loop。
  */
 export * from './runtime';
 export * from './modules';

@@ -2,6 +2,8 @@
 
 Screeps Leviathan 是一个使用 TypeScript 开发的 Screeps AI 项目。
 
+主循环由 Leviathan Framework 驱动，当前已接入 RoomShortcuts 服务插件。插件开发与运行配置见 [Framework 使用说明](./docs/usage/framework.md)。
+
 ## 开发命令
 
 ```bash

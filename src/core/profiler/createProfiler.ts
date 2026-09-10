@@ -4,6 +4,8 @@
  * Profiler 以闭包保存开关、标签集合和调用栈，通过 `Game.cpu.getUsed()` 在函数
  * 前后取样。只有启用时才承担取样和 Memory 累加成本；禁用时包装函数直接转调
  * 原函数。统计数据由 memory.ts 提供的访问器统一维护。
+ * 包装器和调用栈只驻留 heap，global reset 后重建；累计值从常驻 Memory 命名空间读取。
+ * 只测量同步调用区间，不等待 Promise 完成；采样或写入故障不得改变业务返回/抛错行为。
  */
 import type { ProfilerContext, Profiler } from './types';
 import { createMemoryAccessor } from './memory';
@@ -22,7 +24,7 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
   let { getMemory, enable: enableProfiler } = context;
   const { log, getGame } = context.env;
 
-  const db = createMemoryAccessor(getMemory, log);
+  const db = createMemoryAccessor(getMemory, log, context.markMemoryDirty);
   if (!db) {
     log.error('无法创建 Profiler');
     return null;
@@ -31,6 +33,7 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
   /** 运行时开关只修改闭包变量，因此已经创建的 wrapper 会立即响应。 */
   const enable = () => (enableProfiler = true);
   const disable = () => (enableProfiler = false);
+  /** 只清累计数据，标签占用和已创建包装器保留，不影响它们后续继续统计。 */
   const reset = () => db.clear();
 
   /**
@@ -39,7 +42,8 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
    * 同一个 label 被重复 wrap 会让统计结果难以理解，因此这里选择拒绝二次包裹，
    * 并返回原函数。若未来需要支持同名函数，可以在 label 层引入模块前缀。
    */
-  const usedLabel: Record<string, boolean> = {};
+  // 无原型对象允许 constructor 等普通字符串作为标签，不误命中继承属性。
+  const usedLabel: Record<string, boolean> = Object.create(null);
 
   /**
    * 当前调用栈。
@@ -54,6 +58,8 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
    *
    * enableProfiler 在执行时判断，而不是 wrap 时判断。这样 enable/disable
    * 可以影响已经包裹过的函数。
+   * T 与末尾 as T 保持参数/返回签名；普通 function 的动态 this 配合 apply 保留方法语义。
+   * 包装层的 any 只用于转发未知参数，不转换业务输入或吞并业务异常。
    */
   const wrap: Wrap = <T extends (...args: any[]) => any>(
     label: string,
@@ -73,30 +79,34 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
       if (!enableProfiler) return fn.apply(this, args);
 
       /** 记录本层起点并入栈，使嵌套 wrapper 能把耗时归入父层 childTime。 */
-      const start = getGame().cpu.getUsed();
+      let start: number;
+      try {
+        start = getGame().cpu.getUsed();
+      } catch {
+        // 取样故障只关闭本次统计，原始函数仍按相同 this/参数执行。
+        return fn.apply(this, args);
+      }
       stack.push({ label, start, childTime: 0 });
 
       try {
-        //执行被包裹的函数
+        // 原函数正常返回或抛错都进入 finally，故失败调用也计入成功完成采样的统计。
         return fn.apply(this, args);
       } finally {
         /**
          * 使用 finally 保证原函数抛错时也能正确出栈。
          *
-         * 这避免一次异常污染整个 profiler 调用栈，后续统计仍然可靠。
+         * 先出栈再采样，采样本身失败也不会遗留栈帧；失败样本不写入 Memory。
          */
-        /** 后进先出恢复当前记录，并以差值计算本层总耗时和自身耗时。 */
-        const end = getGame().cpu.getUsed();
+        /** 非空断言对应前面的同步 push；total 是包含子调用的区间，self 扣除已记录子区间。 */
         const record = stack.pop()!;
-        const totalTime = end - record.start;
-        const selfTime = totalTime - record.childTime;
-
-        /** 将本次样本累加进持久化统计记录。 */
-        db.update(record.label, selfTime, totalTime);
-
-        /** 若仍有父调用，将本次总耗时计入父层的子调用时间。 */
-        if (stack.length > 0) {
-          stack[stack.length - 1].childTime += totalTime;
+        try {
+          const totalTime = getGame().cpu.getUsed() - record.start;
+          const selfTime = totalTime - record.childTime;
+          // 先恢复父调用计时关系，Memory 写入失败不能污染嵌套栈。
+          if (stack.length > 0) stack[stack.length - 1].childTime += totalTime;
+          db.update(record.label, selfTime, totalTime);
+        } catch {
+          // 观测操作不能覆盖业务返回值或原始异常，下一次调用可以继续取样。
         }
       }
     } as T;

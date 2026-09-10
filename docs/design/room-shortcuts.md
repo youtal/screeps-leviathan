@@ -2,6 +2,8 @@
 
 RoomShortcuts 为有视野的房间建立建筑、Source 和 Mineral 的 ID 缓存。集合查询无结果时返回 `[]`，单对象查询无结果时返回 `undefined`；房间尚未建设某类建筑属于正常状态，不记录警告。
 
+模块插件不声明持久化。房间索引、初始化时间和 5000 tick 租约由模块闭包维护，不占用 RawMemory；global reset 后按首次查询重建。该取舍符合缓存只用于节省重复扫描 CPU 的定位，也避免将规模较大的派生数据持久化。
+
 ## 缓存更新
 
 - 模块创建时全局订阅一次 `structure:built` 和 `structure:destroyed`，不随房间缓存的初始化重复订阅。建筑事件携带 `roomName`，模块据此更新对应房间。

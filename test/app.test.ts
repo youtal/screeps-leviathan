@@ -2,36 +2,60 @@ describe('App composition', () => {
   beforeEach(() => {
     jest.resetModules();
     (global as any).Game = {
+      time: 1,
       rooms: {},
       flags: {},
       creeps: {},
       powerCreeps: {},
       getObjectById: jest.fn(),
       notify: jest.fn(),
-      cpu: { getUsed: jest.fn(() => 0) },
+      cpu: { getUsed: () => 0, limit: 20, tickLimit: 100, bucket: 10000 },
     };
     (global as any).Memory = {};
+    let raw = '{}';
+    (global as any).RawMemory = {
+      get: () => raw,
+      set: jest.fn((value: string) => {
+        raw = value;
+      }),
+    };
   });
 
-  it('should expose the app context factory and assembled modules', () => {
-    const app = require('@/app');
-
-    expect(typeof app.createContext).toBe('function');
-    expect(typeof app.roomShortcuts.getSpawn).toBe('function');
-    expect(typeof app.roomShortcuts.getStorage).toBe('function');
-  });
-
-  it('should create contexts that share the app bus', () => {
-    const { createContext } = require('@/app/runtime');
-    const alpha = createContext('Alpha');
-    const beta = createContext('Beta');
-    const listener = jest.fn();
-
-    alpha.bus.subscribe({ scope: 'global' }, 'creep:death', 'beta', listener);
-    beta.bus.publish({ scope: 'global' }, 'creep:death', {
-      creepName: 'Fallen',
+  it('exports the instance loop and initializes RoomShortcuts as a service', () => {
+    const { framework } = require('@/app');
+    const { loop } = require('@/index');
+    expect(loop).toBe(framework.loop);
+    let service: any;
+    framework.register({
+      manifest: { id: 'consumer', version: 1, requires: ['roomShortcuts'] },
+      setup: (context: any) => {
+        service = context.services.get('roomShortcuts');
+      },
     });
+    loop();
+    expect(framework.getStatus().safeMode).toBe(false);
+    expect(typeof service.getSpawn).toBe('function');
+    expect(typeof service.getStorage).toBe('function');
+    expect((global as any).RawMemory.set).toHaveBeenCalledTimes(1);
+    Game.time++;
+    loop();
+    expect((global as any).RawMemory.set).toHaveBeenCalledTimes(1);
+  });
 
-    expect(listener).toHaveBeenCalledWith({ creepName: 'Fallen' });
+  it('does not access Memory during module import', () => {
+    const get = jest.fn(() => {
+      throw new Error('eager Memory');
+    });
+    Object.defineProperty(global, 'Memory', { configurable: true, get });
+    try {
+      expect(() => require('@/app')).not.toThrow();
+      expect(get).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(global, 'Memory', {
+        configurable: true,
+        writable: true,
+        value: {},
+      });
+    }
   });
 });

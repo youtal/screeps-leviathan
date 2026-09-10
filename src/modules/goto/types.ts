@@ -5,7 +5,7 @@
  * 让调用方在编译期区分目标形态与移动结果。类型声明会在构建后擦除，不增加
  * 游戏 tick 的 CPU 或 Memory 开销；实际寻路算法将在对应实现文件中落地。
  */
-import type { ModuleContext } from '@/core/runtime/types';
+import type { PluginContext } from '@/core/framework';
 
 /**
  * goto 可以接受的目标形态。
@@ -154,12 +154,10 @@ export interface GotoConfig {
 /**
  * goto 使用的上下文。
  *
- * 默认情况下实现可以直接使用全局 Memory.goto；getMemory 允许测试或特殊装配
- * 注入另一块持久化区域，从而避免测试之间互相污染。
+ * Goto 通过 Framework 的统一 persistence 接口查询或提交用户偏好；路径、CostMatrix
+ * 和 Flow Field 仍只保存在 GotoHeapState，不进入任何持久化分区。
  */
-export interface GotoContext extends ModuleContext {
-  getMemory?: () => GotoMemory;
-}
+export interface GotoContext extends PluginContext<GotoMemory> {}
 
 /**
  * goto 唯一写入 Memory 的数据。
@@ -576,16 +574,4 @@ export interface GotoHeapState {
   avoidanceRequests: Map<string, AvoidanceRequest>;
   roomCostMatrixStamps: Map<string, RoomCostMatrixStamp>;
   debug: GotoDebugInfo;
-}
-
-declare global {
-  /**
-   * goto 的持久化挂载点。
-   *
-   * 只保存用户配置，不保存任何运行期缓存。这样脚本重载后不会继承旧 global
-   * 中的 CostMatrix、Flow Field、路由场或堵塞状态。
-   */
-  interface Memory {
-    goto?: GotoMemory;
-  }
 }

@@ -64,6 +64,68 @@ describe('Profiler memory accessor', () => {
 });
 
 describe('Profiler', () => {
+  it('preserves original errors and results when samples or storage fail', () => {
+    const env = createEnv([0, 2, 3, 5]);
+    const broken = new Proxy(
+      {},
+      {
+        defineProperty() {
+          throw new Error('storage');
+        },
+      }
+    );
+    const profiler = createProfiler({
+      env,
+      getMemory: () => broken,
+      enable: true,
+    })!;
+    const original = new Error('business');
+    expect(() =>
+      profiler.wrap('failure', () => {
+        throw original;
+      })()
+    ).toThrow(original);
+    expect(profiler.wrap('success', () => 42)()).toBe(42);
+    const getter = jest
+      .fn()
+      .mockImplementationOnce(() => 0)
+      .mockImplementationOnce(() => {
+        throw new Error('sample');
+      })
+      .mockReturnValue(5);
+    const memory: ProfilerMemory = {};
+    env.getGame = () => ({ cpu: { getUsed: getter } }) as unknown as Game;
+    const sampled = createProfiler({
+      env,
+      getMemory: () => memory,
+      enable: true,
+    })!;
+    expect(() =>
+      sampled.wrap('bad', () => {
+        throw original;
+      })()
+    ).toThrow(original);
+    expect(sampled.wrap('next', () => 2)()).toBe(2);
+    expect(memory.next.calls).toBe(1);
+  });
+
+  it('writes into the current Memory namespace after external replacement', () => {
+    let current: ProfilerMemory = {};
+    const env = createEnv([0, 1, 2, 3]);
+    const profiler = createProfiler({
+      env,
+      getMemory: () => current,
+      enable: true,
+    })!;
+    const fn = profiler.wrap('task', () => 1);
+    fn();
+    const old = current;
+    current = {};
+    fn();
+    expect(old.task.calls).toBe(1);
+    expect(current.task.calls).toBe(1);
+  });
+
   it('should record wrapped function calls when enabled', () => {
     const memory: ProfilerMemory = {};
     const profiler = createProfiler({
