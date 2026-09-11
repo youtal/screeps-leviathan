@@ -24,8 +24,11 @@
   - 数据对象经 JSON.stringify 后拼成 `({command})(数据)` 交给控制台 Console.sendCommand
     执行（第二个实参固定为 1，沿用社区示例的调用形式，参考链接见脚本内注释）。
 
-  维护注意：输出会经过 fixRetraction 删除换行，因此 onclick 属性里的脚本不能使用
-  `//` 行注释——折叠后它会把同一行后续代码全部注释掉；需要注释时请改用块注释。
+  维护注意：输出会经过 fixRetraction 删除换行，折叠后的 onclick 是一行完整 JavaScript，
+  因此脚本必须写成“单行安全”的形式：
+  - 不能使用 `//` 行注释，它会注释掉同一行后续的全部代码，需要注释时请用 `/* */`；
+  - 不能依赖自动分号插入（ASI），每条语句都要显式写出分号，否则相邻语句会被拼接
+    成一条非法语句（例如 `x = []` 与下一行的 `x.forEach(...)`）。
 -->
 <!-- 表单外层模板 -->
 <form name="{formName}">
@@ -34,20 +37,20 @@
         class="hopgoldy"
         type="button"
         onclick="(() => {
-            // 获取表单数据
+            /* 获取表单数据 */
             const form = document.forms['{formName}'];
             let formDatas = {};
             [{elementNames}].map(eleName => {
-                // 如果是复选框的话需要特殊处理下
+                /* 如果是复选框的话需要特殊处理下 */
                 if (form[eleName] instanceof RadioNodeList && form[eleName][0].type === 'checkbox') {
-                    formDatas[eleName] = []
-                    form[eleName].forEach(el => el.checked && formDatas[eleName].push(el.value))
+                    formDatas[eleName] = [];
+                    form[eleName].forEach(el => el.checked && formDatas[eleName].push(el.value));
                 }
                 else formDatas[eleName] = form[eleName].value;
             });
 
-            // 将表单数据格式化为 JSON 对象在控制台发给指定的命令
-            // @see https://screeps.slack.com/files/U5GS01HT8/FJGTY8VQE/console_button.php
+            /* 将表单数据格式化为 JSON 对象在控制台发给指定的命令 */
+            /* @see https://screeps.slack.com/files/U5GS01HT8/FJGTY8VQE/console_button.php */
             angular.element(document.body).injector().get('Console').sendCommand(
                 `({command})(${JSON.stringify(formDatas)})`
             , 1);

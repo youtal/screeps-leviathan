@@ -11,7 +11,8 @@
  *
  * 状态与副作用：模块求值期执行一次 template.split(';;')，把模板片段解构为模块级常量，
  * 属于跨 tick 复用、随 global reset 重建的预计算；createForm 本身无可变状态与缓存。
- * 拼接结果会经过 fixRetraction 折叠为单行，因此内嵌脚本不能使用 `//` 行注释。
+ * 拼接结果会经过 fixRetraction 折叠为单行，因此内嵌脚本必须写成单行安全的 JavaScript：
+ * 不使用 `//` 行注释，并显式写出每条语句的分号（折叠后不再有换行可供自动分号插入）。
  */
 import template from './template.html'
 import style from './style.html'
@@ -129,6 +130,6 @@ export const createForm = function (name: string, details: HTMLElementDetail[], 
         formName, formContent, elementNames, command, buttonLabel
     })
 
-    /** 控制台按行渲染，最后统一折叠为单行；拼接的脚本因此不能使用 `//` 行注释。 */
+    /** 控制台按行渲染，最后统一折叠为单行；拼接的脚本因此必须单行安全（块注释 + 显式分号）。 */
     return fixRetraction(formHtml)
 }
