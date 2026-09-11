@@ -1,6 +1,12 @@
 # goto 模块技术设计
 
 > 2026-05-19 完成首轮设计收敛，跨房路由场、CostMatrix 事件戳、Flow Field 保留性评分、Dijkstra 成本语义和轻量避让方案已纳入本文。后续实现与评审以本文为准。
+>
+> **文档状态与已知差异（2026-09-10 核对）**：本文是 goto 的完整设计蓝图；`src/modules/goto/` 目前只落地了 `types.ts`（类型契约），`createGoto.ts` 与 `roomRoute/`、`costMatrix/`、`flowField/`、`movement/`、`avoidance/`、`debug/` 等实现文件尚未创建。核对中发现以下三处本文与类型契约不一致，当前一律以 `src/modules/goto/types.ts` 为准；实现落地时需要择一收敛（回填类型或修订本文），不要照抄任何一侧：
+>
+> 1. **`updateCostMatrix`（见 §4.1、§6.2、§7.5、§13）**：本文把它列为 `GotoModule` 的公共方法，类型契约尚未声明该成员，只保留 `CostMatrixUpdateOptions` 作为协议预留，以免调用方依赖未实现的能力。
+> 2. **`GotoResult.reusedFlowField`（见 §4.4）**：本文示例使用该字段名，类型契约改用 `usedCache` + `pathType` 表达“本次走了缓存/复用路径”，尚未拆出单独的复用标志。
+> 3. **方向类型（见 §5.1、§7.2、§7.3、§8.2、§8.4）**：本文多处写 `DirectionConstant`；类型契约把房间出口相关方向收窄为 `ExitConstant`（仅 TOP/RIGHT/BOTTOM/LEFT，跨房出口不可能是斜向），避让方向等非出口场景仍保留 `DirectionConstant`。
 
 ## 1. 模块定位
 
@@ -100,6 +106,8 @@ export const goto = createGoto(createContext('Goto'));
 ## 4. 核心接口
 
 ### 4.1 GotoModule
+
+> 与类型契约的差异见文首「文档状态与已知差异」第 1 条：`updateCostMatrix` 目前只是协议预留，`src/modules/goto/types.ts` 的 `GotoModule` 尚未声明该成员。
 
 ```ts
 interface GotoModule {
@@ -206,6 +214,8 @@ roads=false, swamps=false
 
 ### 4.4 GotoResult
 
+> 与类型契约的差异见文首「文档状态与已知差异」第 2 条：下列示例中的 `reusedFlowField` 尚未进入类型契约，当前用 `usedCache` + `pathType` 表达缓存/复用语义。
+
 ```ts
 interface GotoResult {
   code: ScreepsReturnCode;
@@ -225,6 +235,8 @@ interface GotoResult {
 ## 5. 跨房间寻路
 
 ### 5.1 房间图
+
+> 与类型契约的差异见文首「文档状态与已知差异」第 3 条：`RoomEdge.direction` 在 `src/modules/goto/types.ts` 中收窄为 `ExitConstant`（仅 4 个基本方向）。
 
 跨房间寻路使用房间作为节点，相邻房间之间的出口作为边：
 
