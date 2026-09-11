@@ -216,8 +216,8 @@ export function log(
  * 因此同一模块的日志开关在 global 生命周期内保持一致；只有 error 会把
  * notifyWhenError 透传给底层 log，从而按需触发 Game.notify。
  *
- * 当前边界：LogOptions 虽声明了 report 字段，但这里只解构 debug/warn/error/success/info，
- * report 等级固定使用 DEFAULT_LOG_CONFIG.report（调用方无法覆盖）；调整该行为需同步类型与工厂。
+ * 六个等级的回退规则完全一致：都按 `opt[字段] ?? DEFAULT_LOG_CONFIG[字段]` 取值，
+ * 因此显式传入 false 可以单独关闭某个等级（含 report），未传的字段才跟随默认配置。
  *
  * @param prefix 模块日志前缀
  * @param opt 日志配置
@@ -228,7 +228,7 @@ export const createLog = (
   opt: LogOptions,
   notifyWhenError = false
 ) => {
-  const { debug, warn, error, success, info } = opt;
+  const { debug, warn, error, success, info, report } = opt;
   const {
     debug: defaultDebug,
     warning: defaultWarning,
@@ -250,6 +250,6 @@ export const createLog = (
     info: (content: string) =>
       log(content, prefix, Color.Cyan, info ?? defaultInfo, false),
     report: (content: string) =>
-      log(content, prefix, Color.Violet, defaultReport, false),
+      log(content, prefix, Color.Violet, report ?? defaultReport, false),
   };
 };

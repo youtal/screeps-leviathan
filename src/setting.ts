@@ -9,7 +9,7 @@
  * createLog 的默认日志开关：warning/error/report 默认开启，debug/success/info 关闭。
  *
  * createLog 用 `??` 逐字段回退到这里的值，所以模块显式传 false 也能生效；键名 warning
- * 对应 LogOptions 的 warn，report 只能由本对象控制（createLog 未从模块配置读取它）。
+ * 对应 LogOptions 的 warn，六个等级（含 report）都遵循同一套回退规则。
  * 每个等级都会真实调用 console.log（error 还可触发 Game.notify），在热路径上输出
  * 大量 debug/info 会直接消耗 tick CPU 并刷屏，因此默认保持关闭。
  */

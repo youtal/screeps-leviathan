@@ -25,7 +25,7 @@ declare module '*.html' {
  * 每个字段可选；未提供时由 createLog 回退到项目默认配置。
  *
  * 语义约定：字段为 undefined 表示“跟随 DEFAULT_LOG_CONFIG”，显式传入 false 才是关闭，
- * 这一区分依赖 createLog 中的 `??`。report 字段当前仅作声明，工厂固定使用默认值。
+ * 这一区分依赖 createLog 中的 `??`；五个等级与 report 都遵循同一规则。
  */
 type LogOptions = {
   debug?: boolean;
