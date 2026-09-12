@@ -48,7 +48,7 @@ logging.scope('Script').report('done');
 | `notifyInterval` | `60` | 默认邮件端口的 `Game.notify` 分组间隔（分钟），正整数 |
 | `output` | 内置端口 | 覆盖 `write`/`notify` 任一通道；未提供的通道保留默认实现 |
 
-作用域覆盖（`ScopeLogOptions`）：`levels` 逐字段覆盖装配等级，`notify` 覆盖装配策略（`undefined` 跟随，`false` 强制关闭，`true` 在装配允许时开启）。
+作用域覆盖（`ScopeLogOptions`）：`levels` 逐字段覆盖装配等级；`notify` 受装配策略约束——装配为 `off` 时任何取值都不会发送邮件，装配为 `error` 时 `undefined` 跟随、`false` 关闭、`true` 开启。
 
 ## 等级与默认开关
 
@@ -72,7 +72,7 @@ log.report('stats');         // 无输出（本作用域关闭 report）
 ## 邮件语义
 
 - 只有 `error` 等级会发送邮件；其他等级即使作用域 `notify: true` 也不发送。
-- 默认策略 `off`，即项目默认不发邮件；需要时在装配层写 `notify: 'error'`，再由作用域决定是否开启。
+- 装配级策略是硬上限：默认 `off` 表示全项目不发邮件，作用域无法自行打开；需要邮件时先在装配层写 `notify: 'error'`，再由作用域用 `notify` 决定关闭或跟随。
 - 默认邮件端口调用 `Game.notify(line, notifyInterval)`；`Game` 不可用时异常被吞掉，不影响业务。
 - 邮件有发送成本与频率限制，热路径的 error 应先去重或降级为控制台日志。
 

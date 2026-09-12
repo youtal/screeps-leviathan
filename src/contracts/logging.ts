@@ -44,7 +44,7 @@ export interface LogOutput {
 export interface LoggingOptions {
   /** 全局等级默认值；未提供的等级回退项目默认设置，作用域可逐字段覆盖。 */
   levels?: LogOptions;
-  /** 装配级邮件策略：off 默认不发送，error 允许作用域按需开启 error 邮件。 */
+  /** 装配级邮件策略：off 为硬上限（作用域不能开启邮件），error 允许作用域按需开关 error 邮件。 */
   notify?: 'off' | 'error';
   /** 默认邮件端口调用 Game.notify 时的分组间隔（分钟），正整数，默认 60。 */
   notifyInterval?: number;
@@ -52,7 +52,13 @@ export interface LoggingOptions {
   output?: Partial<LogOutput>;
 }
 
-/** 单个作用域的局部覆盖；notify 覆盖装配级策略，undefined 表示跟随装配配置。 */
+/**
+ * 单个作用域的局部覆盖。
+ *
+ * levels 逐字段覆盖装配等级；notify 只能在装配策略允许（`'error'`）时关闭或跟随：
+ * `undefined` 跟随装配配置，`false` 强制关闭；装配为 `'off'` 时传 `true` 也不会发送。
+ * 装配方由此保留对邮件行为的集中控制权。
+ */
 export interface ScopeLogOptions {
   levels?: LogOptions;
   notify?: boolean;

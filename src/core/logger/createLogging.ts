@@ -124,24 +124,38 @@ export const createLogging = (options: LoggingOptions = {}): LoggerFactory => {
   return {
     /**
      * 派生作用域日志器。作用域名只影响前缀；levels 逐字段覆盖装配等级；
-     * notify 覆盖装配策略，undefined 时由 `mailPolicy === 'error'` 决定。
-     * 邮件只对 error 等级有意义：其余等级即使开启 notify 也不会发送邮件。
+     * 装配级邮件策略是硬上限：只有 mailPolicy === 'error' 时才可能发送邮件，
+     * 作用域只能在该前提下关闭（notify: false）或跟随（undefined），
+     * 不能在装配关闭时自行开启，避免模块绕过 App 对邮件行为的集中控制。
+     * 邮件只对 error 等级有意义：其余等级即使 notify 为 true 也不会发送。
      */
     scope(scopeName: string, scopeOptions: ScopeLogOptions = {}): Logger {
       const levels = resolveLevels(scopeOptions.levels, assemblyLevels);
       const mailEnabled =
-        levels.error && (scopeOptions.notify ?? mailPolicy === 'error');
+        levels.error && mailPolicy === 'error' && scopeOptions.notify !== false;
 
       /**
-       * 统一出口：关闭的等级在格式化之前返回，热路径不支付着色成本；
-       * 前缀按等级取色并复用一个函数生成，空作用域名时退化为无前缀输出。
+       * 前缀按等级惰性缓存：作用域名与配色在作用域生命周期内不变，首次用到某等级
+       * 时生成一次着色前缀，之后每条日志只做一次字符串拼接，不再重复调用 dyeText。
+       * 空作用域名约定为无前缀输出，直接返回空串、不进入缓存。
+       */
+      const prefixes: Partial<Record<Level, string>> = {};
+      const prefixFor = (level: Level): string => {
+        if (!scopeName) return '';
+        let prefix = prefixes[level];
+        if (prefix === undefined) {
+          prefix = dyeText(`[${scopeName}] `, LEVEL_COLORS[level], true);
+          prefixes[level] = prefix;
+        }
+        return prefix;
+      };
+
+      /**
+       * 统一出口：关闭的等级在格式化之前返回，热路径不支付着色与拼接成本。
        */
       const emit = (level: Level, content: string, enabled: boolean): void => {
         if (!enabled) return;
-        const prefix = scopeName
-          ? dyeText(`[${scopeName}] `, LEVEL_COLORS[level], true)
-          : '';
-        const line = prefix + content;
+        const line = prefixFor(level) + content;
         safe(output.write, line);
         if (level === 'error' && mailEnabled) safe(output.notify, line);
       };

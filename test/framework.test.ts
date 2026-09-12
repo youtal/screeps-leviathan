@@ -725,4 +725,32 @@ describe('ErrorMapper', () => {
       })
     ).not.toThrow();
   });
+
+  /** 默认报告出口必须在创建映射器时派生一次作用域日志器，故障密集时不能反复重建。 */
+  it('derives the default scope logger once per mapper instance', () => {
+    const error = jest.fn();
+    const scope = jest.fn(() => ({
+      debug: jest.fn(),
+      warn: jest.fn(),
+      error,
+      success: jest.fn(),
+      info: jest.fn(),
+      report: jest.fn(),
+    }));
+    const mapper = createErrorMapper(() => ({}), undefined, {
+      scope,
+    } as unknown as Parameters<typeof createErrorMapper>[2]);
+
+    const meta = { tick: 1, pluginId: 'a', phase: 'tickExecute' } as const;
+    mapper.capture(meta, () => {
+      throw new Error('first');
+    });
+    mapper.capture(meta, () => {
+      throw new Error('second');
+    });
+
+    expect(scope).toHaveBeenCalledTimes(1);
+    expect(scope).toHaveBeenCalledWith('ErrorMapper');
+    expect(error).toHaveBeenCalledTimes(2);
+  });
 });

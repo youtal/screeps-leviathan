@@ -38,20 +38,22 @@ export const createErrorMapper = (
 ): import('@/contracts/errorMapper').ErrorMapper => {
   /**
    * 失败报告出口：显式注入优先，否则按 ErrorMapper 作用域记录 error 级日志。
-   * 文本保持"插件/阶段: 堆栈"结构，映射成功时用映射后的堆栈。
+   * 作用域日志器在创建映射器时派生一次并复用：作用域名、等级与着色前缀都不随
+   * 单次故障变化，故障集中爆发时不应反复创建日志器对象与临时字符串。
+   * 文本保持"插件/阶段: 堆栈"结构，映射成功时用映射后的堆栈；堆栈中的换行原样
+   * 保留，错误日志允许多行（内容约定见 Logger 设计）。
    */
+  const log = logging.scope('ErrorMapper');
   const reportFailure =
     report ??
     ((failure: PluginFailure) =>
-      logging
-        .scope('ErrorMapper')
-        .error(
-          failure.pluginId +
-            '/' +
-            failure.phase +
-            ': ' +
-            (failure.mappedStack ?? failure.stack)
-        ));
+      log.error(
+        failure.pluginId +
+          '/' +
+          failure.phase +
+          ': ' +
+          (failure.mappedStack ?? failure.stack)
+      ));
   /** 每个实例仅尝试加载一次；失败后到 global reset 前退回原始堆栈，避免反复支付失败成本。 */
   let attempted = false;
   // 加载成功后一直复用同一个 TraceMap；undefined 表示不可用（尚未加载或加载失败）。

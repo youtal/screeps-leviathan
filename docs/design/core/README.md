@@ -76,7 +76,7 @@ PluginRegistry、生命周期执行器、CPU 准入、IntentBroker 属于 Framew
 
 ## 5. Runtime 组装与生命周期
 
-`createRuntime()` 返回 Root Runtime 及受控生命周期端口。App 将其注入 Framework；同一应用的 EventBus、Profiler 和 MemoryManager 均由该 Runtime 唯一持有。
+`createRuntime()` 返回 Root Runtime 及受控生命周期端口，并以完整内核运行时对象的形式交付能力集合（日志、事件总线、观测、错误映射与存储端口）；App 将其注入 Framework，Framework 只消费不重建，同一应用的内核能力由该 Runtime 唯一持有。各能力的兜底实例仅用于独立测试。单一组合根形态未交付。
 
 创建连接以 Logging 为基础，ErrorMapper 保持独立可用，MemoryManager 不依赖 Profiler 才能恢复；Profiler 使用 MemoryAccessor 保存统计。ErrorMapper 的计时可以在 Profiler 就绪后接入，但错误报告和统计回路必须防止递归。
 

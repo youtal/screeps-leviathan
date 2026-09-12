@@ -103,6 +103,20 @@ describe('createLogging', () => {
     expect(overridden.notified).toEqual([]);
   });
 
+  it('treats the assembly notify policy as a hard cap for scopes', () => {
+    // 装配为 off 时，作用域即使显式 true 也不能打开邮件（App 保留集中控制权）。
+    const off = collect({ notify: 'off' });
+    off.factory.scope('A', { notify: true }).error('bypass');
+    expect(off.notified).toEqual([]);
+
+    // 装配为 error 时，作用域 true 与省略都发送，false 关闭。
+    const on = collect({ notify: 'error' });
+    on.factory.scope('B', { notify: true }).error('explicit');
+    on.factory.scope('B').error('follow');
+    on.factory.scope('B', { notify: false }).error('closed');
+    expect(texts(on.notified)).toEqual(['[B] explicit', '[B] follow']);
+  });
+
   it('never lets a throwing output port break the caller', () => {
     const broken = createLogging({
       output: {
