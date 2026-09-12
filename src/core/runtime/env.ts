@@ -1,19 +1,20 @@
 /**
- * 文件摘要：把 Screeps 全局对象包装成可注入的环境方法，并为模块创建独立日志器。
+ * 文件摘要：把 Screeps 全局对象包装成可注入的环境方法，并为模块派生作用域日志器。
  *
  * core/runtime 的适配层：业务模块依赖 EnvMethods 而不是直接散布全局访问，
  * 便于单元测试替换运行环境，运行时仍访问真实 Screeps API。
  *
- * 输入是模块名（同时作为日志前缀）、可选的 LogOptions 以及是否让错误日志额外
- * 调用 Game.notify；输出是 EnvMethods —— 一组无状态的 Game 访问闭包，加上按
- * 模块创建的 log。
+ * 输入是模块名（同时作为日志前缀）、可选的 LogOptions、是否允许该模块发送错误邮件，
+ * 以及 Runtime 组装的 LoggerFactory；输出是 EnvMethods —— 一组无状态的 Game 访问
+ * 闭包，加上按模块作用域派生的 log。日志等级与输出端口全部由注入的工厂决定，
+ * 本文件不再持有日志实现，因此 core 不再反向依赖 utils/console 的日志代码。
  *
  * 状态与副作用：Game 查询函数是模块级共享常量，只在调用时读取全局 Game，
- * 不缓存任何 Game 对象，因此跨 tick 不会持有失效引用；唯一状态是 createLog
- * 持有的日志配置。global reset 后模块重新求值，行为保持一致。
+ * 不缓存任何 Game 对象，因此跨 tick 不会持有失效引用；唯一状态来自注入的
+ * 日志工厂（由装配方持有）。global reset 后模块重新求值，行为保持一致。
  */
-import type { LogOptions } from '@/contracts/logging';
-import { createLog } from '@/utils/console';
+import type { LoggerFactory, LogOptions } from '@/contracts/logging';
+import { defaultLoggerFactory } from '@/core/logger';
 import type { EnvMethods } from '@/contracts';
 
 /**
@@ -41,10 +42,12 @@ const staticMethods: Omit<EnvMethods, 'log'> = {
  * 创建模块级运行环境。
  *
  * moduleName 会成为日志前缀，例如 `RoomShortcuts` 或 `Profiler`。
- * opt 用于覆盖默认日志开关；notify 控制错误日志是否同步调用 Game.notify
- * （notify 会发送邮件且受频率限制，createLog 以 60 分钟为分组间隔调用它，
- * 因此这里默认关闭）。
+ * opt 逐字段覆盖日志等级；notify 是该作用域对装配级邮件策略的覆盖——undefined
+ * 跟随装配策略（默认 off），显式 false 强制关闭，true 在装配允许时开启错误邮件。
+ * 邮件会发送且受频率限制，分组间隔由装配方的 notifyInterval 决定（默认 60 分钟）。
  *
+ * logging 缺省使用 core/logger 的兜底工厂，使独立调用（测试、未接入 Runtime 的
+ * 模块）无需显式装配；Runtime 会传入共享工厂，让所有模块共用端口与策略。
  * 每次调用都返回新对象：spread 复制共享的 Game 访问方法，再挂上专属 log，
  * 模块之间不会互相覆盖日志配置。返回值不含 profiler —— Profiler 由
  * createRuntime 作为 ModuleContext 的字段单独挂载。
@@ -52,10 +55,11 @@ const staticMethods: Omit<EnvMethods, 'log'> = {
 export const createEnvMethods = (
   moduleName: string,
   opt: LogOptions = {},
-  notify: boolean = false
+  notify?: boolean,
+  logging: LoggerFactory = defaultLoggerFactory
 ): EnvMethods => {
   return {
     ...staticMethods,
-    log: createLog(moduleName, opt, notify),
+    log: logging.scope(moduleName, { levels: opt, notify }),
   };
 };

@@ -5,8 +5,8 @@
  * “创建一次 root runtime，再按模块名派生上下文”的组合方式。它只做依赖组合，
  * 不管理 tick 生命周期或插件依赖（由 Framework 驱动），也不挂载或写回 Memory。
  *
- * 输入是可选的 RuntimeOptions（总线、Profiler、统计存储访问器与标脏回调、
- * 初始开关）；输出是 CreateModuleContext —— 传入模块名与日志选项即可得到
+ * 输入是可选的 RuntimeOptions（总线、日志工厂、Profiler、统计存储访问器与标脏
+ * 回调、初始开关）；输出是 CreateModuleContext —— 传入模块名与日志选项即可得到
  * ModuleContext（共享 bus/profiler、独立 env）。
  *
  * 状态与副作用：共享单例与默认 Profiler 统计都存放在本函数闭包中，随当前
@@ -15,6 +15,7 @@
  * 接口提供的访问器和标脏回调。
  */
 import { createBus } from '@/core/eventBus';
+import { createLogging } from '@/core/logger';
 import { createProfiler } from '@/core/profiler';
 import { DEFAULT_PROFILER_ENABLE } from '@/setting';
 import { createEnvMethods } from './env';
@@ -30,6 +31,7 @@ import type { RuntimeOptions } from './types';
  *
  * 它不会直接返回 root context，而是返回一个 createContext 函数。
  * root runtime 内部持有框架级单例：
+ * - logging：日志工厂，统一等级、输出端口与邮件策略，并注入模块 env 与总线。
  * - bus：模块通信总线。
  * - profiler：性能统计器，可通过 options 替换、禁用或配置。
  *
@@ -41,10 +43,17 @@ export const createRuntime = (
   options: RuntimeOptions = {}
 ): CreateModuleContext => {
   /**
-   * 总线只解析一次：注入用于测试替换或复用已有总线，缺省时新建一条独立
-   * 总线，让不同 root runtime 的订阅互不干扰。
+   * 日志工厂只解析一次：注入用于测试收集输出或复用已有配置，缺省时按项目
+   * 默认等级创建一个独立工厂。同一 Runtime 派生的所有消费者共享它，
+   * 因此日志端口与邮件策略在整个运行期内一致。
    */
-  const bus = options.bus ?? createBus();
+  const logging = options.logging ?? createLogging();
+  /**
+   * 总线只解析一次：注入用于测试替换或复用已有总线，缺省时新建一条独立
+   * 总线，让不同 root runtime 的订阅互不干扰。总线自己的诊断日志走同一个
+   * 日志工厂，避免内核组件各自持有第二套日志配置。
+   */
+  const bus = options.bus ?? createBus(logging);
   /**
    * 默认 Profiler 统计的落点：一个只存在于本闭包 heap 的普通对象。
    *
@@ -62,13 +71,14 @@ export const createRuntime = (
    * Profiler”，与“未提供、需要默认创建”是两种语义。
    *
    * 默认开关取自 setting，默认关闭，避免未启用时也承担每次包裹调用的取样成本。
-   * Profiler 的环境以 'Profiler' 为日志前缀单独创建，使其诊断日志与业务模块
-   * 区分开；createProfiler 拿不到统计对象时会返回 null，因此调用方按可空处理。
+   * Profiler 的环境以 'Profiler' 为日志前缀单独创建（共用 Runtime 的日志工厂），
+   * 使其诊断日志与业务模块区分开；createProfiler 拿不到统计对象时会返回 null，
+   * 因此调用方按可空处理。
    */
   const profiler =
     options.profiler === undefined
       ? createProfiler({
-          env: createEnvMethods('Profiler'),
+          env: createEnvMethods('Profiler', {}, undefined, logging),
           getMemory: options.getProfilerMemory ?? (() => heapProfilerMemory),
           markMemoryDirty: options.markProfilerMemoryDirty,
           enable: options.enableProfiler ?? DEFAULT_PROFILER_ENABLE,
@@ -82,8 +92,8 @@ export const createRuntime = (
     /**
      * 每次派生模块上下文时重新创建 env。
      *
-     * bus/profiler 共享 root 单例；env 则按 moduleName 独立创建，让日志
-     * 能准确标识来源模块，也允许不同模块使用不同日志配置。
+     * bus/profiler/logging 共享 root 单例；env 则按 moduleName 独立创建，让日志
+     * 能准确标识来源模块，也允许不同模块使用不同日志等级与邮件覆盖。
      *
      * 这里刻意不缓存派生结果：env 只包含无状态的 Game 访问方法和一个 logger，
      * 创建成本极低，缓存反而会让闭包长期持有已不再使用的日志配置。
@@ -93,7 +103,8 @@ export const createRuntime = (
       env: createEnvMethods(
         moduleName,
         moduleOptions.log,
-        moduleOptions.notify
+        moduleOptions.notify,
+        logging
       ),
       profiler,
     };

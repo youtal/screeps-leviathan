@@ -1,10 +1,17 @@
 /**
- * 编译期契约回归；由 tsc 检查，不由 Jest 执行。
- * 负例必须保留错误，防止公共能力、事件载荷或 readonly 边界意外放宽。
+ * 文件摘要：编译期契约回归；由 tsc 检查，不由 Jest 执行。
+ *
+ * 覆盖范围：Memory 访问判别联合、事件作用域与载荷对应、Logger 完整形状与作用域
+ * 覆盖、插件清单与上下文的边界。负例必须保留 `@ts-expect-error` 错误，防止公共
+ * 能力、事件载荷或 readonly 边界意外放宽；正例则保证契约仍可被正常实现承诺。
+ *
+ * 运行方式：随 `npx tsc --noEmit` 编译；不进入 Jest（testMatch 只收 *.test.ts）。
  */
 import type {
   Bus,
   Logger,
+  LoggerFactory,
+  LoggingOptions,
   MemoryAccess,
   PluginContext,
   PluginManifest,
@@ -49,3 +56,17 @@ const manifest: PluginManifest = {
 };
 void incompleteLogger;
 void manifest;
+
+/** 日志装配与作用域协议的正例：装配级配置 + 作用域覆盖都应可组合。 */
+export function verifyLoggingContract(factory: LoggerFactory): Logger {
+  const options: LoggingOptions = {
+    levels: { report: false },
+    notify: 'error',
+    notifyInterval: 30,
+    output: { write: (_line: string) => {} },
+  };
+  void options;
+  // @ts-expect-error 作用域等级键必须来自 LogOptions（warning 不是对外契约键）
+  factory.scope('contract', { levels: { warning: true } });
+  return factory.scope('contract', { levels: { debug: true }, notify: true });
+}

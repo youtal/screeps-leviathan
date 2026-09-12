@@ -28,9 +28,9 @@
 | ErrorMapper               | `errorMapper.ts`                 | 同步堆栈还原及结构化异常捕获                       |
 | CpuGovernor               | `cpuGovernor.ts`                 | 普通/关键插件准入和收尾预留                        |
 | IntentBroker              | `intentBroker.ts`                | 通道与共享锁仲裁、提交、回执                       |
-| EventBus / Profiler / Env | Core 能力                   | 强类型事件、嵌套 CPU 统计、Game 适配和日志         |
+| EventBus / Profiler / Env | Core 能力                   | 强类型事件、嵌套 CPU 统计、Game 适配；日志由 Runtime 的 LoggerFactory 注入 |
 
-Kernel 与生命周期合并在工厂实现中，避免重复维护两套执行状态。采用 Runtime 上下文协议，Env 工厂供默认上下文复用，也允许注入 `createContext`。这些组件不为 Framework 另建重复实现。
+Kernel 与生命周期合并在工厂实现中，避免重复维护两套执行状态。采用 Runtime 上下文协议，Env 工厂供默认上下文复用，也允许注入 `createContext`。这些组件不为 Framework 另建重复实现。日志通过 `FrameworkOptions.logging` 注入：传入时与 Runtime 共用工厂，省略时使用 `defaultLoggerFactory` 兜底，使框架可独立创建；日志协议见 [Logger 设计](./logger.md)。
 
 ## 4. 初始化与 tick 生命周期
 

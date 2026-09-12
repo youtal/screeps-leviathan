@@ -1,21 +1,17 @@
 /**
- * 文件摘要：提供控制台模板替换、文本着色、链接生成和分级日志工具。
+ * 文件摘要：提供控制台模板替换、文本着色与链接生成等纯文本工具。
  *
- * 模块位置：src/utils/console 的基础实现层，被 console/index.ts 作为唯一公共出口
- * 转发，同时被 form/、help/ 两个渲染器复用（它们只负责拼装模板，不做着色与输出）。
+ * 模块位置：src/utils/console 的基础实现层，被 console/index.ts 作为公共出口转发，
+ * 同时被 form/、help/ 两个渲染器复用（它们只负责拼装模板，不做着色与输出）。
+ * 日志能力已迁入 core/logger，本文件只保留它的格式化依赖（Color、dyeText、dye*）。
  *
- * 主要输入 / 输出：输入是普通字符串、颜色常量与日志文本，输出是可直接 console.log
- * 的 HTML 字符串。所有格式化函数（replaceHtml、fixRetraction、dyeText、dye*、createLink、
- * createRoomLink）都是纯函数，不读写 Memory、不访问 Game；
- * 只有 log/createLog 会产生运行时副作用：console.log 输出，并在开启时调用 Game.notify。
+ * 主要输入 / 输出：输入是普通字符串与颜色常量，输出是可直接 console.log 的 HTML
+ * 字符串。所有函数（replaceHtml、fixRetraction、dyeText、dye*、createLink、
+ * createRoomLink）都是纯函数：不读写 Memory、不写输出、不缓存状态。
  *
- * 外部依赖：默认日志开关来自 @/setting 的 DEFAULT_LOG_CONFIG；日志配置的类型 LogOptions
- * 由 contracts/logging 显式发布（不在本文件声明，也不产生运行时值）。
- * 生成的 HTML 面向 Screeps 控制台渲染环境，因此可以直接使用 span/style/a 等标记。
+ * 外部依赖：无。生成的 HTML 面向 Screeps 控制台渲染环境，因此可以直接使用
+ * span/style/a 等标记；着色函数与 Logger 共用，但不因此让本文件依赖 core。
  */
-import type { Logger, LogOptions } from '@/contracts/logging';
-import { DEFAULT_LOG_CONFIG } from '@/setting';
-
 /**
  * 占位符名称到替换文本的映射。
  *
@@ -167,90 +163,3 @@ export function createRoomLink(roomName: string): string {
     false
   );
 }
-
-/**
- * 底层日志输出函数。
- *
- * `enable` 为 false 时立即返回，避免颜色拼接和 notify 开销；notify 启用时以
- * 60 分钟分组间隔调用 Game.notify，降低重复通知频率。
- *
- * 运行时成本：console.log 会进入游戏控制台缓冲区，是主要的 CPU 与输出量来源，
- * 因此所有等级默认关闭、只有 warning/error 打开（见 DEFAULT_LOG_CONFIG），
- * enable 短路也放在最前面。prefix 为空串时跳过前缀着色，直接输出 content。
- * Game.notify 的第二个参数是分组间隔（分钟），相同内容在间隔内只发送一次邮件；
- * 它同样消耗 CPU，故仅由 error 等级按 notifyWhenError 显式开启。
- *
- * @param content 日志内容
- * @param prefix 日志前缀
- * @param color 日志前缀颜色
- * @param notify 是否发送邮件
- */
-export function log(
-  content: string,
-  prefix: string,
-  color: Color,
-  enable: boolean,
-  notify: boolean
-): void {
-  if (!enable) return;
-
-  // 颜色仅对前缀生效
-  const formattedPrefix = prefix ? dyeText(`[${prefix}] `, color, true) : '';
-  const formattedContent = `${formattedPrefix}${content}`;
-  console.log(formattedContent);
-  if (notify) {
-    Game.notify(formattedContent, 60);
-  }
-
-  return;
-}
-
-/**
- * 创建绑定模块前缀和日志配置的快捷方法集合。
- *
- * 空值合并运算符 `??` 只对 null/undefined 回退，因此调用方可以显式传入 false 关闭
- * 某个等级，而不必依赖默认值；`opt` 的每个字段都是可选的（LogOptions 见 contracts/logging），
- * 未提供的字段回退到 DEFAULT_LOG_CONFIG。
- *
- * 返回值是六个接受单个字符串的方法：debug(蓝)、warn(橙)、error(红)、success(绿)、
- * info(青)、report(紫)。这些方法在创建时就固定了 prefix 与颜色，运行时不再读配置，
- * 因此同一模块的日志开关在 global 生命周期内保持一致；只有 error 会把
- * notifyWhenError 透传给底层 log，从而按需触发 Game.notify。
- *
- * 六个等级的回退规则完全一致：都按 `opt[字段] ?? DEFAULT_LOG_CONFIG[字段]` 取值，
- * 因此显式传入 false 可以单独关闭某个等级（含 report），未传的字段才跟随默认配置。
- *
- * @param prefix 模块日志前缀
- * @param opt 日志配置
- * @param notifyWhenError 是否在出现错误时发送邮件
- */
-export const createLog = (
-  prefix: string,
-  opt: LogOptions,
-  notifyWhenError = false
-): Logger => {
-  const { debug, warn, error, success, info, report } = opt;
-  const {
-    debug: defaultDebug,
-    warning: defaultWarning,
-    error: defaultError,
-    success: defaultSuccess,
-    info: defaultInfo,
-    report: defaultReport,
-  } = DEFAULT_LOG_CONFIG;
-
-  return {
-    debug: (content: string) =>
-      log(content, prefix, Color.Blue, debug ?? defaultDebug, false),
-    warn: (content: string) =>
-      log(content, prefix, Color.Orange, warn ?? defaultWarning, false),
-    error: (content: string) =>
-      log(content, prefix, Color.Red, error ?? defaultError, notifyWhenError),
-    success: (content: string) =>
-      log(content, prefix, Color.Green, success ?? defaultSuccess, false),
-    info: (content: string) =>
-      log(content, prefix, Color.Cyan, info ?? defaultInfo, false),
-    report: (content: string) =>
-      log(content, prefix, Color.Violet, report ?? defaultReport, false),
-  };
-};

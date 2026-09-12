@@ -10,8 +10,9 @@ import type { LogOptions } from './logging';
 /**
  * 派生模块上下文时的可选配置。
  *
- * log 会传给 createLog，用于覆盖默认日志开关。
- * notify 控制该模块的错误日志是否调用 Game.notify。
+ * log 作为作用域等级覆盖传给注入的日志工厂。
+ * notify 是该模块对装配级邮件策略的覆盖：undefined 跟随装配配置，false 强制关闭，
+ * true 在装配允许时开启 error 邮件。
  *
  * 两个选项都只作用于本次派生出的 env，不影响共享的 bus/profiler。
  */

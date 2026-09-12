@@ -7,6 +7,7 @@ import type { ModuleContext, CreateModuleContext } from './runtime';
 import type { Profiler } from './profiler';
 import type { CpuBudget, GameIntent, IntentReceipt } from './intent';
 import type { PluginFailure } from './errorMapper';
+import type { LoggerFactory } from './logging';
 /** 注册描述；依赖字段引用插件 ID，provides 字段声明服务名，两者并非同一命名空间。 */
 export interface PluginManifest {
   /** 插件和诊断的归属键；注册后保持稳定。 */
@@ -70,6 +71,8 @@ export interface FrameworkOptions {
   plugins?: readonly LeviathanPlugin[];
   /** 每次返回当前 Game，避免跨 tick 捕获过期对象；测试可注入模拟环境。 */
   getGame?: () => Game;
+  /** 注入 Runtime 组装的日志工厂；缺省使用 core/logger 兜底工厂，仅供独立调用与测试。 */
+  logging?: LoggerFactory;
   /** 提供基础 Runtime；框架仍会代理订阅、追加服务和意图能力。 */
   createContext?: CreateModuleContext;
   /** undefined 使用内置实例，null 禁用观测；均不影响错误隔离。 */

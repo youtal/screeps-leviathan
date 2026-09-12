@@ -1,7 +1,7 @@
 # 使用说明
 
 - [公共契约](./contracts.md)：类型导入、实现承诺与 Memory 类型交付边界。
-- [Logger](./core/logger.md)：目录占位及日志能力入口。
+- [Logger](./core/logger.md)：装配工厂、作用域日志、等级与邮件配置。
 - [MemoryManager](./core/memoryManager.md)：持久化停用与契约使用边界。
 - [Framework](./core/framework.md)：插件注册、生命周期、服务、意图与诊断。
 - [Profiler](./core/profiler.md)：启停采样、包装函数和读取统计报告。

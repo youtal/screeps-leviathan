@@ -6,6 +6,7 @@
  */
 import { createBus } from '../eventBus';
 import type { Bus, EventScope, EventType, DataByEvent } from '@/contracts';
+import { createLogging } from '@/core/logger';
 import { createProfiler } from '../profiler';
 import { createEnvMethods } from '../runtime/env';
 import { createCpuGovernor } from './cpuGovernor';
@@ -31,9 +32,19 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
   const healthTable = new Map<string, PluginHealth>();
   const profilerMemory: ProfilerMemory = {};
   const cpu = createCpuGovernor(getGame, options.reserveCpu, options.minBucket);
-  const errors = createErrorMapper(options.loadSourceMap, options.report);
+  /**
+   * 日志工厂在装配阶段创建一次：注入的工厂与 Runtime 共用一套等级、输出端口和
+   * 邮件策略；缺省使用 core/logger 兜底工厂，保持 createFramework 可独立创建。
+   * 错误映射、事件总线、Profiler 与各插件 env 都从它派生作用域日志器。
+   */
+  const logging = options.logging ?? createLogging();
+  const errors = createErrorMapper(
+    options.loadSourceMap,
+    options.report,
+    logging
+  );
   const registry = createPluginRegistry();
-  const bus = createBus();
+  const bus = createBus(logging);
   /** 连续失败达到该值即熔断；熔断插件不参与后续 tick，必须显式 recover 才重新准入。 */
   const threshold = options.failureThreshold ?? 3;
   if (!Number.isInteger(threshold) || threshold < 1)
@@ -193,7 +204,7 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
           bus,
           profiler: profiler ?? null,
           env: {
-            ...createEnvMethods(id),
+            ...createEnvMethods(id, {}, undefined, logging),
             getGame,
             getRoom: (name: string) => getGame().rooms[name],
             getCreep: (name: string) => getGame().creeps[name],
@@ -352,7 +363,10 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
             options.profiler !== undefined
               ? options.profiler
               : createProfiler({
-                  env: { ...createEnvMethods('Profiler'), getGame },
+                  env: {
+                    ...createEnvMethods('Profiler', {}, undefined, logging),
+                    getGame,
+                  },
                   getMemory: () => profilerMemory,
                   enable: options.enableProfiler ?? false,
                 });

@@ -6,12 +6,13 @@
  */
 
 /**
- * createLog 的默认日志开关：warning/error/report 默认开启，debug/success/info 关闭。
+ * 内核日志的默认等级开关：warning/error/report 默认开启，debug/success/info 关闭。
  *
- * createLog 用 `??` 逐字段回退到这里的值，所以模块显式传 false 也能生效；键名 warning
- * 对应 LogOptions 的 warn，六个等级（含 report）都遵循同一套回退规则。
- * 每个等级都会真实调用 console.log（error 还可触发 Game.notify），在热路径上输出
- * 大量 debug/info 会直接消耗 tick CPU 并刷屏，因此默认保持关闭。
+ * core/logger 在装配日志工厂时用 `??` 逐字段回退到这里的值，作用域还能再用 LogOptions
+ * 覆盖，因此模块显式传 false 也能生效；键名 warning 对应 LogOptions 的 warn，六个等级
+ * （含 report）都遵循同一套回退规则。
+ * 每个等级都会真实调用 console.log（error 还可在装配允许时触发 Game.notify），
+ * 在热路径上输出大量 debug/info 会直接消耗 tick CPU 并刷屏，因此默认保持关闭。
  */
 export const DEFAULT_LOG_CONFIG = {
   debug: false,

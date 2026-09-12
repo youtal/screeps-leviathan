@@ -139,8 +139,9 @@ onTickExecute(context) {
 | `minBucket`        | `1000`                  | 普通插件准入下限                               |
 | `failureThreshold` | `3`                     | 连续失败 tick 的熔断阈值                       |
 | `getGame`          | 全局 Game               | 测试环境注入                                   |
+| `logging`          | 兜底日志工厂            | 注入 Runtime 的 LoggerFactory；省略时用内核兜底工厂 |
 | `createContext`    | Framework 默认上下文    | 高级依赖注入；各上下文应共享同一总线           |
-| `report`           | console 日志            | 结构化失败处理函数                             |
+| `report`           | ErrorMapper 作用域日志  | 结构化失败处理函数；省略时走注入日志工厂       |
 | `loadSourceMap`    | require('main.js.map')  | 同步加载当前构建的 source map                  |
 
 `critical` 仅给基础服务使用。其失败会阻止剩余业务提交，熔断后需显式 recover。安全模式不会自动执行生存策略。

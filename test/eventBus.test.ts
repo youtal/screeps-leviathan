@@ -8,7 +8,7 @@
  * 发布生效）。
  *
  * 替代实现：总线状态全部保存在工厂闭包内，用例无需 Screeps 全局对象；仅通过
- * jest.fn 监听器与 console.log spy（createLog 的输出通道）观察调用与日志，
+ * jest.fn 监听器与 console.log spy（内核 Logger 的默认输出通道）观察调用与日志，
  * afterEach 统一恢复 spy。
  *
  * 运行方式：npm test（ts-jest，testEnvironment=node）；不需要 .secret.json，

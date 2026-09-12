@@ -1,8 +1,9 @@
 /**
- * 文件摘要：作为控制台工具（src/utils/console）的公共出口，当前只暴露通用格式化与日志函数。
+ * 文件摘要：作为控制台工具（src/utils/console）的公共出口，当前只暴露通用格式化与着色函数。
  *
- * 模块位置：console 目录的 barrel，向下汇总 `utils.ts`（模板替换、着色、链接、日志工厂），
- * 向上由 `src/utils/index.ts` 再导出。
+ * 模块位置：console 目录的 barrel，向下汇总 `utils.ts`（模板替换、着色、链接），
+ * 向上由 `src/utils/index.ts` 再导出。日志能力已迁入 `src/core/logger`，本目录
+ * 只保留它复用的纯格式化函数（Color、dyeText、dye*），帮助与表单也继续复用它们。
  *
  * 主要输入 / 输出：对外能力完全来自 `export * from './utils'`；本文件自身不定义值，
  * 因此新增工具函数只需在 utils.ts 中导出即可自动出现在此处。

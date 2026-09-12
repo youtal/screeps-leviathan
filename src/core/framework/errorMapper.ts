@@ -5,13 +5,18 @@
  *
  * 所属模块：core/framework 的内核组件，由 createFramework 创建（随后注入 Kernel 的计时包装），
  * 并经 framework/index 的 `export * from './errorMapper'` 成为公共能力，供外部复用堆栈映射。
- * 输入为注入的 loadMap/report 回调与待执行函数；输出 capture 的 ExecutionResult 判别联合、
- * mapStack 的映射文本，以及 setMeasure 观测适配口。
+ * 输入为注入的 loadMap/report 回调、LoggerFactory 与待执行函数；输出 capture 的
+ * ExecutionResult 判别联合、mapStack 的映射文本，以及 setMeasure 观测适配口。
  * 状态全部驻留 heap：加载尝试标记、TraceMap 实例、最多 64 条映射缓存、当前计时函数。
  * 依赖第三方包 @jridgewell/trace-mapping 提供同步位置查询；本文件不读写 Memory。
  */
 import { TraceMap, originalPositionFor } from '@jridgewell/trace-mapping';
-import type { ExecutionResult, PluginFailure } from '@/contracts';
+import type {
+  ExecutionResult,
+  LoggerFactory,
+  PluginFailure,
+} from '@/contracts';
+import { defaultLoggerFactory } from '@/core/logger';
 
 /**
  * 创建同步故障边界，成功返回原值，失败返回诊断联合类型，调用者据此隔离插件。
@@ -21,21 +26,32 @@ import type { ExecutionResult, PluginFailure } from '@/contracts';
  * 都不支付读取成本，本地/测试环境也不会因为缺少 main.js.map 而加载失败。
  * loadMap 返回 any：TraceMap 接受原始 JSON 文本或已解析对象，由构造函数在运行时校验，
  * 若在公共选项里收紧类型就得把第三方类型泄漏给调用方（见 types.ts 的 loadSourceMap）。
- * 默认 reporter 每个故障输出一行 console.log：Screeps 中 console 输出有 CPU 与配额成本，
- * 生产环境可注入更省的实现；report 抛错会被吞掉，不会盖掉原始故障。
+ *
+ * report 缺省时使用注入日志工厂的 ErrorMapper 作用域输出：Screeps 中 console 输出
+ * 有 CPU 与配额成本，生产环境可注入更省的实现；report 抛错会被吞掉，不会盖掉原始
+ * 故障。日志能力不依赖映射器本身，因此这里不会形成"记录错误又触发错误"的回环。
  */
 export const createErrorMapper = (
   loadMap: () => any = () => require('main.js.map'),
-  report: (failure: PluginFailure) => void = (failure) =>
-    console.log(
-      '[Framework] ' +
-        failure.pluginId +
-        '/' +
-        failure.phase +
-        ': ' +
-        (failure.mappedStack ?? failure.stack)
-    )
+  report?: (failure: PluginFailure) => void,
+  logging: LoggerFactory = defaultLoggerFactory
 ): import('@/contracts/errorMapper').ErrorMapper => {
+  /**
+   * 失败报告出口：显式注入优先，否则按 ErrorMapper 作用域记录 error 级日志。
+   * 文本保持"插件/阶段: 堆栈"结构，映射成功时用映射后的堆栈。
+   */
+  const reportFailure =
+    report ??
+    ((failure: PluginFailure) =>
+      logging
+        .scope('ErrorMapper')
+        .error(
+          failure.pluginId +
+            '/' +
+            failure.phase +
+            ': ' +
+            (failure.mappedStack ?? failure.stack)
+        ));
   /** 每个实例仅尝试加载一次；失败后到 global reset 前退回原始堆栈，避免反复支付失败成本。 */
   let attempted = false;
   // 加载成功后一直复用同一个 TraceMap；undefined 表示不可用（尚未加载或加载失败）。
@@ -133,7 +149,7 @@ export const createErrorMapper = (
         /* 统计或映射失效时保留原始堆栈。 */
       }
       try {
-        measure('framework.errorMapper.report', () => report(failure));
+        measure('framework.errorMapper.report', () => reportFailure(failure));
       } catch {
         /* 日志故障不影响返回原始故障。 */
       }
