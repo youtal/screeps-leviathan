@@ -8,10 +8,9 @@
  * 主要输入 / 输出：输入是一个或多个 ModuleDescribe（模块名、介绍、FunctionDescribe 列表），
  * 输出是可直接 console.log 的单行 HTML 字符串。渲染是纯字符串拼接，不读写 Memory。
  *
- * 状态与副作用：模块求值期执行一次 template.split(';;') 得到 4 个模板片段常量（跨 tick 复用、
- * global reset 后重建），以及一条开发期 console.log 打印原始模板；后者使本模块带有副作用，
- * 打包时不能被完全 tree-shaking，且只要被导入就会在每次 global 生命周期开始时输出一次。
- * 渲染函数本身无缓存、无可变状态。
+ * 状态与副作用：模块求值期只执行一次 template.split(';;') 得到 4 个模板片段常量（跨 tick 复用、
+ * global reset 后重建），不写任何输出，渲染结果由调用方自行 console.log；渲染函数本身无缓存、
+ * 无可变状态，因此导入本模块不会产生导入期副作用。
  */
 import template from './template.html';
 import style from './style.html';
@@ -23,7 +22,7 @@ import {
   dyeBlue,
 } from '../utils';
 import { ModuleDescribe, FunctionDescribe } from './types';
-console.log(`template: ${template}`); // 开发期输出原始模板，便于检查文本插件的导入结果。
+
 /**
  * 模板片段的解构顺序必须与 template.html 的 `;;` 分段保持一致。
  *
