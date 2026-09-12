@@ -1,7 +1,7 @@
 /**
  * 文件摘要：为一个 tick 收集意图，按优先级与互斥锁仲裁后同步提交。
  * 所有候选先完成仲裁再执行，避免提交异常改变胜者；同优先级按提交顺序决胜。
- * 闭包仅保存在本 tick，持久化回执只包含 JSON 元数据，下一 tick 由业务插件核验事实。
+ * 闭包仅保存在本 tick，heap 回执只包含动作结果元数据，下一 tick 由业务插件核验事实。
  *
  * 所属模块：core/framework 的内核组件，由 createFramework 每个 loop 新建，经 PluginContext
  * 的 intents 能力对外暴露 submit/receipts/previous；不从 framework/index 导出。
@@ -10,7 +10,7 @@
  * 本文件不写 Memory、不直接调用 Game API：动作交给注入的 execute，使裁决逻辑可以脱离
  * Screeps 单测；队列与回执随实例丢弃，global reset 后没有需要恢复的状态。
  */
-import type { ExecutionResult, GameIntent, IntentReceipt } from './types';
+import type { ExecutionResult, GameIntent, IntentReceipt } from '@/contracts';
 /**
  * 每个 loop 新建 broker，旧队列不继承；deferred 也不会自动重试，下一 tick 由业务重规划。
  * 收集与提交分离后才有机会在调用游戏 API 前统一裁决，不能撤销已交给引擎的指令。
@@ -59,7 +59,7 @@ export const createIntentBroker = (tick: number) => {
    * 回执以提交 id 存放，不随优先级排序改变关联；尚未提交时 receipts 是空列表。
    * 四个依赖全部注入而不是 import：broker 不依赖 Kernel、Profiler 或 Game，测试可直接驱动
    * 裁决逻辑；measure 缺省为直通，等价于未接观测，因此不传参也能在测试中使用。
-   * measure 的两个固定标签与 docs/design/framework.md 的 Profiler 标签表保持一致。
+   * measure 的两个固定标签与 docs/design/core/framework.md 的 Profiler 标签表保持一致。
    */
   const commit = (
     eligible: (id: string) => boolean,

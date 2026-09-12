@@ -12,10 +12,10 @@
  * global reset 改变。`satisfies` 会在编译期检查值是否合法，同时保留对象自身的
  * 精确字面量类型，不会把所有属性宽化成笼统的 `EventType`。
  *
- * 维护顺序：先在 types.ts 的 EventRegistry 注册分类与事件，再补这里的常量；
+ * 维护顺序：先在 contracts/events 的 EventRegistry 注册分类与事件，再补这里的常量；
  * 反过来 satisfies 会直接报编译错误，避免出现无法被 publish 使用的事件名。
  */
-import type { EventType } from './types';
+import type { EventType } from '@/contracts';
 
 /**
  * 分类名常量。
@@ -62,6 +62,5 @@ const eventList = {
   combatVictory: `${eventCategory.Combat}:victory`,
   combatDefeat: `${eventCategory.Combat}:defeat`,
 } as const satisfies Record<string, EventType>;
-
 
 export { eventCategory, eventList };

@@ -1,5 +1,9 @@
 # Runtime 设计
 
+交付状态：上下文派生、共享事件总线与统计装配已交付；统一内核装配未交付。
+
+本文定义轻量上下文工厂的交付阶段协议。Root Runtime 的统一内核组装与生命周期端口设计见 [Core 架构](./README.md)。
+
 Runtime 是核心设施的轻量组合层。它创建一条共享 EventBus、一个可选 Profiler，并为每个模块派生带独立日志前缀和 Screeps `Game` 访问适配器的 `ModuleContext`。Runtime 不管理 tick 生命周期、插件依赖、Memory 挂载或写回；这些职责属于 Leviathan Framework。
 
 `createRuntime()` 返回模块上下文工厂。总线与 Profiler 保存在工厂闭包中并由所有派生上下文共享，`env` 则按模块名创建，使日志来源清晰且测试可以替换运行环境。Runtime 本身不直接访问全局 `Memory` 或 RawMemory。

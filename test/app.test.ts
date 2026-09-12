@@ -3,8 +3,7 @@
  *
  * 覆盖模块：src/app/runtime.ts 暴露的 framework 单例、src/index.ts 导出的 loop、
  * app 注册的 roomShortcuts 服务插件。覆盖边界：依赖方声明 requires 后能在 setup
- * 阶段从 services 取得查询服务、首个 tick 写回 RawMemory、无状态变化的第二个 tick
- * 不重复序列化，以及模块导入阶段不得读取 Memory（Memory 挂载推迟到首次 loop）。
+ * 阶段从 services 取得查询服务、连续 tick 不读写 RawMemory，导入和 loop 都不挂载 Memory。
  *
  * 替代实现：不加载 Screeps 运行时，改为在 global 上注入最小 Game/Memory/RawMemory
  * 桩；RawMemory 用闭包字符串模拟「get 返回上次 set 内容」的语义，使写回次数可断言。
@@ -36,7 +35,7 @@ describe('App composition', () => {
     // 框架的脏检查与序列化时机因此能通过 set 的调用次数观察到。
     let raw = '{}';
     (global as any).RawMemory = {
-      get: () => raw,
+      get: jest.fn(() => raw),
       set: jest.fn((value: string) => {
         raw = value;
       }),
@@ -62,25 +61,30 @@ describe('App composition', () => {
     expect(framework.getStatus().safeMode).toBe(false);
     expect(typeof service.getSpawn).toBe('function');
     expect(typeof service.getStorage).toBe('function');
-    expect((global as any).RawMemory.set).toHaveBeenCalledTimes(1);
-    // 第二个 tick 没有任何状态变化，拦截器应跳过 stringify 与写回：
+    expect((global as any).RawMemory.set).not.toHaveBeenCalled();
+    expect((global as any).RawMemory.get).not.toHaveBeenCalled();
+    // 第二个 tick 同样不访问持久化存储：
     // 每 tick 全量序列化会随 Memory 体积持续消耗 CPU。
     Game.time++;
     loop();
-    expect((global as any).RawMemory.set).toHaveBeenCalledTimes(1);
+    expect((global as any).RawMemory.set).not.toHaveBeenCalled();
+    expect((global as any).RawMemory.get).not.toHaveBeenCalled();
   });
 
   /**
    * 用访问器属性整体替换 global.Memory：任何读取都会抛错，因此模块导入期若发生
    * 急切读取就会被本用例捕获。finally 恢复为普通数据属性，避免污染后续用例。
    */
-  it('does not access Memory during module import', () => {
+  it('does not access Memory during module import or loop', () => {
     const get = jest.fn(() => {
       throw new Error('eager Memory');
     });
     Object.defineProperty(global, 'Memory', { configurable: true, get });
     try {
-      expect(() => require('@/app')).not.toThrow();
+      expect(() => {
+        const app = require('@/app');
+        app.framework.loop();
+      }).not.toThrow();
       expect(get).not.toHaveBeenCalled();
     } finally {
       Object.defineProperty(global, 'Memory', {

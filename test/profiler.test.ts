@@ -16,7 +16,7 @@
  */
 import { createMemoryAccessor } from '@/core/profiler/memory';
 import { createProfiler } from '@/core/profiler';
-import type { EnvMethods } from '@/core/runtime/types';
+import type { EnvMethods } from '@/contracts';
 import type { ProfilerMemory } from '@/core/profiler';
 
 /** 全 jest.fn 的 logger：既能断言 report/warn 的调用与文案，又不会向测试输出刷日志。 */

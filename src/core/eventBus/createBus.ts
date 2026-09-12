@@ -15,13 +15,8 @@
  * 序列化开销，但每次全局重置后会随模块重新初始化，因此订阅只在当前 global
  * 生命周期内有效，跨 tick 依赖由持有总线的装配方在启动阶段重新注册。
  */
-import {
-  DataByEvent,
-  EventScope,
-  EventType,
-  ListenersMap,
-  ListenersStore,
-} from './types';
+import type { DataByEvent, EventScope, EventType } from '@/contracts';
+import { ListenersMap, ListenersStore } from './types';
 import { createLog } from '@/utils/console';
 
 /**
@@ -58,7 +53,7 @@ const scopeLabel = (scope: EventScope): string => {
  * 工厂本身只创建闭包状态，不订阅、不发布，也不访问 Game 或 Memory：
  * 订阅表随实例驻留 heap，global reset 后由装配方（Runtime 或 Framework）重新创建。
  */
-export const createBus = () => {
+export const createBus = (): import('@/contracts/eventBus').Bus => {
   /**
    * 总线日志使用 EventBus 前缀与默认日志配置（info 默认关闭），正常运行时不
    * 会被订阅/发布明细刷屏；排错时在 setting 中打开对应等级即可观察调用链。

@@ -10,9 +10,10 @@
  * 只有 log/createLog 会产生运行时副作用：console.log 输出，并在开启时调用 Game.notify。
  *
  * 外部依赖：默认日志开关来自 @/setting 的 DEFAULT_LOG_CONFIG；日志配置的类型 LogOptions
- * 是 types.d.ts 中的全局环境类型（不在本文件声明，也不产生运行时值）。
+ * 由 contracts/logging 显式发布（不在本文件声明，也不产生运行时值）。
  * 生成的 HTML 面向 Screeps 控制台渲染环境，因此可以直接使用 span/style/a 等标记。
  */
+import type { Logger, LogOptions } from '@/contracts/logging';
 import { DEFAULT_LOG_CONFIG } from '@/setting';
 
 /**
@@ -208,7 +209,7 @@ export function log(
  * 创建绑定模块前缀和日志配置的快捷方法集合。
  *
  * 空值合并运算符 `??` 只对 null/undefined 回退，因此调用方可以显式传入 false 关闭
- * 某个等级，而不必依赖默认值；`opt` 的每个字段都是可选的（LogOptions 见 types.d.ts），
+ * 某个等级，而不必依赖默认值；`opt` 的每个字段都是可选的（LogOptions 见 contracts/logging），
  * 未提供的字段回退到 DEFAULT_LOG_CONFIG。
  *
  * 返回值是六个接受单个字符串的方法：debug(蓝)、warn(橙)、error(红)、success(绿)、
@@ -227,7 +228,7 @@ export const createLog = (
   prefix: string,
   opt: LogOptions,
   notifyWhenError = false
-) => {
+): Logger => {
   const { debug, warn, error, success, info, report } = opt;
   const {
     debug: defaultDebug,

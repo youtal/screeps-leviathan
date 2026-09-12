@@ -5,7 +5,7 @@
  * 引用 ProfilerMemory、ProfilerContext 等协议。
  *
  * 本入口不导出 memory.ts 的 createMemoryAccessor：统计存储只应通过宿主提供的 getMemory
- * 适配，避免绕过 Framework 的持久化边界（测试仍可按路径直接导入该文件）。导入本入口
+ * 适配，保持统计数据模型与公共观测能力的边界（测试仍可按路径直接导入该文件）。导入本入口
  * 不创建 Profiler、不访问 Game/Memory；工厂返回 null 的失败契约由调用方处理。
  */
 export { createProfiler } from './createProfiler';

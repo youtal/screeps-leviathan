@@ -8,8 +8,8 @@
  * 加载（包括 global reset 后的重新加载）都会得到新的实例与新 loop；这里取方法
  * 引用而不是再包一层调用，是为了不引入额外的每 tick 开销和 this 语义。
  *
- * 入口不重复实现初始化与收尾：Memory 挂载、插件 setup、tickBegin/tickExecute/
- * commit 以及 tickEnd 写回都在 framework.loop 内部完成。该 loop 不可重入，运行中
+ * 入口不重复实现初始化与收尾：插件 setup、tickBegin/tickExecute/
+ * commit 以及 tickEnd 都在 framework.loop 内部完成，不读写持久化存储。该 loop 不可重入，运行中
  * 再次调用会抛错，同一 tick 重复调用则直接返回，这些语义同样由实例维护。
  */
 import { framework } from './app';

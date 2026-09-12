@@ -3,7 +3,7 @@
  *
  * core/runtime 的装配入口：向下复用 eventBus 与 profiler，向上为 app 层提供
  * “创建一次 root runtime，再按模块名派生上下文”的组合方式。它只做依赖组合，
- * 不管理 tick 生命周期、插件依赖、Memory 挂载或写回，这些职责属于 Framework。
+ * 不管理 tick 生命周期或插件依赖（由 Framework 驱动），也不挂载或写回 Memory。
  *
  * 输入是可选的 RuntimeOptions（总线、Profiler、统计存储访问器与标脏回调、
  * 初始开关）；输出是 CreateModuleContext —— 传入模块名与日志选项即可得到
@@ -11,7 +11,7 @@
  *
  * 状态与副作用：共享单例与默认 Profiler 统计都存放在本函数闭包中，随当前
  * global 生命周期存在，global reset 后由调用方重新装配；默认统计对象只驻留
- * heap，不会被序列化进 Memory，需要持久化时必须注入 Framework 统一持久化
+ * heap，不会被序列化进 Memory，需要持久化时必须由宿主注入存储
  * 接口提供的访问器和标脏回调。
  */
 import { createBus } from '@/core/eventBus';
@@ -22,8 +22,8 @@ import type {
   CreateModuleContext,
   ModuleContext,
   ModuleContextOptions,
-  RuntimeOptions,
-} from './types';
+} from '@/contracts';
+import type { RuntimeOptions } from './types';
 
 /**
  * 创建当前 AI 的 root runtime。
@@ -50,7 +50,7 @@ export const createRuntime = (
    *
    * 独立 Runtime 没有 Framework 的提交边界，无法判断何时该把统计写回 Memory，
    * 因此默认不触碰全局 Memory，避免绕开统一持久化协议；代价是 global reset
-   * 后统计清零。需要跨 tick 保留时必须注入 getProfilerMemory 与
+   * 后统计清零。需要跨 global reset 保留时必须注入 getProfilerMemory 与
    * markProfilerMemoryDirty，由调用者决定存储位置与写回时机。
    *
    * 该对象被所有派生上下文共享：Profiler 计时路径会在其中原地累加每个 label

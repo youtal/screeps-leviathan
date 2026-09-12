@@ -12,8 +12,9 @@
  * 不缓存任何 Game 对象，因此跨 tick 不会持有失效引用；唯一状态是 createLog
  * 持有的日志配置。global reset 后模块重新求值，行为保持一致。
  */
+import type { LogOptions } from '@/contracts/logging';
 import { createLog } from '@/utils/console';
-import type { EnvMethods } from './types';
+import type { EnvMethods } from '@/contracts';
 
 /**
  * 不随模块变化的 Screeps 运行时访问方法。

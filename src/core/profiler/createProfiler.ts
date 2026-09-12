@@ -8,14 +8,15 @@
  * 本模块既不缓存该引用，也不隐式访问全局 Memory。
  * 只测量同步调用区间，不等待 Promise 完成；采样或写入故障不得改变业务返回/抛错行为。
  *
- * 存储来源完全由宿主的 getMemory 决定：Framework 传入检查点分区，独立 Runtime 传入
+ * 存储来源完全由宿主的 getMemory 决定：Framework 与默认 Runtime 传入
  * 闭包 heap 对象，本模块自身不访问全局 Memory，也不负责序列化与写回（标脏只通过可选的
  * markMemoryDirty 上报），因此累计值何时真正落盘属于宿主的生命周期。访问器无法建立时
  * 返回 null，宿主据此整体降级为“不统计”，而不是保留一个永远不记录的实例。
  */
-import type { ProfilerContext, Profiler } from './types';
+import type { Profiler } from '@/contracts';
+import type { ProfilerContext } from './types';
 import { createMemoryAccessor } from './memory';
-import type { Wrap } from '@/core/runtime/types';
+import type { Wrap } from '@/contracts';
 
 /**
  * 创建性能统计器。

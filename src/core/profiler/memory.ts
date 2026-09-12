@@ -1,16 +1,11 @@
 /**
- * 文件摘要：封装 Profiler 对持久化统计对象的读取、累加和清空操作。
- *
- * 每次操作通过 getMemory 定位当前统计命名空间，兼容 Framework 初始化迁移；
- * Framework 的 Memory 在同一 global 生命周期常驻 heap，访问器不自行缓存第二份引用。
- * 更新和清空原地修改当前对象，不自行序列化；写回由宿主或 Framework 统一负责。
- *
- * 本模块是 Profiler 与宿主存储之间的适配层：可选的 markDirty 用于在修改前登记待提交
- * （Framework 的 profiler 检查点分区），省略时统计只存活在调用者闭包中（独立 Runtime 的
- * heap 模式）。访问器不校验记录结构、不做深拷贝，因此统计对象必须保持可 JSON 序列化。
+ * 文件摘要：封装 Profiler 统计容器的读取、累加与清空，属于本模块内部模型的访问层。
+ * 输入为宿主 getMemory、Logger 和可选标脏回调，不直接读写 RawMemory 或全局 Memory。
+ * 每次操作重取容器并原地更新；heap 生命周期由宿主控制，Framework 默认在 reset 后丢失统计。
+ * 注入持久化存储时由宿主负责标脏及提交，访问器自身不缓存第二份引用、不序列化。
  */
 import type { Record, ProfilerMemory } from './types';
-import { createLog } from '@/utils/console';
+import type { Logger } from '@/contracts/logging';
 
 /**
  * 创建 Profiler Memory 访问器。
@@ -29,7 +24,7 @@ import { createLog } from '@/utils/console';
  */
 export const createMemoryAccessor = (
   getMemory: () => ProfilerMemory,
-  log: ReturnType<typeof createLog>,
+  log: Logger,
   markDirty: () => void = () => undefined
 ) => {
   if (!getMemory()) {

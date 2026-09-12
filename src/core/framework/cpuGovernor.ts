@@ -1,5 +1,5 @@
 /**
- * 文件摘要：提供 tick 内 CPU 准入检查，为 Memory 写回和后处理保留预算。
+ * 文件摘要：提供 tick 内 CPU 准入检查，为 健康统计和后处理保留预算。
  * 使用 tickLimit 为硬边界、limit 为普通插件边界；低 bucket 暂缓普通插件。
  * 此组件不能抢占 JavaScript 函数，长任务必须主动检查 remaining 并分批运行。
  *
@@ -10,13 +10,13 @@
  * 都重新采样 Game.cpu，用即时性换取"预算判断不会过期"。
  */
 // import type 编译后被擦除：本组件在运行时只依赖注入的 getGame，不引入任何模块级依赖。
-import type { CpuBudget } from './types';
+import type { CpuBudget } from '@/contracts';
 /**
  * 工厂仅保留注入函数与阈值，检查时重新取得 Game.cpu，不缓存跨 tick CPU 数值。
  * 默认值供配置缺省及测试环境使用；每次检查为常数时间，仍要支付 getUsed 的采样开销。
  * getGame 而不是直接捕获 Game：Screeps 每 tick 刷新 Game 与其中的游戏对象，闭包只有在
  * 调用时取当前值才能读到本 tick 的 cpu 字段，测试与模拟环境也借此注入自己的 Game。
- * reserveCpu 是留给 tick 收尾（tickEnd、Memory 写回）的预算，minBucket 是普通插件放宽准入
+ * reserveCpu 是留给 tick 收尾（tickEnd、健康统计）的预算，minBucket 是普通插件放宽准入
  * 所需的 bucket 下限；两者都必须有限且非负，0 表示对应边界不预留余量。
  * 阈值非法时在 createFramework 构造期同步抛错：这属于配置错误，不进入运行时 safeMode，
  * 也避免 NaN/负数让准入判断退化为恒真或恒假。

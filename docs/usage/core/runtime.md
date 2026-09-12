@@ -24,4 +24,4 @@ const defenseContext = createContext('Defense', { notify: true });
 
 没有提供存储适配器时，默认 Profiler 数据只保存在 Runtime 闭包 heap，不访问全局 `Memory`。这两个选项仅保留给底层集成与测试；业务模块不得用它们建立另一条 Memory 访问路径。
 
-项目正式业务模块应通过 Framework 的 `PluginContext` 使用这些能力。Framework 已管理 Runtime 设施与 Profiler 存储，插件无需自行创建 Runtime，也不应直接访问 `Memory` 或 RawMemory。
+项目正式业务模块应通过 Framework 的 `PluginContext` 使用这些能力。Framework 管理基础设施与 heap Profiler 统计，插件无需自行创建 Runtime，也不应直接访问 `Memory` 或 RawMemory。

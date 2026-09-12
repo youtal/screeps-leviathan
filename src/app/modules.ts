@@ -8,11 +8,11 @@
  * 因此这里不导入 Kernel 内部实现，新增模块也只需追加一个插件描述。
  */
 import { createRoomShortcuts } from '@/modules/roomShortcuts/createRoomShortcuts';
-import type { LeviathanPlugin } from '@/core/framework';
+import type { LeviathanPlugin } from '@/contracts';
 
 /**
  * 将既有查询工厂适配为基础服务，不添加业务决策钩子。
- * 本插件不声明持久化；房间索引驻留工厂闭包，重启后按查询重新建立。
+ * 本插件只使用可重建缓存；房间索引驻留工厂闭包，重启后按查询重新建立。
  * critical 允许低 bucket 时初始化基础查询能力，但仍受内核硬预算检查限制。
  * 使用者声明 requires: ['roomShortcuts']，再通过 services.get 取得工厂返回的查询接口。
  *

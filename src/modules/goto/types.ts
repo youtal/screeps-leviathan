@@ -2,7 +2,7 @@
  * 文件摘要：定义 goto 移动模块的目标、路径、缓存、选项、结果与公共接口协议。
  *
  * 模块位置：src/modules/goto 的类型契约。当前目录只有本文件，createGoto 与 roomRoute/、
- * costMatrix/、flowField/、movement/、avoidance/、debug/ 等实现文件按 docs/design/goto.md
+ * costMatrix/、flowField/、movement/、avoidance/、debug/ 等实现文件按 docs/design/modules/goto.md
  * 的目录规划逐步落地；因此本文件是调用方与实现之间的唯一稳定接口约定。
  *
  * 主要输入 / 输出：对外能力由 GotoModule 描述（goto/onTickEnd/避让策略注册/房间与边界偏好/
@@ -15,12 +15,12 @@
  * 游戏 tick 的 CPU 或 Memory 开销；实际寻路算法将在对应实现文件中落地。
  * 唯一进入 Memory 的数据是 GotoMemory（用户偏好），其余缓存都在 heap 中随 global 生命周期失效。
  *
- * 与设计文档的差异：docs/design/goto.md 的示例为说明方便使用 DirectionConstant 或
+ * 与设计文档的差异：docs/design/modules/goto.md 的示例为说明方便使用 DirectionConstant 或
  * 列出 updateCostMatrix/reusedFlowField 等字段；本文件是实现的权威契约，其中房间出口相关的
  * direction 一律收窄为 ExitConstant（仅 4 个基本方向），GotoModule 与 GotoResult 只声明
  * 当前实现确实提供的成员，差异处均有单独说明。
  */
-import type { PluginContext } from '@/core/framework';
+import type { PluginContext } from '@/contracts';
 
 /**
  * goto 可以接受的目标形态。
@@ -221,17 +221,11 @@ export interface GotoConfig {
 }
 
 /**
- * goto 使用的上下文。
- *
- * Goto 通过 Framework 的统一 persistence 接口查询或提交用户偏好；路径、CostMatrix
- * 和 Flow Field 仍只保存在 GotoHeapState，不进入任何持久化分区。
- *
- * `PluginContext<GotoMemory>` 把 Memory 的静态形状绑定到 persistence：query() 返回
- * 深只读视图，commit() 在回调前标脏并把可变对象交给调用者修改；tick、pluginId、
- * cpu 预算、事件总线等能力都由上下文提供。上下文可以跨 tick 缓存，但其中的
- * Game 对象不能跨 tick 保存，这一点对 goto 内的 creep/position 缓存同样适用。
+ * goto 的基础生命周期上下文；框架不提供持久化入口。
+ * GotoMemory 仅描述本模块的数据 schema，待 MemoryManager 实现后再显式注入 Accessor。
+ * 上下文可跨 tick 保存，Game 对象不能跨 tick 缓存；路径及 CostMatrix 仍属于 GotoHeapState。
  */
-export interface GotoContext extends PluginContext<GotoMemory> {}
+export interface GotoContext extends PluginContext {}
 
 /**
  * goto 唯一写入 Memory 的数据。
@@ -242,7 +236,7 @@ export interface GotoContext extends PluginContext<GotoMemory> {}
  *
  * 两个字段都是可选的 Record，键分别是房间名与 `${fromRoom}->${toRoom}`：
  * 缺省（或值为 undefined）表示没有偏好，实现应按中性成本处理并允许随时删除条目；
- * 数据由 Framework 的持久化分区管理，版本迁移交给插件 manifest.version。
+ * 数据 schema 由 goto 定义；持久化接入未交付，后续使用 MemoryAccessor 独立数据版本。
  */
 export interface GotoMemory {
   roomPreferences?: Record<string, RoomPreference>;

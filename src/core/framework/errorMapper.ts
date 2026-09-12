@@ -11,7 +11,7 @@
  * 依赖第三方包 @jridgewell/trace-mapping 提供同步位置查询；本文件不读写 Memory。
  */
 import { TraceMap, originalPositionFor } from '@jridgewell/trace-mapping';
-import type { ExecutionResult, PluginFailure } from './types';
+import type { ExecutionResult, PluginFailure } from '@/contracts';
 
 /**
  * 创建同步故障边界，成功返回原值，失败返回诊断联合类型，调用者据此隔离插件。
@@ -35,7 +35,7 @@ export const createErrorMapper = (
         ': ' +
         (failure.mappedStack ?? failure.stack)
     )
-) => {
+): import('@/contracts/errorMapper').ErrorMapper => {
   /** 每个实例仅尝试加载一次；失败后到 global reset 前退回原始堆栈，避免反复支付失败成本。 */
   let attempted = false;
   // 加载成功后一直复用同一个 TraceMap；undefined 表示不可用（尚未加载或加载失败）。

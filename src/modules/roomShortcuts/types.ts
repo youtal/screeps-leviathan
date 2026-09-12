@@ -13,7 +13,7 @@
  * Source、Mineral 作为额外类别加入同一泛型查询协议。这些类型只参与编译检查，不为缓存增加
  * 运行时字段；文件末尾集中导出的符号全部是类型，编译后本文件不产生任何 JS 导出。
  */
-import type { ModuleContext } from '@/core/runtime/types';
+import type { ModuleContext } from '@/contracts';
 
 /**
  * 创建参数继承模块上下文，并允许控制强制刷新和 tick 租约长度。

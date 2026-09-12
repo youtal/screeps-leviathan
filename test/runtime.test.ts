@@ -16,7 +16,8 @@
  */
 import { createBus } from '@/core/eventBus';
 import { createRuntime, createEnvMethods } from '@/core/runtime';
-import type { Profiler, ProfilerMemory } from '@/core/profiler';
+import type { Profiler } from '@/contracts';
+import type { ProfilerMemory } from '@/core/profiler';
 
 /**
  * 注入最小 Game/Memory：rooms/flags/creeps/powerCreeps 各放一个命名对象，

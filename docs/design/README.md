@@ -1,7 +1,15 @@
 # 设计方案
 
-- [Framework](./framework.md)：已实现的主循环、插件管理、Memory、错误隔离、CPU 与意图仲裁。
-- [Profiler](./profiler.md)：嵌套计时、故障隔离和 Framework 组合边界。
-- [Runtime](./runtime.md)：EventBus、Profiler 与模块环境上下文的轻量组合层。
-- [goto](./goto.md)：跨房路由、CostMatrix、Flow Field 和避让机制设计。
-- [RoomShortcuts](./room-shortcuts.md)：房间对象缓存、事件更新与租约机制。
+设计案只记录设计意图与交付状态。按 `src/` 模块目录组织，架构级设计放在所属层级的 `README.md`。
+
+- [公共契约](./contracts.md)：独立类型发布、实现承诺与内部类型边界。
+- [Logger](./core/logger.md)：日志基础能力与装配边界。
+- [Core 架构及开发原则](./core/README.md)：内核分类、统一装配、注册及开发边界。
+- [MemoryManager](./core/memoryManager.md)：固定 10 个 Segment、局部就绪、启动分配与迁移恢复。
+- [Framework](./core/framework.md)：生命周期、插件事务、故障隔离、CPU 与意图仲裁。
+- [Profiler](./core/profiler.md)：嵌套计时、统计存储与故障隔离。
+- [Runtime](./core/runtime.md)：共享能力和上下文组合。
+- [goto](./modules/goto.md)：跨房路由、CostMatrix、Flow Field 与避让。
+- [RoomShortcuts](./modules/roomShortcuts.md)：房间查询缓存、事件更新与租约。
+
+源码和使用文档入口见 [文档总导航](../README.md)。

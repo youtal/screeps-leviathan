@@ -16,7 +16,7 @@
  * 不执行构建与网络请求。
  */
 import { createRoomShortcuts } from '@/modules/roomShortcuts/createRoomShortcuts';
-import type { ModuleContext } from '@/core/runtime/types';
+import type { ModuleContext } from '@/contracts';
 
 const createLog = () => ({
   debug: jest.fn(),

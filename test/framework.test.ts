@@ -1,41 +1,20 @@
 /**
- * 文件摘要：验证 Framework 内核（@/core/framework）的生命周期、存储与调度契约。
- *
- * 覆盖模块：createFramework（tick 编排、注册表校验、动态启停/卸载/恢复、熔断与
- * safeMode、setup 回滚、CPU 准入）、createErrorMapper（栈映射与错误保真）、
- * memoryInterceptor（分区脏标记、序列化/解析成本、heap 根身份、迁移与 schema 校验）、
- * intentBroker（优先级仲裁、锁冲突、回执、失败隔离）、cpuGovernor（bucket 准入）。
- *
- * 覆盖边界：tick 内 begin → execute → end 的顺序与逆序收尾、注册变更延迟到 tick 边界
- * 生效、单个插件故障只影响自身与依赖者、关键插件故障停止后续提交、低 bucket 推迟普通
- * 插件、RawMemory 每 tick 至多写一次且干净 tick 不写、直接迁移抛错或 schema 未知时不得
- * 覆盖线上数据、意图回执只留在 heap、错误映射失败不影响业务异常。
- *
- * 替代实现：harness 用注入的 memoryPort（read/write/mount）替代 RawMemory，用自增的
- * game.time 推进 tick；stored() 直接构造合法的 RawMemory 快照作为测试起点；新建第二个
- * framework 实例复刻 global reset（共享同一 port 等价于持久化数据仍在）；统计成本时
- * spy JSON.stringify/JSON.parse 的实参，而不是只看最终字符串。
- *
- * 运行方式：npm test（ts-jest，testEnvironment=node）；不需要 .secret.json，
- * 不执行真实构建与网络请求。
+ * 文件摘要：验证 Framework 生命周期、调度、错误隔离与纯 heap 状态边界。
+ * 使用最小 Game 桩推进 tick，测试不访问真实游戏或网络；旧持久化实现测试随实现移除。
+ * Memory/RawMemory 禁止访问测试独立覆盖停用行为；健康状态与 Profiler 仅在实例内保存。
  */
 import { createFramework, createErrorMapper } from '@/core/framework';
-import type { LeviathanPlugin, PluginContext } from '@/core/framework';
-import { createMemoryInterceptor } from '@/core/framework/memoryInterceptor';
+import type { LeviathanPlugin, PluginContext } from '@/contracts';
+import { createProfiler } from '@/core/profiler';
+import type { ProfilerMemory } from '@/core/profiler/types';
+import type { EnvMethods } from '@/contracts';
 import { createIntentBroker } from '@/core/framework/intentBroker';
 import { createCpuGovernor } from '@/core/framework/cpuGovernor';
 
-/**
- * 测试 harness：用 memoryPort 完全替代 RawMemory（raw 字符串 + read/write 计数），
- * 用 game.time 自增模拟 tick 推进。loadSourceMap 默认抛错表示线上没有 sourcemap，
- * 避免错误映射干扰成本断言；extra 允许用例覆盖任意 FrameworkOptions。
- * next() 是「推进一个 tick 再 loop」的唯一入口；暴露的 raw()/mounted()/write()/read()
- * 用于观察框架与存储的实际交互（写回次数、挂载的 Memory 根、解析次数）。
- */
+/** Game/RawMemory 测试桩；raw 读写计数用于断言框架完全不接触存储。 */
 const harness = (plugins: LeviathanPlugin[] = [], extra: any = {}) => {
   let raw = '{}';
   let used = 0;
-  let mounted: any;
   const game = {
     time: 1,
     rooms: {},
@@ -51,17 +30,10 @@ const harness = (plugins: LeviathanPlugin[] = [], extra: any = {}) => {
     raw = value;
   });
   const read = jest.fn(() => raw);
-  const port = {
-    read,
-    write,
-    mount: (value: any) => {
-      mounted = value;
-    },
-  };
+  (globalThis as any).RawMemory = { get: read, set: write };
   const framework = createFramework({
     plugins,
     getGame: () => game,
-    memoryPort: port,
     report,
     loadSourceMap: () => {
       throw new Error('no map');
@@ -72,7 +44,6 @@ const harness = (plugins: LeviathanPlugin[] = [], extra: any = {}) => {
     framework,
     game,
     report,
-    port,
     write,
     read,
     next: () => {
@@ -80,7 +51,6 @@ const harness = (plugins: LeviathanPlugin[] = [], extra: any = {}) => {
       framework.loop();
     },
     raw: () => raw,
-    mounted: () => mounted,
     setRaw: (value: string) => {
       raw = value;
     },
@@ -139,6 +109,7 @@ describe('Framework lifecycle', () => {
    */
   it('keeps source map and report cost outside the failing plugin sample', () => {
     let h: ReturnType<typeof harness>;
+    const stats: ProfilerMemory = {};
     h = harness(
       [
         plugin('bad', {
@@ -150,7 +121,14 @@ describe('Framework lifecycle', () => {
       ],
       {
         enableProfiler: true,
-        profilerCheckpointInterval: 1,
+        profiler: createProfiler({
+          env: {
+            getGame: () => h.game,
+            log: { error: jest.fn() },
+          } as unknown as EnvMethods,
+          getMemory: () => stats,
+          enable: true,
+        }),
         loadSourceMap: () => {
           h.use(24);
           return { version: 3, sources: [], names: [], mappings: '' };
@@ -158,7 +136,6 @@ describe('Framework lifecycle', () => {
       }
     );
     h.framework.loop();
-    const stats = JSON.parse(h.raw()).leviathan.framework.profiler;
     expect(stats['plugin.bad.tickExecute'].totalTime).toBe(4);
     expect(stats['framework.errorMapper.loadSourceMap'].totalTime).toBe(20);
     expect(stats['framework.tickExecute.plan'].totalTime).toBe(24);
@@ -205,16 +182,12 @@ describe('Framework lifecycle', () => {
       manifest: {
         id: 'a',
         version: 1,
-        persistence: { layer: 'critical' },
       },
       setup: () => {
         trace.push('a.setup');
       },
       onTickBegin: (c) => {
         trace.push('a.begin');
-        c.persistence.commit((memory) => {
-          memory.tick = c.tick;
-        });
       },
       onTickExecute: () => {
         trace.push('a.execute');
@@ -251,7 +224,7 @@ describe('Framework lifecycle', () => {
       'b.end',
       'a.end',
     ]);
-    expect(JSON.parse(h.raw()).leviathan.plugins.a.tick).toBe(1);
+    expect(h.write).not.toHaveBeenCalled();
     loop();
     expect(trace).toHaveLength(8);
     trace.length = 0;
@@ -267,7 +240,7 @@ describe('Framework lifecycle', () => {
   });
 
   /**
-   * 五种非法注册表：缺失依赖、依赖成环、id 重复、带 migrate 但不声明持久化、provides 冲突。
+   * 五种非法注册表：缺失依赖、依赖成环、id 重复、携带已停用的 migrate、provides 冲突。
    * 校验失败必须整体保留旧注册表（safeMode 且不写 Memory），避免半安装状态破坏线上数据。
    */
   it.each([
@@ -277,7 +250,7 @@ describe('Framework lifecycle', () => {
       plugin('b', { manifest: { id: 'b', version: 1, requires: ['a'] } }),
     ],
     [plugin('a'), plugin('a')],
-    [plugin('a', { migrate: () => ({}) })],
+    [plugin('a', { migrate: () => ({}) } as any)],
     [
       plugin('a', { manifest: { id: 'a', version: 1, provides: ['x'] } }),
       plugin('b', { manifest: { id: 'b', version: 1, provides: ['x'] } }),
@@ -328,8 +301,8 @@ describe('Framework lifecycle', () => {
     expect(trace[trace.length - 1]).toBe('execute.b');
   });
 
-  /** 钩子抛非 Error 值（字符串）同样要被隔离：故障插件的依赖者跳过执行，无关插件照常运行，且本 tick 的 end 与 Memory 写回仍要完成。 */
-  it('isolates throwing hooks, skips dependent work, still cleans up and flushes', () => {
+  /** 钩子抛非 Error 值（字符串）同样要被隔离：故障插件的依赖者跳过执行，无关插件照常运行，且本 tick 的 end 与健康统计仍要完成。 */
+  it('isolates throwing hooks, skips dependent work, still cleans up without storage', () => {
     const end = jest.fn();
     const execute = jest.fn();
     const unrelated = jest.fn();
@@ -350,11 +323,11 @@ describe('Framework lifecycle', () => {
     expect(execute).not.toHaveBeenCalled();
     expect(unrelated).toHaveBeenCalledTimes(1);
     expect(end).toHaveBeenCalledTimes(1);
-    expect(h.write).toHaveBeenCalledTimes(1);
+    expect(h.write).not.toHaveBeenCalled();
     expect(h.framework.getStatus().failures[0].message).toBe('bad');
   });
 
-  /** 连续失败达到阈值后熔断（跳过执行），recover 是显式恢复入口；计数与熔断状态随 Memory 持久化，global reset 后仍然有效。 */
+  /** 连续失败达到阈值后熔断（跳过执行），recover 是显式恢复入口；计数与熔断状态仅在实例 heap 内有效，global reset 后清空。 */
   it('opens circuit after consecutive failed ticks and supports explicit recovery', () => {
     const hook = jest.fn(() => {
       throw new Error('bad');
@@ -470,298 +443,72 @@ describe('Framework lifecycle', () => {
   });
 });
 
-describe('Framework memory', () => {
-  /** 测试用持久插件默认采用 critical；普通 plugin() 不声明存储。 */
-  const critical = (
-    id: string,
-    hooks: Partial<LeviathanPlugin> = {}
-  ): LeviathanPlugin =>
-    plugin(id, {
-      ...hooks,
-      manifest: {
-        id,
-        version: 1,
-        persistence: { layer: 'critical' },
-        ...hooks.manifest,
-      },
+describe('Framework storage disabled', () => {
+  it('does not read, mount or write host storage across ticks', () => {
+    const get = jest.fn(() => {
+      throw new Error('Memory access forbidden');
     });
-
-  /**
-   * 构造与框架 schema 兼容的 RawMemory 快照，让用例从「已有持久化数据」的中间态开始，
-   * 不必先跑若干 tick。framework/pluginVersions 等元数据必须齐全，否则拦截器会走
-   * 迁移或 schema 拒绝路径，而不是用例想验证的分区逻辑。
-   */
-  const stored = (
-    plugins: Record<string, unknown>,
-    versions: Record<string, number>
-  ) =>
-    JSON.stringify({
-      leviathan: {
-        schemaVersion: 1,
-        framework: {
-          pluginVersions: versions,
-          pluginHealth: {},
-          intentReceipts: [],
-          profiler: {},
-        },
-        plugins,
-      },
-    });
-
-  /**
-   * 直接驱动拦截器（不经 framework）以隔离脏标记逻辑：spy JSON.stringify 的实参可以区分
-   * 「本次真正写出的分区」与「只是存在于 Memory 中的分区」，从而验证 clean 分区复用上次
-   * 序列化片段、不参与遍历，而 write 只在确有脏分区时发生。
-   */
-  it('serializes only a dirty critical partition and skips clean ticks', () => {
-    let raw = stored({ a: { count: 0 }, b: { stable: true } }, { a: 1, b: 1 });
-    const write = jest.fn((value: string) => {
-      raw = value;
-    });
-    const interceptor = createMemoryInterceptor({
-      read: () => raw,
-      write,
-      mount: jest.fn(),
-    });
-    interceptor.begin([critical('a'), critical('b')], 1);
-    expect(interceptor.flush(1)).toBe(false);
-    interceptor.begin([critical('a'), critical('b')], 2);
-    const a = interceptor.namespace<any>('a');
-    const b = interceptor.namespace<any>('b');
-    expect(Object.keys(a)).toEqual(['query', 'commit']);
-    const stringify = jest.spyOn(JSON, 'stringify');
-    a.commit((memory) => memory.count++);
-    expect(interceptor.flush(2)).toBe(true);
-    const serializedValues = stringify.mock.calls.map(([value]) => value);
-    stringify.mockRestore();
-    expect(serializedValues).toContain(a.query());
-    expect(serializedValues).not.toContain(b.query());
-    expect(JSON.parse(raw).leviathan.plugins.a.count).toBe(1);
-    expect(JSON.parse(raw).leviathan.plugins.b.stable).toBe(true);
-    expect(write).toHaveBeenCalledTimes(1);
-
-    interceptor.begin([critical('a'), critical('b')], 3);
-    expect(interceptor.flush(3)).toBe(false);
-    expect(write).toHaveBeenCalledTimes(1);
-  });
-
-  /** checkpoint 层按 checkpointInterval 到期提交（标脏的 tick 计为第 1 tick）；未声明持久化的插件不创建分区，访问命名空间直接报错。 */
-  it('delays checkpoint partitions and gives undeclared plugins no namespace', () => {
-    let raw = stored({ slow: { count: 0 } }, { slow: 1 });
-    const write = jest.fn((value: string) => {
-      raw = value;
-    });
-    const slow = plugin('slow', {
-      manifest: {
-        id: 'slow',
-        version: 1,
-        persistence: { layer: 'checkpoint', checkpointInterval: 3 },
-      },
-    });
-    const cache = plugin('cache');
-    const interceptor = createMemoryInterceptor({
-      read: () => raw,
-      write,
-      mount: jest.fn(),
-    });
-    interceptor.begin([slow, cache], 1);
-    interceptor.namespace<any>('slow').commit((memory) => memory.count++);
-    expect(() => interceptor.namespace('cache').query()).toThrow(
-      'no persistence declaration'
-    );
-    expect(interceptor.flush(1)).toBe(false);
-    interceptor.begin([slow, cache], 2);
-    expect(interceptor.flush(2)).toBe(false);
-    interceptor.begin([slow, cache], 3);
-    expect(interceptor.flush(3)).toBe(true);
-    expect(JSON.parse(raw).leviathan.plugins.slow.count).toBe(1);
-    expect(JSON.parse(raw).leviathan.plugins.cache).toBeUndefined();
-    expect(write).toHaveBeenCalledTimes(1);
-  });
-
-  /** 首次写入失败时脏标记必须保留，下一个 tick 重试成功后才清除；否则这次修改会在 global reset 后永久丢失。 */
-  it('keeps a critical partition dirty when the storage write fails', () => {
-    let raw = stored({ a: { count: 0 } }, { a: 1 });
-    const write = jest
-      .fn<void, [string]>()
-      .mockImplementationOnce(() => {
-        throw new Error('storage unavailable');
-      })
-      .mockImplementation((value) => {
-        raw = value;
-      });
-    const interceptor = createMemoryInterceptor({
-      read: () => raw,
-      write,
-      mount: jest.fn(),
-    });
-    interceptor.begin([critical('a')], 1);
-    const memory = interceptor.namespace<any>('a');
-    memory.commit((value) => value.count++);
-
-    expect(() => interceptor.flush(1)).toThrow('storage unavailable');
-    expect(JSON.parse(raw).leviathan.plugins.a.count).toBe(0);
-
-    interceptor.begin([critical('a')], 2);
-    expect(interceptor.flush(2)).toBe(true);
-    expect(JSON.parse(raw).leviathan.plugins.a.count).toBe(1);
-  });
-
-  /**
-   * 同一 global 生命周期内 Memory 根对象身份必须稳定（heap 引用，每实例只解析一次）；
-   * 直接改写 RawMemory 模拟外部/调试器写入，只有新建 framework 实例（等价于 global reset）
-   * 才会重新解析并看到外部数据；期间的计数变化说明外部值没有覆盖本轮的 heap 数据。
-   */
-  it('keeps one heap root, ignores external replacement until a new instance loads it', () => {
-    const identities: any[] = [];
-    const counter = critical('a', {
-      onTickBegin: (c) => {
-        identities.push(c.persistence.query());
-        c.persistence.commit((memory) => {
-          memory.count = (memory.count ?? 0) + 1;
-        });
-      },
-    });
-    const h = harness([counter]);
-    h.framework.loop();
-    h.next();
-    expect(identities[0]).toBe(identities[1]);
-    const edited = JSON.parse(h.raw());
-    edited.leviathan.plugins.a.count = 100;
-    h.setRaw(JSON.stringify(edited));
-    h.next();
-    expect(identities[2]).toBe(identities[1]);
-    expect(JSON.parse(h.raw()).leviathan.plugins.a.count).toBe(3);
-    expect(h.read).toHaveBeenCalledTimes(1);
-    h.setRaw(JSON.stringify(edited));
-    const reboot = createFramework({
-      plugins: [counter],
-      getGame: () => h.game,
-      memoryPort: h.port,
-      profiler: null,
-    });
-    h.game.time++;
-    reboot.loop();
-    expect(JSON.parse(h.raw()).leviathan.plugins.a.count).toBe(101);
-    expect(identities[3]).not.toBe(identities[2]);
-    expect(h.read).toHaveBeenCalledTimes(2);
-  });
-
-  /** 直接迁移函数抛错时不得写回 RawMemory：宁可保留旧数据并进入 safeMode，也不能用半成品覆盖仍可恢复的线上 Memory。 */
-  it('does not overwrite RawMemory when a direct migration throws', () => {
-    const h = harness([critical('a')]);
-    h.framework.loop();
-    const before = h.raw();
-    h.framework.unregister('a');
-    h.framework.register(
-      critical('a', {
-        manifest: { id: 'a', version: 2 },
-        migrate: (data) => {
-          (data as any).bad = true;
-          throw new Error('migration');
-        },
-      })
-    );
-    h.next();
-    expect(h.raw()).toBe(before);
-    expect(h.framework.getStatus().safeMode).toBe(true);
-  });
-
-  /** 未知 schemaVersion 表示数据来自无法理解的版本：拒绝加载且不写回，避免把旧版本数据降级覆盖。 */
-  it('rejects unknown schemas and does not overwrite them', () => {
-    const h = harness();
-    h.setRaw('{"leviathan":{"schemaVersion":999}}');
-    h.framework.loop();
-    expect(h.write).not.toHaveBeenCalled();
-    expect(h.framework.getStatus().safeMode).toBe(true);
-  });
-
-  /** 持久化值遵循原生 JSON.stringify 语义：函数等不可序列化字段被自然丢弃，而不是由框架额外定义一套过滤规则。 */
-  it('uses native JSON.stringify semantics for submitted key-value data', () => {
-    const h = harness([
-      critical('a', {
-        onTickEnd: (c) => {
-          c.persistence.commit((memory) => {
-            memory.kept = 1;
-            memory.omitted = () => 1;
-          });
-        },
-      }),
-    ]);
-    h.framework.loop();
-    expect(h.framework.getStatus().safeMode).toBe(false);
-    expect(JSON.parse(h.raw()).leviathan.plugins.a).toEqual({ kept: 1 });
-  });
-
-  /**
-   * 解析次数按实例摊销：解析失败也只在首次尝试一次并保留失败状态（后续 begin 直接抛错），
-   * 避免同一 tick 或连续 tick 反复解析大 JSON 造成 CPU 抖动。port.read 次数用于确认没有重复读取。
-   */
-  it('calls JSON.parse only once per interceptor, including runtime migrations', () => {
-    let raw = '{}';
-    const port = {
-      read: jest.fn(() => raw),
-      write: (value: string) => {
-        raw = value;
-      },
-      mount: jest.fn(),
-    };
-    const interceptor = createMemoryInterceptor(port);
-    const parse = jest.spyOn(JSON, 'parse');
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'Memory');
+    Object.defineProperty(globalThis, 'Memory', { configurable: true, get });
     try {
-      interceptor.begin([critical('a')], 1);
-      interceptor.flush(1);
-      interceptor.begin([critical('a')], 2);
-      interceptor.flush(2);
-      interceptor.begin(
+      let context: PluginContext;
+      const h = harness(
         [
-          critical('a', {
-            manifest: { id: 'a', version: 2 },
-            migrate: (memory) => ({ ...(memory as object), upgraded: true }),
+          plugin('plain', {
+            setup: (c) => {
+              context = c;
+            },
           }),
         ],
-        3
+        { enableProfiler: true }
       );
-      interceptor.flush(3);
-      expect(parse).toHaveBeenCalledTimes(1);
-      expect(port.read).toHaveBeenCalledTimes(1);
-
-      const invalidPort = {
-        read: jest.fn(() => '{'),
-        write: jest.fn(),
-        mount: jest.fn(),
-      };
-      const invalid = createMemoryInterceptor(invalidPort);
-      expect(() => invalid.begin([], 1)).toThrow();
-      expect(() => invalid.begin([], 2)).toThrow();
-      expect(parse).toHaveBeenCalledTimes(2);
-      expect(invalidPort.read).toHaveBeenCalledTimes(1);
+      h.setRaw('{"leviathan":{"schemaVersion":999},"untouched":true}');
+      const before = h.raw();
+      h.framework.loop();
+      h.next();
+      expect(h.framework.getStatus().safeMode).toBe(false);
+      expect(context!).not.toHaveProperty('persistence');
+      expect(get).not.toHaveBeenCalled();
+      expect(h.read).not.toHaveBeenCalled();
+      expect(h.write).not.toHaveBeenCalled();
+      expect(h.raw()).toBe(before);
+      expect(Object.getOwnPropertyDescriptor(globalThis, 'Memory')?.get).toBe(
+        get
+      );
     } finally {
-      parse.mockRestore();
+      if (descriptor) Object.defineProperty(globalThis, 'Memory', descriptor);
+      else delete (globalThis as any).Memory;
     }
   });
 
-  /** 迁移标记随数据持久化：共享同一 port 的第二个拦截器实例模拟重启，仍不应重复执行迁移。 */
-  it('migration runs once per schema version, independently of global reset', () => {
-    let raw = '{}';
-    const port = {
-      read: () => raw,
-      write: (v: string) => {
-        raw = v;
-      },
-      mount: jest.fn(),
-    };
-    const migrate = jest.fn(() => ({ count: 1 }));
-    const p = critical('a', { migrate });
-    const one = createMemoryInterceptor(port);
-    one.begin([p], 1);
-    one.flush(1);
-    one.begin([p], 2);
-    one.flush(2);
-    const two = createMemoryInterceptor(port);
-    two.begin([p], 3);
-    two.flush(3);
-    expect(migrate).toHaveBeenCalledTimes(1);
+  it('forgets circuit state when a new instance simulates global reset', () => {
+    const hook = jest.fn(() => {
+      throw new Error('bad');
+    });
+    const p = plugin('bad', { onTickExecute: hook });
+    const one = harness([p], { failureThreshold: 1 });
+    one.framework.loop();
+    one.next();
+    expect(hook).toHaveBeenCalledTimes(1);
+    const two = harness([p], { failureThreshold: 1 });
+    two.framework.loop();
+    expect(hook).toHaveBeenCalledTimes(2);
+    expect(two.read).not.toHaveBeenCalled();
+  });
+
+  it('rejects obsolete persistence configuration instead of silently ignoring it', () => {
+    const setup = jest.fn();
+    const h = harness([
+      plugin('old', {
+        manifest: { id: 'old', version: 1, persistence: { layer: 'critical' } },
+        setup,
+      } as any),
+    ]);
+    h.framework.loop();
+    expect(setup).not.toHaveBeenCalled();
+    expect(h.framework.getStatus().failures[0].message).toContain(
+      'persistence is unavailable'
+    );
   });
 });
 
@@ -819,7 +566,7 @@ describe('Framework intents and CPU', () => {
       'accepted',
       'accepted',
     ]);
-    expect(JSON.parse(h.raw()).leviathan.framework.intentReceipts).toEqual([]);
+    expect(h.raw()).toBe('{}');
     const firstReceipts = receipts;
     h.next();
     expect(previous).toEqual(firstReceipts);
@@ -906,7 +653,7 @@ describe('Framework intents and CPU', () => {
     expect(receipt.status).toBe('failed');
   });
 
-  /** bucket 低时普通插件被推迟以保住收尾预算；已准入的关键插件仍要执行 end 钩子并完成 Memory 写回；admit(true) 是低 bucket 下的豁免通道。 */
+  /** bucket 低时普通插件被推迟以保住收尾预算；已准入的关键插件仍要执行 end 钩子且不访问存储；admit(true) 是低 bucket 下的豁免通道。 */
   it('defers ordinary plugins at low bucket and always executes admitted cleanup', () => {
     const ordinary = jest.fn();
     const end = jest.fn();
@@ -922,7 +669,7 @@ describe('Framework intents and CPU', () => {
     h.framework.loop();
     expect(ordinary).not.toHaveBeenCalled();
     expect(end).toHaveBeenCalled();
-    expect(h.write).toHaveBeenCalled();
+    expect(h.write).not.toHaveBeenCalled();
     const cpu = createCpuGovernor(() => h.game);
     h.use(0);
     h.game.cpu.bucket = 0;

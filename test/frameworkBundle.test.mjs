@@ -4,8 +4,7 @@
  * 覆盖：用 rollup（与 rollup.config.mjs 相同的 resolve/commonjs/typescript2 组合）把
  * src/index.ts 与 src/core/framework/index.ts 编译为 CJS，再放进 node:vm 沙箱连续执行
  * 两个 tick。断言 bundle 不依赖 Node 运行时（require 只允许 main.js.map）、不泄露密钥、
- * RawMemory 每 tick 至多写一次且只解析一次、Memory 根对象跨 tick 身份稳定、未声明持久化
- * 的插件不落 Memory，以及真实 sourcemap 能把 main:\d+:\d+ 映射回 src 下的 TS 源文件。
+ * Framework 不读写 RawMemory、不挂载 Memory，以及真实 sourcemap 能把 main:\d+:\d+ 映射回 src 下的 TS 源文件。
  *
  * 替代实现：沙箱手工注入 Game/RawMemory/console/require，并用 context.global = context
  * 模拟 Screeps 的全局对象；通过替换沙箱内 JSON.parse 统计解析次数。
@@ -56,6 +55,7 @@ const compile = async (input) => {
 const sandbox = (chunk) => {
   let raw = '{}';
   let writes = 0;
+  let reads = 0;
   const logs = [];
   const context = vm.createContext({
     exports: {},
@@ -71,7 +71,10 @@ const sandbox = (chunk) => {
       cpu: { getUsed: () => 0, limit: 20, tickLimit: 100, bucket: 10000 },
     },
     RawMemory: {
-      get: () => raw,
+      get: () => {
+        reads++;
+        return raw;
+      },
       set: (value) => {
         writes++;
         raw = value;
@@ -84,7 +87,13 @@ const sandbox = (chunk) => {
   });
   context.global = context;
   vm.runInContext(chunk.code, context, { filename: 'main' });
-  return { context, logs, raw: () => raw, writes: () => writes };
+  return {
+    context,
+    logs,
+    raw: () => raw,
+    writes: () => writes,
+    reads: () => reads,
+  };
 };
 
 /** 覆盖真实入口的完整 tick：产物必须能连续运行、不输出控制台日志，且干净 tick 不重复序列化。 */
@@ -115,13 +124,11 @@ test('actual app bundle executes consecutive ticks without Node runtime dependen
     memory,
     'same raw data should reuse heap identity'
   );
-  // roomShortcuts 未声明持久化，因此 Memory 中不应出现它的分区与版本号；
-  // successes 是仅在失败/恢复时更新的兼容字段，正常 tick 后应保持初始值。
-  const state = JSON.parse(h.raw()).leviathan;
-  assert.equal(state.framework.pluginVersions.roomShortcuts, undefined);
-  assert.equal(state.framework.pluginHealth.roomShortcuts.successes, 0);
-  assert.equal(h.context.memoryParseCalls, 1);
-  assert.equal(h.writes(), 1, 'clean second tick must reuse serialized data');
+  assert.equal(h.context.Memory, undefined, 'Framework must not mount Memory');
+  assert.equal(h.raw(), '{}');
+  assert.equal(h.context.memoryParseCalls, 0);
+  assert.equal(h.reads(), 0);
+  assert.equal(h.writes(), 0);
   assert.deepEqual(h.logs, []);
 });
 
@@ -152,37 +159,23 @@ test('real generated stack maps to TypeScript using uploaded main.js.map module'
   );
   vm.runInContext(
     `
-    globalThis.memoryParseCalls = 0;
-    const nativeJsonParse = JSON.parse;
-    JSON.parse = (...args) => {
-      memoryParseCalls++;
-      return nativeJsonParse(...args);
-    };
+    globalThis.runs = 0;
     globalThis.runtime = exports.createFramework({ plugins: [{
-      manifest: {
-        id: 'counter',
-        version: 1,
-        persistence: { layer: 'critical' }
-      },
+      manifest: { id: 'counter', version: 1 },
       onTickBegin(context) {
-        context.persistence.commit(memory => {
-          memory.count = (memory.count || 0) + 1;
-          memory.tick = context.tick;
-        });
+        if ('persistence' in context) throw new Error('obsolete persistence');
+        globalThis.runs++;
       }
     }] });
     runtime.loop();
-  `,
+    Game.time++;
+    runtime.loop();
+    `,
     h.context
   );
-  // 再次确认解析与写回成本：外部直接改写 RawMemory 不会触发重新解析，
-  // 因为同一 global 生命周期内以 heap 根为准，外部修改要等 global reset 后才生效。
-  const edited = JSON.parse(h.raw());
-  edited.leviathan.plugins.counter.count = 100;
-  h.context.RawMemory.set(JSON.stringify(edited));
-  h.context.Game.time++;
-  h.context.runtime.loop();
-  assert.equal(JSON.parse(h.raw()).leviathan.plugins.counter.count, 2);
-  assert.equal(JSON.parse(h.raw()).leviathan.plugins.counter.tick, 2);
-  assert.equal(h.context.memoryParseCalls, 1);
+  assert.equal(h.context.runs, 2);
+  assert.equal(h.context.runtime.getStatus().safeMode, false);
+  assert.equal(h.context.Memory, undefined);
+  assert.equal(h.reads(), 0);
+  assert.equal(h.writes(), 0);
 });

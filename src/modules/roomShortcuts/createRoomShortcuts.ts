@@ -16,7 +16,7 @@
  * `Game.getObjectById` 查询。全局建筑建成和毁坏事件用于增量维护缓存；固定 tick
  * 租约及视野丢失时的主动失效负责兜底，避免事件遗漏让陈旧数据长期存活。
  * 三个状态容器都只存在于当前 global 实例，不写入 Memory/RawMemory：global reset 或插件
- * 重新 setup 后从空状态按首次查询重建（见 docs/design/room-shortcuts.md）。
+ * 重新 setup 后从空状态按首次查询重建（见 docs/design/modules/roomShortcuts.md）。
  *
  * 已接受的一致性风险：若房间失去视野期间没有任何 getter 调用，模块不会立即发现这次中断，
  * 旧缓存会继续使用到租约到期。期间新增的建筑可能延迟出现，已失效的 id 会在查询时被过滤，
@@ -286,7 +286,7 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
    * `forceReInit` 与 tick 租约决定是否重扫。单对象查询以 undefined 表示无结果，
    * 多对象查询以空数组表示无结果，使调用方无需额外判断 null。
    *
-   * 空结果契约（与 docs/design/room-shortcuts.md 一致）：房间不存在该类别建筑不是错误，
+   * 空结果契约（与 docs/design/modules/roomShortcuts.md 一致）：房间不存在该类别建筑不是错误，
    * 只有“无视野”“初始化失败”等异常路径才记录错误日志，其余空结果静默返回。
    * 泛型 K 让返回值随传入键收窄；isSingle 只影响返回形态，不改变缓存内容。
    */

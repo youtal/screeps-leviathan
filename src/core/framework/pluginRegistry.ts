@@ -9,12 +9,15 @@
  * 校验失败通过同步抛错上报，由 Kernel 记为整批命令失败，旧注册表保持不变。
  * 状态仅在 heap：已接受记录 entries 与缓存的排序结果 sorted，global reset 后由 app 重新注册。
  */
-import type { LeviathanPlugin } from './types';
-// 复用 Memory 拦截器的命名空间校验：注册通过的 id 必须能安全地作为 Memory 键，
-// 两处共用同一实现可避免规则漂移（原型链保留键、空串或非法字符）。
-import { validId } from './memoryInterceptor';
+import type { LeviathanPlugin } from '@/contracts';
+/** 稳定标识限定字符并排除原型保留键；插件与服务共享校验，不依赖存储实现。 */
+export const validId = (id: string): boolean =>
+  typeof id === 'string' &&
+  /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(id) &&
+  id !== 'prototype' &&
+  !Object.prototype.hasOwnProperty.call(Object.prototype, id);
 
-/** 注册记录与启用状态分离；停用保留图节点及 Memory，是否参与执行由 Kernel 决定。 */
+/** 注册记录与启用状态分离；停用保留图节点，是否参与执行由 Kernel 决定。 */
 // 该结构对外导出，Kernel 用它构造候选表；enabled 必须在候选副本上修改，不能直接改这里。
 export interface PluginEntry {
   plugin: LeviathanPlugin;
@@ -41,7 +44,7 @@ export const createPluginRegistry = () => {
       const m = plugin.manifest;
       // 'framework' 被内核用于自身诊断与 Profiler 标签（plugin.<id>.* 与 framework.*），
       // 保留该 id 避免插件健康记录、日志归属和标签互相混淆。
-      // version 是正整数 Memory 版本号，不是语义化发布版本；priority 必须有限，否则排序不稳定。
+      // version 是正整数插件协议版本号，不是语义化发布版本；priority 必须有限，否则排序不稳定。
       if (
         !validId(id) ||
         id === 'framework' ||
@@ -50,21 +53,9 @@ export const createPluginRegistry = () => {
         !Number.isFinite(m.priority ?? 0)
       )
         throw new Error('Invalid plugin manifest: ' + id);
-      const persistence = m.persistence;
-      // migrate 只在持久分区升级时才有意义：没有持久化声明的迁移函数永远不会被调用。
-      if (!persistence && plugin.migrate)
-        throw new Error('Migration requires persistence: ' + id);
-      // 与 memoryInterceptor.begin 的运行时校验重复，但这里的失败会整批回滚命令，
-      // 而不是等到某个 tick 的 begin 才中断；两者共同保证非法配置进不了执行阶段。
-      if (
-        persistence &&
-        (!['critical', 'checkpoint'].includes(persistence.layer) ||
-          (persistence.checkpointInterval !== undefined &&
-            (!Number.isInteger(persistence.checkpointInterval) ||
-              persistence.checkpointInterval < 1 ||
-              persistence.layer !== 'checkpoint')))
-      )
-        throw new Error('Invalid persistence config: ' + id);
+      // JavaScript 调用者也不能静默携带已停用的持久化配置。
+      if ('persistence' in m || 'migrate' in plugin)
+        throw new Error('Plugin persistence is unavailable: ' + id);
       // 必需依赖必须已注册（允许当前停用）；缺失时整个候选批次失败，Kernel 保留旧注册表。
       for (const dep of m.requires ?? []) {
         if (!candidate.has(dep))
