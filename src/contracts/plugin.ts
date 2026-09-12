@@ -8,6 +8,7 @@ import type { Profiler } from './profiler';
 import type { CpuBudget, GameIntent, IntentReceipt } from './intent';
 import type { PluginFailure } from './errorMapper';
 import type { LoggerFactory } from './logging';
+import type { ApplyMemoryAccessor, MemoryHost } from './memory';
 /** 注册描述；依赖字段引用插件 ID，provides 字段声明服务名，两者并非同一命名空间。 */
 export interface PluginManifest {
   /** 插件和诊断的归属键；注册后保持稳定。 */
@@ -26,11 +27,17 @@ export interface PluginManifest {
   critical?: boolean;
 }
 
-/** 生命周期上下文在激活时创建，跨 tick 复用；tick 动态读取，不提供持久化能力。 */
+/**
+ * 生命周期上下文在激活时创建，跨 tick 复用；tick 动态读取。
+ *
+ * memory 是框架按 pluginId 绑定好的申请入口：未装配 MemoryManager 时 apply 直接
+ * 抛配置错误，而不是返回永远 pending 的句柄；申请成功与否由返回的 Accessor 表达。
+ */
 export interface PluginContext extends ModuleContext {
   readonly pluginId: string;
   readonly tick: number;
   readonly events: ModuleContext['bus'];
+  readonly memory: ApplyMemoryAccessor;
   readonly cpu: CpuBudget;
   readonly services: {
     /** T 由使用者声明，运行时只校验服务归属与可用性，不验证 T 的结构。 */
@@ -73,6 +80,8 @@ export interface FrameworkOptions {
   getGame?: () => Game;
   /** 注入 Runtime 组装的日志工厂；缺省使用 core/logger 兜底工厂，仅供独立调用与测试。 */
   logging?: LoggerFactory;
+  /** 注入 Runtime 组装的 MemoryManager；框架在 tick 边界驱动其生命周期并为插件绑定申请入口。 */
+  memory?: MemoryHost;
   /** 提供基础 Runtime；框架仍会代理订阅、追加服务和意图能力。 */
   createContext?: CreateModuleContext;
   /** undefined 使用内置实例，null 禁用观测；均不影响错误隔离。 */

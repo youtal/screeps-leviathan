@@ -2,7 +2,7 @@
  * 文件摘要：保存 Runtime 装配参数，统计载荷属于 Profiler 内部模型。
  * 仅维护模块内部类型及契约兼容出口，不创建运行时状态或调用宿主。
  */
-import type { Bus, LoggerFactory, Profiler } from '@/contracts';
+import type { Bus, LoggerFactory, MemoryHost, Profiler } from '@/contracts';
 import type { ProfilerMemory } from '../profiler/types';
 export type {
   Wrap,
@@ -20,6 +20,8 @@ export type {
  * - bus：允许注入测试总线或已有总线。
  * - logging：注入 Runtime 组装的日志工厂；所有派生上下文与内核消费者共用它，
  *   缺省使用 core/logger 的兜底工厂（只服务独立调用与测试）。
+ * - memory：注入 Runtime 组装的 MemoryManager；派生上下文会按模块名绑定申请入口。
+ *   独立 Runtime 不驱动 tick 生命周期，调用方需自行在边界调用它的 begin/end。
  * - profiler：允许禁用、替换或复用 profiler；注入后 enableProfiler 不再生效。
  * - enableProfiler：控制默认 profiler 初始开关。
  * - getProfilerMemory：控制 profiler 数据落在哪里。它必须返回同一个常驻对象，
@@ -34,6 +36,7 @@ export type {
 export interface RuntimeOptions {
   bus?: Bus;
   logging?: LoggerFactory;
+  memory?: MemoryHost;
   profiler?: Profiler | null;
   enableProfiler?: boolean;
   getProfilerMemory?: () => ProfilerMemory;

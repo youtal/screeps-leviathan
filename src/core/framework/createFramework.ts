@@ -1,7 +1,8 @@
 /**
  * 文件摘要：Framework 组合 CPU 准入、错误映射、插件注册和意图仲裁，提供同步 loop 和管理接口。
  * 生命周期变更在 tick 边界事务性生效；服务、上下文、健康状态及 Profiler 统计仅存在于实例 heap。
- * global reset 后全部重建，不挂载 Memory、不读写 RawMemory、不执行数据迁移或持久化。
+ * Memory 由注入的 MemoryManager 在 tick 边界驱动（begin/end），框架自身不挂载 Memory、
+ * 不读写 RawMemory，也不解释持久化数据；global reset 后按 journal 与目录恢复。
  * Game 对象不得跨 tick 保存；本 tick 失败集合和意图每轮重建，注册/计时缓存随实例存活。
  */
 import { createBus } from '../eventBus';
@@ -13,6 +14,7 @@ import { createCpuGovernor } from './cpuGovernor';
 import { createErrorMapper } from './errorMapper';
 import { createIntentBroker } from './intentBroker';
 import { validId } from './pluginRegistry';
+import type { ApplyMemoryAccessor } from '@/contracts/memory';
 import type { Framework } from '@/contracts/plugin';
 import type { ProfilerMemory } from '../profiler/types';
 import { createPluginRegistry, PluginEntry } from './pluginRegistry';
@@ -38,6 +40,13 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
    * 错误映射、事件总线、Profiler 与各插件 env 都从它派生作用域日志器。
    */
   const logging = options.logging ?? createLogging();
+  /**
+   * 未装配 MemoryManager 时的申请入口：直接抛配置错误，而不是返回永久 pending 的
+   * 句柄——插件依赖持久状态时必须显式装配存储，不能把配置问题伪装成等待。
+   */
+  const unboundMemory: ApplyMemoryAccessor = () => {
+    throw new Error('MemoryManager is not assembled');
+  };
   const errors = createErrorMapper(
     options.loadSourceMap,
     options.report,
@@ -245,6 +254,7 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
       events: scopedBus,
       pluginId: id,
       cpu,
+      memory: options.memory ? options.memory.bind(id) : unboundMemory,
       services: {
         // unknown 服务载荷只在出口断言为 T；这不是运行时结构校验，使用者负责服务协议。
         get: <T>(name: string): T => {
@@ -336,7 +346,20 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
     const entered: typeof participants = [];
     /** 注册批次验证成功后才统计参与集合，失败批次不改变已有健康记录。 */
     let registryReady = false;
+    /**
+     * 本轮是否有插件因 CPU 准入被跳过。被跳过的插件不会执行 setup，也就不会提出
+     * Memory 申请；此时必须延后封存启动窗口，否则它会在窗口关闭后才申请而失去
+     * Segment 资格（设计文档 §4：申请不能依赖 CPU 准入）。
+     */
+    let startupPending = false;
     try {
+      // Memory 生命周期先于插件阶段开始：解析/恢复与页激活在 setup 申请之前完成。
+      // 用错误边界包裹：存储异常按内核故障记录并进入安全模式，绝不把异常留在
+      // tick 之外（否则 running 无法复位，之后每个 tick 都会被判定为不可重入）。
+      const memoryBegin = invoke('framework', 'framework', () =>
+        options.memory?.begin(getGame().time)
+      );
+      if (!memoryBegin.ok) safeMode = true;
       // 先摘下本批队列；执行期间新排队的命令留给下一 tick，失败批次丢弃而不自动重试。
       const commands = pending;
       pending = [];
@@ -397,7 +420,10 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
         if (safeMode) break;
         const id = plugin.manifest.id;
         if (!enabled.has(id) || !dependenciesReady(plugin)) continue;
-        if (!cpu.admit(plugin.manifest.critical)) continue;
+        if (!cpu.admit(plugin.manifest.critical)) {
+          startupPending = true;
+          continue;
+        }
         // Context 是 global 级闭包；tick 和 broker 均在使用时读取当前值。
         const ctx = initialized.get(id)?.context ?? context(plugin);
         if (!initialized.has(id)) {
@@ -416,6 +442,9 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
           activeCleanup = undefined;
           if (!setup.ok) {
             dispose(id);
+            // setup 失败的插件可能还没来得及申请 Memory：窗口不能就此封存，
+            // 否则它恢复后只能落到主 Memory 后端。
+            startupPending = true;
             if (plugin.manifest.critical) {
               safeMode = true;
               break;
@@ -501,40 +530,55 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
         throw error;
       });
     } finally {
-      // 所有已经进入 begin 的插件都得到 end，包括自身 begin 失败者，以便释放本 tick 状态。
-      measure('framework.tickEnd', () => {
-        for (const { plugin, ctx } of entered.slice().reverse()) {
-          invoke(plugin.manifest.id, 'tickEnd', () => plugin.onTickEnd?.(ctx));
-        }
-      });
-      if (registryReady) {
-        const result = invoke('framework', 'tickEnd', () => {
-          for (const { plugin } of registry.ordered()) {
-            const id = plugin.manifest.id;
-            const h = health(id);
-            // 多钩子/多意图故障按本 tick 一次累计；跳过的插件不会重置连续失败数。
-            if (failed.has(id)) {
-              if (plugin.manifest.critical) safeMode = true;
-              h.failures++;
-              h.consecutiveFailures++;
-              h.circuitOpen = h.consecutiveFailures >= threshold;
-            } else if (
-              entered.some((p) => p.plugin === plugin) &&
-              available.has(id) &&
-              h.consecutiveFailures > 0
-            ) {
-              h.consecutiveFailures = 0;
-            }
+      // 收尾阶段整体再包一层 try/finally：即使 end 钩子或 Memory 收尾抛错，
+      // 也一定复位 running 与归属状态，避免后续 tick 全部被判为不可重入。
+      try {
+        // 所有已经进入 begin 的插件都得到 end，包括自身 begin 失败者，以便释放本 tick 状态。
+        measure('framework.tickEnd', () => {
+          for (const { plugin, ctx } of entered.slice().reverse()) {
+            invoke(plugin.manifest.id, 'tickEnd', () =>
+              plugin.onTickEnd?.(ctx)
+            );
           }
-          previousReceipts = broker.receipts();
         });
-        if (!result.ok) safeMode = true;
+        if (registryReady) {
+          const result = invoke('framework', 'tickEnd', () => {
+            for (const { plugin } of registry.ordered()) {
+              const id = plugin.manifest.id;
+              const h = health(id);
+              // 多钩子/多意图故障按本 tick 一次累计；跳过的插件不会重置连续失败数。
+              if (failed.has(id)) {
+                if (plugin.manifest.critical) safeMode = true;
+                h.failures++;
+                h.consecutiveFailures++;
+                h.circuitOpen = h.consecutiveFailures >= threshold;
+              } else if (
+                entered.some((p) => p.plugin === plugin) &&
+                available.has(id) &&
+                h.consecutiveFailures > 0
+              ) {
+                h.consecutiveFailures = 0;
+              }
+            }
+            previousReceipts = broker.receipts();
+          });
+          if (!result.ok) safeMode = true;
+        }
+        // 提前中止（安全模式）、插件因 CPU 未准入或 setup 失败时都不封存启动申请
+        // 窗口，留给后续 tick 继续收集；依赖未就绪导致的跳过不作为申请缺失处理。
+        if (safeMode || startupPending) options.memory?.deferStartupWindow();
+        // Memory 收尾在插件 end 与健康累计之后：封存窗口、推进迁移、提交 dirty 分区。
+        const memoryEnd = invoke('framework', 'tickEnd', () =>
+          options.memory?.end(getGame().time)
+        );
+        if (!memoryEnd.ok) safeMode = true;
+      } finally {
+        running = false;
+        // 无论本轮是否 safeMode，都恢复内核归属状态，避免污染下一次 loop 的权限判定。
+        currentPhase = 'framework';
+        currentPlugin = '';
+        activeCleanup = undefined;
       }
-      running = false;
-      // 无论本轮是否 safeMode，都恢复内核归属状态，避免污染下一次 loop 的权限判定。
-      currentPhase = 'framework';
-      currentPlugin = '';
-      activeCleanup = undefined;
     }
   };
   return {

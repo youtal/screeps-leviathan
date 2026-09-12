@@ -4,6 +4,9 @@
  * Memory/RawMemory 禁止访问测试独立覆盖停用行为；健康状态与 Profiler 仅在实例内保存。
  */
 import { createFramework, createErrorMapper } from '@/core/framework';
+import { createMemoryManager } from '@/core/memoryManager';
+import type { MemoryAccessor } from '@/contracts/memory';
+import type { MemoryPlatform } from '@/core/memoryManager/types';
 import type { LeviathanPlugin, PluginContext } from '@/contracts';
 import { createProfiler } from '@/core/profiler';
 import type { ProfilerMemory } from '@/core/profiler/types';
@@ -752,5 +755,214 @@ describe('ErrorMapper', () => {
     expect(scope).toHaveBeenCalledTimes(1);
     expect(scope).toHaveBeenCalledWith('ErrorMapper');
     expect(error).toHaveBeenCalledTimes(2);
+  });
+});
+
+/** Framework 与 MemoryManager 的接线：框架按 pluginId 绑定申请入口并在 tick 边界驱动存储。 */
+describe('Framework memory integration', () => {
+  /** 只服务本组用例的假平台：raw 整串 + 一 tick 延迟可见的 Segment。 */
+  const createPlatform = () => {
+    let raw = '{}';
+    const content: Record<number, string> = {};
+    let visible: number[] = [];
+    let requested: number[] = [];
+    const platform: MemoryPlatform = {
+      readRaw: () => raw,
+      writeRaw: (value) => {
+        raw = value;
+      },
+      readSegments: () =>
+        Object.fromEntries(visible.map((id) => [id, content[id] ?? ''])),
+      writeSegment: (id, value) => {
+        content[id] = value;
+      },
+      activeSegments: () => [...visible],
+      activateSegments: (ids) => {
+        requested = [...ids];
+      },
+    };
+    return {
+      platform,
+      raw: () => raw,
+      nextTick: () => {
+        visible = [...requested];
+      },
+    };
+  };
+
+  it('binds applications by plugin id and persists them through a reset', () => {
+    const plat = createPlatform();
+    let accessor: MemoryAccessor<{ ticks: number }> | undefined;
+    const consumer = plugin('consumer', {
+      setup(context) {
+        accessor = context.memory('main', {
+          version: 1,
+          layer: 'critical',
+          priority: 5,
+          initialize: () => ({ ticks: 0 }),
+        });
+      },
+      onTickExecute() {
+        const access = accessor!.access();
+        if (access.status === 'ready')
+          access.commit((memory) => (memory.ticks += 1));
+      },
+    });
+
+    const first = createMemoryManager({
+      platform: plat.platform,
+      segmentIds: [0],
+    });
+    const h = harness([consumer], { memory: first });
+    h.next();
+    h.next();
+    h.next();
+    // 迁移需要跨 tick 完成，但每次 begin 都会推进；这里确认最终落在 Segment 上。
+    for (let i = 0; i < 5; i++) {
+      plat.nextTick();
+      h.next();
+    }
+
+    const namespace = JSON.parse(plat.raw()).memoryManager;
+    expect(first.getStatus().allocations[0].pluginId).toBe('consumer');
+    expect(namespace.allocations.consumer.main.backend).toBe('segment');
+
+    // 模拟 global reset：新管理器读同一份存储，插件重新申请后数据延续。
+    const second = createMemoryManager({
+      platform: plat.platform,
+      segmentIds: [0],
+    });
+    let restored: MemoryAccessor<{ ticks: number }> | undefined;
+    const restarted = plugin('consumer', {
+      setup(context) {
+        restored = context.memory('main', {
+          version: 1,
+          layer: 'critical',
+          priority: 5,
+          initialize: () => ({ ticks: -1 }),
+        });
+      },
+    });
+    const h2 = harness([restarted], { memory: second });
+    h2.next();
+    const restoredAccess = restored!.access();
+    expect(restoredAccess.status).toBe('ready');
+    if (restoredAccess.status === 'ready')
+      expect(restoredAccess.query().ticks).toBeGreaterThan(0);
+  });
+
+  it('defers the memory startup window while plugins are not admitted', () => {
+    const plat = createPlatform();
+    const manager = createMemoryManager({
+      platform: plat.platform,
+      segmentIds: [0],
+    });
+    const consumer = plugin('consumer', {
+      setup(context) {
+        context.memory('main', {
+          version: 1,
+          layer: 'critical',
+          priority: 5,
+          initialize: () => ({ ticks: 0 }),
+        });
+      },
+    });
+    const h = harness([consumer], { memory: manager });
+
+    // 低 bucket：普通插件不被准入，setup 未执行 → 申请窗口必须保持开启。
+    h.game.cpu.bucket = 0;
+    h.next();
+    expect(manager.getStatus().startupWindowOpen).toBe(true);
+
+    // bucket 恢复后插件正常 setup 并申请，本 tick 收尾即可封存窗口。
+    h.game.cpu.bucket = 10000;
+    plat.nextTick();
+    h.next();
+    expect(manager.getStatus().startupWindowOpen).toBe(false);
+  });
+
+  it('isolates memory lifecycle failures without wedging the loop', () => {
+    // end 抛错：业务照常执行，下一 tick 仍能进入（running 已复位）。
+    const onTickExecute = jest.fn();
+    const endBoom = {
+      begin: jest.fn(),
+      end: jest.fn(() => {
+        throw new Error('end boom');
+      }),
+      deferStartupWindow: jest.fn(),
+      bind: jest.fn(),
+    };
+    const h = harness([plugin('consumer', { onTickExecute })], {
+      memory: endBoom,
+    });
+    expect(() => h.next()).not.toThrow();
+    expect(() => h.next()).not.toThrow();
+    expect(endBoom.begin).toHaveBeenCalledTimes(2);
+    expect(endBoom.end).toHaveBeenCalledTimes(2);
+    expect(onTickExecute).toHaveBeenCalledTimes(2);
+    expect(h.framework.getStatus().failures.length).toBeGreaterThan(0);
+
+    // begin 抛错：按内核故障进入安全模式，但下一 tick 依旧能进入而不是永久不可重入。
+    const beginBoom = {
+      begin: jest.fn(() => {
+        throw new Error('begin boom');
+      }),
+      end: jest.fn(),
+      deferStartupWindow: jest.fn(),
+      bind: jest.fn(),
+    };
+    const h2 = harness([plugin('consumer', {})], { memory: beginBoom });
+    expect(() => h2.next()).not.toThrow();
+    expect(() => h2.next()).not.toThrow();
+    expect(beginBoom.begin).toHaveBeenCalledTimes(2);
+    expect(beginBoom.end).toHaveBeenCalledTimes(2);
+  });
+
+  it('defers the startup window when a plugin setup fails before applying', () => {
+    const plat = createPlatform();
+    const manager = createMemoryManager({
+      platform: plat.platform,
+      segmentIds: [0],
+      maxStartupDeferrals: 5,
+    });
+    let attempts = 0;
+    const flaky = plugin('flaky', {
+      setup(context) {
+        attempts++;
+        if (attempts === 1) throw new Error('first setup fails');
+        context.memory('main', {
+          version: 1,
+          layer: 'critical',
+          priority: 1,
+          initialize: () => ({ n: 0 }),
+        });
+      },
+    });
+    const h = harness([flaky], { memory: manager });
+
+    h.next();
+    expect(manager.getStatus().startupWindowOpen).toBe(true);
+
+    plat.nextTick();
+    h.next();
+    expect(manager.getStatus().startupWindowOpen).toBe(false);
+  });
+
+  it('reports a configuration error when no memory manager is assembled', () => {
+    const consumer = plugin('consumer', {
+      setup(context) {
+        context.memory('main', {
+          version: 1,
+          layer: 'critical',
+          initialize: () => ({ ticks: 0 }),
+        });
+      },
+    });
+    const h = harness([consumer]);
+    h.next();
+
+    const failures = h.framework.getStatus().failures;
+    expect(failures.length).toBeGreaterThan(0);
+    expect(failures[0].message).toMatch(/MemoryManager is not assembled/);
   });
 });

@@ -1,0 +1,168 @@
+/**
+ * 文件摘要：保存 MemoryManager 的内部存储模型与平台端口定义。
+ *
+ * 模块位置：core/memoryManager 的内部类型层。公共申请/访问协议由
+ * `src/contracts/memory.ts` 发布，本文件只描述"主 Memory 目录 + Segment 信封 +
+ * 迁移 journal + 平台端口"这些实现细节，不对外导出。
+ *
+ * 设计边界：目录与 Raw 分区是 JSON 数据，随主 RawMemory 一起读写；Segment 信封
+ * 自带 owner/generation/dataVersion，使单页可以独立校验归属与版本；迁移 journal
+ * 记录跨后端搬迁的可恢复中间状态；generationCounter 是持久单调计数器，保证每次
+ * 搬迁使用全新的代际，旧页残留信封不会被误认成本次写入。平台端口把 RawMemory 与
+ * segments 抽象出来，使单元测试可以完整模拟"Segment 下一 tick 可见"的调度约束。
+ */
+import type { JsonValue } from '@/contracts/memory';
+
+/** 固定使用的前 10 个 Segment，规划为 ID 0..9；不调度剩余页。 */
+export const SEGMENT_IDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
+
+/** MemoryManager 在主 Memory 根上的命名空间键；与旧 leviathan 布局并存、互不覆盖。 */
+export const NAMESPACE_KEY = 'memoryManager';
+
+/** 旧版持久化命名空间：只做一次性导入，不删除、不修改，保留回退能力。 */
+export const LEGACY_NAMESPACE_KEY = 'leviathan';
+
+/**
+ * 单个 Segment 的容量上限（字符数）。
+ *
+ * Screeps 单页限制为 100 KB；这里按 JSON 文本的字符数计量，属于保守近似。
+ * 精确的字节口径需要在目标运行时实测（设计文档 §8 的待决事项），当前实现
+ * 在超出上限时拒绝写入并保留旧数据，不做自动拆分。
+ */
+export const SEGMENT_CAPACITY = 100_000;
+
+/** 主 Memory 命名空间的当前 schema 版本；未知版本拒绝覆盖。 */
+export const NAMESPACE_SCHEMA_VERSION = 1;
+
+/** Segment 信封的 schema 版本。 */
+export const ENVELOPE_SCHEMA_VERSION = 1;
+
+/** 存储后端：主 RawMemory 或固定 Segment。 */
+export type Backend = 'raw' | 'segment';
+
+/** 分配目录中的一条记录；generation 用于识别搬迁前后的同一份数据。 */
+export interface AllocationRecord {
+  backend: Backend;
+  /** 仅 segment 后端存在；由启动窗口的排名分配。 */
+  segmentId?: number;
+  generation: number;
+}
+
+/** Raw 后端分区：dataVersion 与 payload 一起保存，便于按分区独立迁移。 */
+export interface RawPartitionRecord {
+  dataVersion: number;
+  payload: JsonValue;
+}
+
+/**
+ * 一次搬迁的源与目标。
+ *
+ * dataVersion 在规划时确定并写入 journal：恢复阶段可能没有模块参与，回读校验
+ * 必须依赖 journal 里的期望版本，而不是内存中的分区对象。
+ */
+export interface MigrationMove {
+  pluginId: string;
+  localId: string;
+  dataVersion: number;
+  from: Backend;
+  fromSegmentId?: number;
+  to: Backend;
+  toSegmentId?: number;
+}
+
+/**
+ * 迁移记录：同一时刻至多一个，按 phase 单步推进，可在任意一步之后承受 global reset。
+ *
+ * staged 保存搬迁数据的可恢复副本，键为 `${pluginId}/${localId}`：离开 Segment 的
+ * 分区在主 Memory 中留副本，迁入 Segment 的分区在切换前也保留一份。只有目录切换
+ * 完成后才允许清理。
+ */
+export interface MigrationRecord {
+  generation: number;
+  /** copy 暂存并写目标页 → verify 回读校验 → switch 更新目录。 */
+  phase: 'copy' | 'verify' | 'switch';
+  reason: 'allocation' | 'preemption';
+  moves: MigrationMove[];
+  staged: Record<string, JsonValue>;
+}
+
+/** 主 Memory 命名空间；unknown 版本或非法记录必须拒绝写入并给出诊断。 */
+export interface NamespaceV1 {
+  schemaVersion: number;
+  /** 持久单调递增的代际计数器：每次搬迁取新值，绝不回退。 */
+  generationCounter: number;
+  allocations: Record<string, Record<string, AllocationRecord>>;
+  rawPartitions: Record<string, Record<string, RawPartitionRecord>>;
+  migration: MigrationRecord | null;
+}
+
+/** Segment 信封：归属、代际与数据版本随 payload 一起写入。 */
+export interface SegmentEnvelope {
+  schemaVersion: number;
+  owner: { pluginId: string; localId: string };
+  generation: number;
+  dataVersion: number;
+  payload: JsonValue;
+}
+
+/**
+ * 平台端口：把 RawMemory 与 Segment 的读写抽象出来。
+ *
+ * setActiveSegments 只请求激活，实际可见性由 activeSegments 在后续 tick 反映——
+ * 测试桩必须模拟"下一 tick 才可见"，否则迁移与 pending 语义会被高估。
+ * MemoryManager 排他占用固定页：激活请求提交精确的页集合，不保留外部工具的活动页。
+ */
+export interface MemoryPlatform {
+  readRaw(): string;
+  writeRaw(value: string): void;
+  /** 当前可见的 Segment 内容；未激活或不存在时不含该键。 */
+  readSegments(): Record<number, string>;
+  writeSegment(id: number, value: string): void;
+  /** 本 tick 可见（已激活）的 Segment ID；以 segments 对象的键为准。 */
+  activeSegments(): readonly number[];
+  activateSegments(ids: readonly number[]): void;
+}
+
+/** 分区当前是否可用；pending 只影响依赖该 Accessor 的行为。 */
+export interface PartitionPending {
+  reason:
+    | 'loading'
+    | 'segment-activating'
+    | 'migration'
+    | 'recovery'
+    | 'verification';
+  retryAt: number;
+}
+
+/** 管理器对外诊断快照；故障必须可读，不能只靠 pending 掩盖。 */
+export interface MemoryManagerStatus {
+  loaded: boolean;
+  fault: string | null;
+  tick: number;
+  startupWindowOpen: boolean;
+  /** 启动窗口是否因申请迟迟不收齐而被强制封存（超过延后上限）。 */
+  startupWindowForced: boolean;
+  startupDeferrals: number;
+  allocations: {
+    pluginId: string;
+    localId: string;
+    backend: Backend;
+    segmentId?: number;
+    pending: PartitionPending['reason'] | null;
+    dirty: boolean;
+    /** 最近一次写入失败的信息；成功提交后清空。 */
+    writeError: string | null;
+  }[];
+  migration: {
+    generation: number;
+    phase: MigrationRecord['phase'];
+    reason: MigrationRecord['reason'];
+    moves: number;
+  } | null;
+  /** 被其他工具数据或未认领信封占用的页：不参与分配，也不会被写入。 */
+  reservedSegments: { segmentId: number; reason: string }[];
+  /** 尚未观察到内容的页：未观察前不允许写入。 */
+  unobservedSegments: number[];
+  /** 未被任何分区认领的主 Memory 根字段名，用于确认外部数据未被覆盖。 */
+  preservedRootKeys: string[];
+}

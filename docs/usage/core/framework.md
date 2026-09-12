@@ -140,6 +140,7 @@ onTickExecute(context) {
 | `failureThreshold` | `3`                     | 连续失败 tick 的熔断阈值                       |
 | `getGame`          | 全局 Game               | 测试环境注入                                   |
 | `logging`          | 兜底日志工厂            | 注入 Runtime 的 LoggerFactory；省略时用内核兜底工厂 |
+| `memory`           | 未装配                  | 注入 MemoryManager；框架按 pluginId 绑定申请入口并在 tick 边界驱动 begin/end |
 | `createContext`    | Framework 默认上下文    | 高级依赖注入；各上下文应共享同一总线           |
 | `report`           | ErrorMapper 作用域日志  | 结构化失败处理函数；省略时走注入日志工厂       |
 | `loadSourceMap`    | require('main.js.map')  | 同步加载当前构建的 source map                  |

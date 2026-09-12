@@ -26,6 +26,8 @@ Runtime
 
 Framework 在统一装配交付前可以自建实例，但仍接受可选注入：注入时与 Runtime 共用同一工厂，未注入时使用 `defaultLoggerFactory` 兜底，保证 `createFramework`、`createBus`、`createEnvMethods` 等入口可独立使用与测试。内核对 Logger 采用强制装配语义：集合固定，不通过普通插件的 `disable/unregister` 卸载；停止输出属于配置行为（等级关闭），不等于移除能力。
 
+内核模块与普通模块的接入方式统一遵循 [Core 架构 §10](./README.md) 的通用规范：注入工厂、固定作用域且每实例派生一次、只在状态迁移与故障上输出、一次事件一次、日志不作为唯一诊断。
+
 ## 3. 等级模型
 
 - 六个等级与 `Logger` 方法一一对应：`debug`、`warn`、`error`、`success`、`info`、`report`。

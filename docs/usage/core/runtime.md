@@ -18,6 +18,7 @@ const defenseContext = createContext('Defense', { notify: true });
 | --- | --- |
 | `bus` | 注入已有 EventBus |
 | `logging` | 注入已有 LoggerFactory；所有模块与内核组件共用其等级、端口和邮件策略 |
+| `memory` | 注入 MemoryManager；派生上下文会按模块名绑定申请入口 |
 | `profiler` | 注入 Profiler；传入 `null` 可禁用 |
 | `enableProfiler` | 控制默认 Profiler 的初始开关 |
 | `getProfilerMemory` | Profiler 的底层兼容适配器，返回当前统计对象 |

@@ -96,3 +96,13 @@ git diff --check
 ## 8. 密钥与敏感信息
 
 严禁提交 `.secret.json`、认证令牌、账号凭据或包含真实凭据的命令输出。公开配置示例不得包含真实密钥。
+
+## 9. Memory 访问边界
+
+`src/core/memoryManager` 是项目访问游戏持久化存储的唯一入口。除该模块自身及其平台适配层外，任何源码文件都严禁直接访问或改写持久化存储，包括但不限于：
+
+- 全局 `Memory` 对象：读取、赋值、删除字段，或用 `globalThis.Memory` 挂载替身；
+- `RawMemory`：`get`/`set`/`segments` 及 Segment 激活接口；
+- 其它持久化旁路：自行解析存储文本、把跨 global 状态塞进外部共享对象等。
+
+需要跨 global 保留状态的模块，必须通过 `context.memory(localId, options)` 申请分区，在 `pending` 时只跳过依赖存储的行为，其余逻辑照常执行。审查与自动化检查中发现的越界访问按阻断问题处理，而不是风格问题；`test/memoryBoundary.test.ts` 会扫描 `src/` 并在越界时报错。

@@ -5,7 +5,7 @@
 - [公共契约](./contracts.md)：独立类型发布、实现承诺与内部类型边界。
 - [Logger](./core/logger.md)：等级与作用域、输出端口、邮件策略与装配边界。
 - [Core 架构及开发原则](./core/README.md)：内核分类、统一装配、注册及开发边界。
-- [MemoryManager](./core/memoryManager.md)：固定 10 个 Segment、局部就绪、启动分配与迁移恢复。
+- [MemoryManager](./core/memoryManager.md)：固定 10 个 Segment、局部就绪、启动分配、Raw/Segment 提交与迁移恢复。
 - [Framework](./core/framework.md)：生命周期、插件事务、故障隔离、CPU 与意图仲裁。
 - [Profiler](./core/profiler.md)：嵌套计时、统计存储与故障隔离。
 - [Runtime](./core/runtime.md)：共享能力和上下文组合。

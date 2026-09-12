@@ -2,7 +2,7 @@
 
 - [公共契约](./contracts.md)：类型导入、实现承诺与 Memory 类型交付边界。
 - [Logger](./core/logger.md)：装配工厂、作用域日志、等级与邮件配置。
-- [MemoryManager](./core/memoryManager.md)：持久化停用与契约使用边界。
+- [MemoryManager](./core/memoryManager.md)：装配、插件申请、pending 处理、提交语义与诊断。
 - [Framework](./core/framework.md)：插件注册、生命周期、服务、意图与诊断。
 - [Profiler](./core/profiler.md)：启停采样、包装函数和读取统计报告。
 - [Runtime](./core/runtime.md)：创建共享总线、Profiler 和模块级环境上下文。

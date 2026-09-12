@@ -5,9 +5,9 @@
  * “创建一次 root runtime，再按模块名派生上下文”的组合方式。它只做依赖组合，
  * 不管理 tick 生命周期或插件依赖（由 Framework 驱动），也不挂载或写回 Memory。
  *
- * 输入是可选的 RuntimeOptions（总线、日志工厂、Profiler、统计存储访问器与标脏
- * 回调、初始开关）；输出是 CreateModuleContext —— 传入模块名与日志选项即可得到
- * ModuleContext（共享 bus/profiler、独立 env）。
+ * 输入是可选的 RuntimeOptions（总线、日志工厂、MemoryManager、Profiler、统计存储
+ * 访问器与标脏回调、初始开关）；输出是 CreateModuleContext —— 传入模块名与日志选项
+ * 即可得到 ModuleContext（共享 bus/logging/profiler、按模块名绑定的 memory、独立 env）。
  *
  * 状态与副作用：共享单例与默认 Profiler 统计都存放在本函数闭包中，随当前
  * global 生命周期存在，global reset 后由调用方重新装配；默认统计对象只驻留
@@ -98,7 +98,7 @@ export const createRuntime = (
      * 这里刻意不缓存派生结果：env 只包含无状态的 Game 访问方法和一个 logger，
      * 创建成本极低，缓存反而会让闭包长期持有已不再使用的日志配置。
      */
-    return {
+    const context: ModuleContext = {
       bus,
       env: createEnvMethods(
         moduleName,
@@ -108,6 +108,10 @@ export const createRuntime = (
       ),
       profiler,
     };
+    // 只有装配了 MemoryManager 才暴露申请入口；独立 Runtime 由调用方在边界
+    // 驱动 manager.begin/end，模块按模块名作为稳定 owner 申请分区。
+    if (options.memory) context.memory = options.memory.bind(moduleName);
+    return context;
   };
 
   return createContext;

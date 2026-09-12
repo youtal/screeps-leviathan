@@ -7,6 +7,7 @@ import type { Bus } from './eventBus';
 import type { Profiler } from './profiler';
 import type { EnvContext } from './environment';
 import type { LogOptions } from './logging';
+import type { ApplyMemoryAccessor } from './memory';
 /**
  * 派生模块上下文时的可选配置。
  *
@@ -38,6 +39,8 @@ export interface ModuleContextOptions {
 export interface ModuleContext extends EnvContext {
   bus: Bus;
   profiler: Profiler | null;
+  /** 装配了 MemoryManager 时提供按模块名绑定的申请入口；未装配时省略。 */
+  memory?: ApplyMemoryAccessor;
 }
 
 /**

@@ -3,7 +3,8 @@
  *
  * 覆盖模块：src/app/runtime.ts 暴露的 framework 单例、src/index.ts 导出的 loop、
  * app 注册的 roomShortcuts 服务插件。覆盖边界：依赖方声明 requires 后能在 setup
- * 阶段从 services 取得查询服务、连续 tick 不读写 RawMemory，导入和 loop 都不挂载 Memory。
+ * 阶段从 services 取得查询服务、MemoryManager 只在首次 loop 解析一次 RawMemory、
+ * 没有持久化分区时干净 tick 不写回，且导入与 loop 都不读取或挂载全局 Memory。
  *
  * 替代实现：不加载 Screeps 运行时，改为在 global 上注入最小 Game/Memory/RawMemory
  * 桩；RawMemory 用闭包字符串模拟「get 返回上次 set 内容」的语义，使写回次数可断言。
@@ -39,6 +40,10 @@ describe('App composition', () => {
       set: jest.fn((value: string) => {
         raw = value;
       }),
+      // MemoryManager 在首次 begin 请求固定 Segment 页（下一 tick 才可见）：
+      // 这里提供只读的 segments 视图与激活入口即可。
+      segments: {},
+      setActiveSegments: jest.fn(),
     };
   });
 
@@ -61,14 +66,15 @@ describe('App composition', () => {
     expect(framework.getStatus().safeMode).toBe(false);
     expect(typeof service.getSpawn).toBe('function');
     expect(typeof service.getStorage).toBe('function');
+    // 首次 loop 解析一次 RawMemory；没有持久化分区（RoomShortcuts 不声明持久化），
+    // 因此不产生任何写回。
+    expect((global as any).RawMemory.get).toHaveBeenCalledTimes(1);
     expect((global as any).RawMemory.set).not.toHaveBeenCalled();
-    expect((global as any).RawMemory.get).not.toHaveBeenCalled();
-    // 第二个 tick 同样不访问持久化存储：
-    // 每 tick 全量序列化会随 Memory 体积持续消耗 CPU。
+    // 第二个 tick 复用 heap 根，不再读取；干净 tick 也不写回。
     Game.time++;
     loop();
+    expect((global as any).RawMemory.get).toHaveBeenCalledTimes(1);
     expect((global as any).RawMemory.set).not.toHaveBeenCalled();
-    expect((global as any).RawMemory.get).not.toHaveBeenCalled();
   });
 
   /**

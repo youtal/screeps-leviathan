@@ -1,6 +1,6 @@
 # Leviathan Framework 设计
 
-交付状态：基础 Framework 协议已交付；Runtime 统一装配与 MemoryAccessor 集成未交付。装配设计见 [Core 架构](./README.md)。
+交付状态：基础 Framework 协议与 MemoryHost 生命周期驱动已交付；Runtime 统一装配未交付。装配设计见 [Core 架构](./README.md)。
 
 ## 1. 模块定位
 
@@ -24,7 +24,7 @@
 | ------------------------- | -------------------------------- | -------------------------------------------------- |
 | Kernel / 生命周期         | `createFramework.ts`             | 驱动 loop、setup、三阶段、故障恢复和状态查询       |
 | PluginRegistry            | `pluginRegistry.ts`              | 候选注册表校验、依赖排序、稳定快照                 |
-| PluginContext             | `contracts/plugin.ts`、`createFramework.ts` | 注入 Runtime 风格上下文、服务、事件与意图 |
+| PluginContext             | `contracts/plugin.ts`、`createFramework.ts` | 注入 Runtime 风格上下文、服务、事件、意图与 Memory 申请入口 |
 | ErrorMapper               | `errorMapper.ts`                 | 同步堆栈还原及结构化异常捕获                       |
 | CpuGovernor               | `cpuGovernor.ts`                 | 普通/关键插件准入和收尾预留                        |
 | IntentBroker              | `intentBroker.ts`                | 通道与共享锁仲裁、提交、回执                       |
@@ -150,7 +150,7 @@ pluginId 由 Context 注入，插件不能伪造其他提交者。提交时复�
 
 Framework 不承担 RawMemory 解析、Memory 挂载、Segment 分配、数据迁移或写回。实例内健康表和默认 Profiler 统计在 global reset 后清空。
 
-持久化由 [MemoryManager](./memoryManager.md) 独立管理；装配及生命周期接线遵循 [Core 架构](./README.md)。MemoryAccessor 集成交付状态：未交付。
+持久化由 [MemoryManager](./memoryManager.md) 独立管理；Framework 通过可选的 MemoryHost 端口在 tick 边界驱动 begin/end，并在安全模式、CPU 未准入或插件 setup 失败时延后封存申请窗口。Runtime 统一装配遵循 [Core 架构](./README.md)，交付状态：未交付。
 
 ## 8. ErrorMapper、Profiler 与故障隔离
 

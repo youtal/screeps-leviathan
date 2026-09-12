@@ -82,6 +82,36 @@ log.report('stats');         // 无输出（本作用域关闭 report）
 - 日志不依赖 Memory、Profiler、ErrorMapper 与 Game；这些能力缺席时仍能输出（默认关闭邮件时完全不访问 Game）。
 - 非法 `notifyInterval`（非正整数）在装配阶段抛 `Invalid notify interval`，属于配置错误，应在启动阶段暴露。
 
+## 内核模块接入规范
+
+内核模块（MemoryManager、EventBus、Profiler、ErrorMapper 等）按同一套规则接入，细则见 [Core 架构 §10](../../design/core/README.md)：
+
+```ts
+import { defaultLoggerFactory } from '@/core/logger';
+import type { LoggerFactory } from '@/contracts/logging';
+
+interface Options {
+  /** 由 Runtime/App 注入；缺省为内核兜底工厂，仅服务独立调用与测试。 */
+  logging?: LoggerFactory;
+}
+
+export const createKernelThing = (options: Options = {}) => {
+  // 作用域固定，每实例派生一次。
+  const log = (options.logging ?? defaultLoggerFactory).scope('KernelThing');
+  // …只在状态迁移与故障处输出：log.info / log.warn / log.error
+};
+```
+
+| 场景 | 等级 | 说明 |
+| --- | --- | --- |
+| 每 tick 都会发生（提交、心跳、pending 往返） | `debug` | 默认关闭，排查时用 `levels: { debug: true }` 打开 |
+| 状态迁移（初始化、后端切换、恢复完成） | `info` | 默认关闭，排查时打开 |
+| 可自愈异常（写入失败、页面被占用、容量超限） | `warn` | 同一原因只记一次 |
+| 不可自愈的数据问题（schema 非法、归属冲突、版本降级） | `error` | 每实例或每分区首次 |
+| 周期性统计汇总 | 不建议 | `report` 默认开启，容易刷屏；用结构化状态接口代替 |
+
+必须避免：在热路径输出 `info` 及以上等级；每次故障重新 `scope()`；模块内自行 `createLogging()`；用日志文本代替结构化诊断；把 logger 或日志文本写进持久数据；内核能力自行开启邮件通知。
+
 ## 注意事项
 
 - 作用域名会成为 `[name] ` 前缀；同一运行期内同名作用域应保持一致，便于检索。

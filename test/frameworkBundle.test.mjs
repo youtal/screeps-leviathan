@@ -4,7 +4,8 @@
  * 覆盖：用 rollup（与 rollup.config.mjs 相同的 resolve/commonjs/typescript2 组合）把
  * src/index.ts 与 src/core/framework/index.ts 编译为 CJS，再放进 node:vm 沙箱连续执行
  * 两个 tick。断言 bundle 不依赖 Node 运行时（require 只允许 main.js.map）、不泄露密钥、
- * Framework 不读写 RawMemory、不挂载 Memory，以及真实 sourcemap 能把 main:\d+:\d+ 映射回 src 下的 TS 源文件。
+ * 应用装配的 MemoryManager 只在首次 loop 解析一次 RawMemory、干净 tick 不写回、不挂载 Memory，
+ * 以及真实 sourcemap 能把 main:\d+:\d+ 映射回 src 下的 TS 源文件。
  *
  * 替代实现：沙箱手工注入 Game/RawMemory/console/require，并用 context.global = context
  * 模拟 Screeps 的全局对象；通过替换沙箱内 JSON.parse 统计解析次数。
@@ -79,6 +80,12 @@ const sandbox = (chunk) => {
         writes++;
         raw = value;
       },
+      // Segment 视图：MemoryManager 在首次 begin 请求固定页（下一 tick 才可见），
+      // 这里提供可读写的 segments 对象与激活入口即可。
+      segments: {},
+      setActiveSegments: (ids) => {
+        assert.ok(Array.isArray(ids) && ids.length <= 10, 'at most 10 segments');
+      },
     },
     require: (name) => {
       assert.equal(name, 'main.js.map', 'runtime may only load its source map');
@@ -124,11 +131,13 @@ test('actual app bundle executes consecutive ticks without Node runtime dependen
     memory,
     'same raw data should reuse heap identity'
   );
-  assert.equal(h.context.Memory, undefined, 'Framework must not mount Memory');
+  assert.equal(h.context.Memory, undefined, 'app must not mount Memory');
   assert.equal(h.raw(), '{}');
-  assert.equal(h.context.memoryParseCalls, 0);
-  assert.equal(h.reads(), 0);
-  assert.equal(h.writes(), 0);
+  // MemoryManager 只在首次 begin 解析一次 RawMemory；第二个 tick 复用 heap 根。
+  assert.equal(h.context.memoryParseCalls, 1, 'parse raw memory once');
+  assert.equal(h.reads(), 1, 'read raw memory once');
+  // 当前应用没有持久化分区（RoomShortcuts 不声明持久化），干净 tick 不写回。
+  assert.equal(h.writes(), 0, 'clean ticks must not write raw memory');
   assert.deepEqual(h.logs, []);
 });
 
