@@ -31,6 +31,8 @@ export interface LoadedRoot {
   namespace: NamespaceV1;
   /** 除命名空间外的根字段名，序列化与状态诊断都要保留它们。 */
   preservedKeys: string[];
+  /** 加载期发现但被安全跳过的内容（例如旧布局里的原型键），由调用方记录诊断。 */
+  warnings: string[];
 }
 
 /** 只关心"是不是普通键值对象"；插件 payload 的深层合法性沿用 JSON 语义。 */
@@ -39,6 +41,16 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const isNonNegativeInteger = (value: unknown): value is number =>
   Number.isInteger(value) && (value as number) >= 0;
+
+/**
+ * 拒绝原型相关键。
+ *
+ * `allocations['__proto__'] = {}` 这类赋值改的是原型而不是数据键：记录会静默消失，
+ * 还可能出现"幻影分配"（读到的继承属性被当成真实记录）。校验阶段直接拒绝，
+ * 容器同时用 null 原型创建，双保险。
+ */
+const isSafeKey = (key: string): boolean =>
+  key !== '__proto__' && key !== 'prototype' && key !== 'constructor';
 
 /** 校验单条分配记录：后端必须是已知值，segment 必须带页号，raw 不得带页号。 */
 const validateAllocation = (
@@ -120,7 +132,8 @@ const validateMigration = (value: unknown): MigrationRecord | null => {
   if (
     value.phase !== 'copy' &&
     value.phase !== 'verify' &&
-    value.phase !== 'switch'
+    value.phase !== 'switch' &&
+    value.phase !== 'cleanup'
   )
     throw new Error('Invalid migration phase');
   if (value.reason !== 'allocation' && value.reason !== 'preemption')
@@ -155,24 +168,34 @@ const validateNamespace = (value: unknown): NamespaceV1 => {
     );
   if (!isRecord(value.allocations) || !isRecord(value.rawPartitions))
     throw new Error('Invalid MemoryManager namespace: bad partitions');
-  const allocations: NamespaceV1['allocations'] = {};
+  const allocations: NamespaceV1['allocations'] = Object.create(null);
   for (const [pluginId, bucket] of Object.entries(value.allocations)) {
+    if (!isSafeKey(pluginId))
+      throw new Error('Invalid allocation key: ' + pluginId);
     if (!isRecord(bucket))
       throw new Error('Invalid allocation bucket for ' + pluginId);
-    allocations[pluginId] = {};
+    allocations[pluginId] = Object.create(null);
     for (const [localId, record] of Object.entries(bucket)) {
+      if (!isSafeKey(localId))
+        throw new Error('Invalid allocation key: ' + pluginId + '/' + localId);
       allocations[pluginId][localId] = validateAllocation(
         record,
         pluginId + '/' + localId
       );
     }
   }
-  const rawPartitions: NamespaceV1['rawPartitions'] = {};
+  const rawPartitions: NamespaceV1['rawPartitions'] = Object.create(null);
   for (const [pluginId, bucket] of Object.entries(value.rawPartitions)) {
+    if (!isSafeKey(pluginId))
+      throw new Error('Invalid raw partition key: ' + pluginId);
     if (!isRecord(bucket))
       throw new Error('Invalid raw partition bucket for ' + pluginId);
-    rawPartitions[pluginId] = {};
+    rawPartitions[pluginId] = Object.create(null);
     for (const [localId, record] of Object.entries(bucket)) {
+      if (!isSafeKey(localId))
+        throw new Error(
+          'Invalid raw partition key: ' + pluginId + '/' + localId
+        );
       rawPartitions[pluginId][localId] = validateRawPartition(
         record,
         pluginId + '/' + localId
@@ -194,8 +217,10 @@ const validateNamespace = (value: unknown): NamespaceV1 => {
 export const createEmptyNamespace = (): NamespaceV1 => ({
   schemaVersion: NAMESPACE_SCHEMA_VERSION,
   generationCounter: 0,
-  allocations: {},
-  rawPartitions: {},
+  // null 原型：即使调用方误传 `__proto__` 之类的键，也只会成为普通自有属性，
+  // 不会改写原型或让记录静默消失（与 validateNamespace 的容器保持一致）。
+  allocations: Object.create(null),
+  rawPartitions: Object.create(null),
   migration: null,
 });
 
@@ -209,7 +234,8 @@ export const createEmptyNamespace = (): NamespaceV1 => ({
  */
 const importLegacy = (
   root: Record<string, unknown>,
-  namespace: NamespaceV1
+  namespace: NamespaceV1,
+  warnings: string[]
 ): boolean => {
   const legacy = root[LEGACY_NAMESPACE_KEY];
   if (!isRecord(legacy)) return false;
@@ -221,13 +247,19 @@ const importLegacy = (
   let imported = false;
   for (const [pluginId, payload] of Object.entries(plugins)) {
     if (!isRecord(payload)) continue;
+    // 旧布局里的原型键不能进入容器：跳过并留诊断，避免记录静默消失或污染原型。
+    if (!isSafeKey(pluginId)) {
+      warnings.push('legacy import skipped unsafe key: ' + pluginId);
+      continue;
+    }
     const version = versions[pluginId];
     namespace.allocations[pluginId] = {
       main: { backend: 'raw', generation: 0 },
     };
     namespace.rawPartitions[pluginId] = {
       main: {
-        // 版本缺失时写 0：applyVersion 把版本 0 当作新安装处理。
+        // 版本缺失时写 0 作为"未知旧版本"哨兵：applyVersion 对任何已存储数据都要求
+        // migrate，因此不会被误判成首次安装而覆盖真实 payload。
         dataVersion: Number.isInteger(version) ? (version as number) : 0,
         // 深拷贝：导入后的分区数据会被模块原地修改，共享引用会把旧命名空间一起改掉，
         // 违背"旧 leviathan 布局只读、可回退"的约定。数据来自 JSON.parse，往返安全。
@@ -251,14 +283,16 @@ export const loadRawRoot = (text: string): LoadedRoot => {
   if (!isRecord(parsed)) throw new Error('Invalid Memory root: not an object');
   const root = parsed;
   const existing = root[NAMESPACE_KEY];
+  const warnings: string[] = [];
   if (existing === undefined) {
     const namespace = createEmptyNamespace();
-    importLegacy(root, namespace);
+    importLegacy(root, namespace, warnings);
     root[NAMESPACE_KEY] = namespace;
     return {
       root,
       namespace,
       preservedKeys: Object.keys(root).filter((key) => key !== NAMESPACE_KEY),
+      warnings,
     };
   }
   const namespace = validateNamespace(existing);
@@ -266,6 +300,7 @@ export const loadRawRoot = (text: string): LoadedRoot => {
     root,
     namespace,
     preservedKeys: Object.keys(root).filter((key) => key !== NAMESPACE_KEY),
+    warnings,
   };
 };
 
@@ -317,15 +352,22 @@ export const createRawStore = (loaded: LoadedRoot): RawStore => {
     external: Record<string, unknown> | null
   ): boolean => {
     if (!external || external === root) return false;
-    for (const key of foreignKeys(external))
+    for (const key of foreignKeys(external)) {
       if (root[key] !== external[key]) return true;
+      if (!(key in external) !== !(key in root)) return true;
+    }
     return false;
   };
 
   const serialize = (external?: Record<string, unknown> | null): string => {
     const entries: string[] = [];
-    for (const key of foreignKeys(external)) {
-      const value = external && key in external ? external[key] : root[key];
+    // 有宿主根对象时以它为准：宿主删掉的字段不再回退到解析快照，
+    // 否则已删除的数据会在下一次写入时"复活"。
+    const keys = external
+      ? Object.keys(external).filter((key) => key !== NAMESPACE_KEY)
+      : Object.keys(root).filter((key) => key !== NAMESPACE_KEY);
+    for (const key of keys) {
+      const value = external ? external[key] : root[key];
       entries.push(JSON.stringify(key) + ':' + JSON.stringify(value));
     }
     const allocations =
@@ -363,8 +405,10 @@ export const createRawStore = (loaded: LoadedRoot): RawStore => {
 
   const commitExternal = (external: Record<string, unknown> | null): void => {
     if (!external || external === root) return;
-    for (const key of foreignKeys(external))
+    for (const key of foreignKeys(external)) {
       if (key in external) root[key] = external[key];
+      else delete root[key];
+    }
   };
 
   return {

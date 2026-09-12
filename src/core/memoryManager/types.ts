@@ -79,8 +79,11 @@ export interface MigrationMove {
  */
 export interface MigrationRecord {
   generation: number;
-  /** copy 暂存并写目标页 → verify 回读校验 → switch 更新目录。 */
-  phase: 'copy' | 'verify' | 'switch';
+  /**
+   * copy 暂存并写目标页 → verify 回读校验 → switch 更新目录 →
+   * cleanup 确认目录已写入后再清空被腾退的页。每一步之后都能承受 global reset。
+   */
+  phase: 'copy' | 'verify' | 'switch' | 'cleanup';
   reason: 'allocation' | 'preemption';
   moves: MigrationMove[];
   staged: Record<string, JsonValue>;
@@ -150,7 +153,10 @@ export interface MemoryManagerStatus {
     segmentId?: number;
     pending: PartitionPending['reason'] | null;
     dirty: boolean;
-    /** 最近一次写入失败的信息；成功提交后清空。 */
+    /**
+     * 最近一次故障信息（可能已经恢复）。判断当前是否可用请看 pending 与 access()，
+     * 不要把该字段当作"当前故障"；恢复成功不会清空它，便于回溯历史问题。
+     */
     writeError: string | null;
   }[];
   migration: {
@@ -161,6 +167,8 @@ export interface MemoryManagerStatus {
   } | null;
   /** 被其他工具数据或未认领信封占用的页：不参与分配，也不会被写入。 */
   reservedSegments: { segmentId: number; reason: string }[];
+  /** 最近一次分配规划中因数据未装载或损坏而落选的候选及原因。 */
+  allocationSkipped: { pluginId: string; localId: string; reason: string }[];
   /** 尚未观察到内容的页：未观察前不允许写入。 */
   unobservedSegments: number[];
   /** 未被任何分区认领的主 Memory 根字段名，用于确认外部数据未被覆盖。 */

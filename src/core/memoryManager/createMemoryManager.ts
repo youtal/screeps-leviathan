@@ -161,6 +161,12 @@ export const createMemoryManager = (
   let deferredThisTick = false;
   let rawDirty = false;
   let allocationPlanned = false;
+  /** 最近一次分配规划中被排除的候选及原因：只做诊断，不影响数据。 */
+  let allocationSkipped: {
+    pluginId: string;
+    localId: string;
+    reason: string;
+  }[] = [];
   let observationSinceTick = -1;
   /**
    * 本 global 观察到的页内容快照：只记录"已经激活并读到内容"的页。
@@ -169,6 +175,14 @@ export const createMemoryManager = (
   const observedSegments = new Map<number, string>();
   /** 被外部数据或未认领信封占用的页：不参与分配、不会被写入。 */
   const reservedSegments = new Map<number, string>();
+  /** 清理阶段的重试计数（journal 代际 → 次数）：只驻留 heap，不进入存储。 */
+  const cleanupAttempts = new Map<number, number>();
+  /**
+   * 当前 journal 状态（含新目录）是否已经随主 Memory 成功落盘。
+   * 只有为真才允许清空被腾退的页：否则主 Memory 写失败 + global reset 会留下
+   * "存储目录仍指向已清空页"的悬空引用。加载到的 journal 视为已落盘。
+   */
+  let migrationPersisted = false;
   /**
    * 待执行搬迁队列：窗口封存后一次性排好（先腾退、再迁入），执行阶段串行推进，
    * 保证同一时刻至多一个 journal 记录，避免相互覆盖的中间态。
@@ -338,6 +352,9 @@ export const createMemoryManager = (
     | { ok: true }
     | { ok: false; reason: MemoryPendingReason; error?: string } => {
     const { pluginId, localId } = partition;
+    // 已装载的分区以 heap 为事实源：重试只服务"缺数据"的分区，
+    // 绝不能用存储里的旧内容覆盖内存中尚未提交的修改。
+    if (partition.data !== null) return { ok: true };
     if (partition.backend === 'raw') {
       const record = rawRecordOf(pluginId, localId);
       if (!record)
@@ -353,6 +370,13 @@ export const createMemoryManager = (
     const segmentId = partition.segmentId;
     if (segmentId === undefined)
       return { ok: false, reason: 'recovery', error: 'missing segment id' };
+    // 目录/journal 引用本实例不管理的页时不能无限等待：直接给出可诊断的错误。
+    if (!segmentIds.includes(segmentId))
+      return {
+        ok: false,
+        reason: 'recovery',
+        error: 'segment ' + segmentId + ' is not managed by this instance',
+      };
     const text = segmentsVisible()[segmentId];
     if (text === undefined) return { ok: false, reason: 'segment-activating' };
     const envelope = parseEnvelope(text);
@@ -368,17 +392,31 @@ export const createMemoryManager = (
     return { ok: true };
   };
 
+  /** 分区数据的运行时形状校验：契约要求 initialize/migrate 返回键值对象。 */
+  const asPartitionData = (
+    value: unknown,
+    what: string
+  ):
+    | { ok: true; data: Record<string, JsonValue> }
+    | { ok: false; error: string } =>
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? { ok: true, data: value as Record<string, JsonValue> }
+      : { ok: false, error: what + ' must return a key-value object' };
+
   /**
-   * 版本处理：同版本直接可用；版本 0（旧布局导入或首次安装）按新数据初始化；
-   * 旧版本用 migrate 升级，缺少 migrate 时拒绝；新版本（降级）拒绝并给出诊断。
+   * 版本处理：同版本直接可用；**任何已存储数据**（含旧布局导入的版本 0）都必须经
+   * migrate 升级——只有完全不存在历史记录才算首次安装，避免把真实 payload 当空数据
+   * 覆盖；新版本（降级）拒绝并给出诊断。
    */
   const applyVersion = (
     partition: Partition,
     hasHistory: boolean
   ): { ok: true } | { ok: false; error: string } => {
     const { version, initialize, migrate } = partition.options;
-    if (!hasHistory || partition.dataVersion === 0) {
-      partition.data = initialize() as Record<string, JsonValue>;
+    if (!hasHistory) {
+      const created = asPartitionData(initialize(), 'initialize()');
+      if (created.ok === false) return created;
+      partition.data = created.data;
       partition.dataVersion = version;
       partition.forceCommit = true;
       markDirty(partition);
@@ -401,10 +439,12 @@ export const createMemoryManager = (
           'missing migrate for stored dataVersion ' + partition.dataVersion,
       };
     const fromVersion = partition.dataVersion;
-    partition.data = migrate(partition.data, partition.dataVersion) as Record<
-      string,
-      JsonValue
-    >;
+    const migrated = asPartitionData(
+      migrate(partition.data, partition.dataVersion),
+      'migrate()'
+    );
+    if (migrated.ok === false) return migrated;
+    partition.data = migrated.data;
     partition.dataVersion = version;
     partition.forceCommit = true;
     markDirty(partition);
@@ -670,11 +710,30 @@ export const createMemoryManager = (
     const inFlight = new Set(
       (journal?.moves ?? []).map((move) => key(move.pluginId, move.localId))
     );
+    allocationSkipped = [];
     const candidates = [...partitions.values()]
       .filter((partition) => {
         if (partition.options.priority === undefined) return false;
         if (inFlight.has(key(partition.pluginId, partition.localId)))
           return false;
+        // 数据未装载或已损坏的分区不参与搬迁：否则会把未知版本搬进新页，
+        // 甚至覆盖仍在存储里的真实数据。诊断里区分"损坏"与"尚未装载"。
+        if (partition.pending?.reason === 'recovery') {
+          allocationSkipped.push({
+            pluginId: partition.pluginId,
+            localId: partition.localId,
+            reason: 'recovery',
+          });
+          return false;
+        }
+        if (partition.data === null) {
+          allocationSkipped.push({
+            pluginId: partition.pluginId,
+            localId: partition.localId,
+            reason: 'data-not-loaded',
+          });
+          return false;
+        }
         return true;
       })
       .sort((a, b) => {
@@ -746,12 +805,47 @@ export const createMemoryManager = (
     }
   };
 
+  /**
+   * 清空被腾退的页。
+   *
+   * 目录切换后旧页不再被引用，清空只是回收容量：页不可见时留待下次观察（届时会被识别
+   * 为保留页而不是被覆盖），写入抛错只记录诊断，绝不阻止目录切换——数据此时已经在
+   * 主 Memory 里留有副本。
+   */
+  const clearVacatedSegment = (id: number, report = true): boolean => {
+    if (segmentsVisible()[id] === undefined) {
+      observedSegments.delete(id);
+      if (report)
+        log.warn('segment ' + id + ' not visible for cleanup; will retry');
+      return false;
+    }
+    try {
+      platform.writeSegment(id, '');
+      observedSegments.set(id, '');
+      reservedSegments.delete(id);
+      return true;
+    } catch (error) {
+      observedSegments.delete(id);
+      if (report)
+        log.warn(
+          'segment ' +
+            id +
+            ' cleanup failed: ' +
+            (error instanceof Error ? error.message : String(error))
+        );
+      return false;
+    }
+  };
+
   /** 搬迁冻结：参与搬迁的分区在 copy/verify 阶段进入 pending，避免中途数据继续变化。 */
-  const freezeMoves = (moves: readonly MigrationMove[]): void => {
+  const freezeMoves = (
+    moves: readonly MigrationMove[],
+    reason: MemoryPendingReason = 'migration'
+  ): void => {
     for (const move of moves) {
       const partition = partitions.get(key(move.pluginId, move.localId));
       if (!partition) continue;
-      setPending(partition, 'migration');
+      setPending(partition, reason);
     }
   };
 
@@ -769,7 +863,7 @@ export const createMemoryManager = (
         const stillOurs =
           allocation?.backend === 'segment' &&
           allocation.segmentId === move.toSegmentId;
-        if (!stillOurs) platform.writeSegment(move.toSegmentId, '');
+        if (!stillOurs) clearVacatedSegment(move.toSegmentId);
       }
       const partition = partitions.get(key(move.pluginId, move.localId));
       if (partition) {
@@ -779,6 +873,7 @@ export const createMemoryManager = (
     }
     const generation = store!.namespace.migration?.generation;
     store!.namespace.migration = null;
+    migrationPersisted = false;
     store!.markMigrationDirty();
     rawDirty = true;
     log.warn('migration ' + String(generation) + ' aborted: ' + reason);
@@ -812,6 +907,7 @@ export const createMemoryManager = (
     };
     store!.markMigrationDirty();
     rawDirty = true;
+    migrationPersisted = false;
     freezeMoves([move]);
     log.info(
       'migration ' +
@@ -844,6 +940,40 @@ export const createMemoryManager = (
       return;
     }
     const visible = segmentsVisible();
+    if (journal.phase === 'cleanup') {
+      // 目录必须已经随主 Memory 成功落盘，才允许清空旧页；写入失败时停在 cleanup，
+      // 由 end 重试写入（rawDirty 仍为真），成功后的下一 tick 再清理。
+      if (!migrationPersisted) return;
+      const attempts = (cleanupAttempts.get(journal.generation) ?? 0) + 1;
+      cleanupAttempts.set(journal.generation, attempts);
+      // 同一代际的清理失败只在首次尝试时告警：重试日志不重复刷屏（同一原因只记一次）。
+      const report = attempts === 1;
+      let allCleared = true;
+      for (const item of journal.moves)
+        if (
+          item.fromSegmentId !== undefined &&
+          !clearVacatedSegment(item.fromSegmentId, report)
+        )
+          allCleared = false;
+      if (!allCleared && attempts < 3) {
+        store!.markMigrationDirty();
+        rawDirty = true;
+        return;
+      }
+      if (!allCleared)
+        log.warn(
+          'migration ' +
+            journal.generation +
+            ' cleanup gave up on some vacated pages; they stay reserved'
+        );
+      cleanupAttempts.delete(journal.generation);
+      store!.namespace.migration = null;
+      store!.markMigrationDirty();
+      rawDirty = true;
+      log.info('migration ' + journal.generation + ' cleaned up');
+      startNextMove();
+      return;
+    }
     if (journal.phase === 'copy') {
       for (const item of journal.moves) {
         const identity = key(item.pluginId, item.localId);
@@ -883,6 +1013,15 @@ export const createMemoryManager = (
           payload = record.payload;
         }
         journal.staged[identity] = payload;
+      }
+      const unmanaged = journal.moves.find(
+        (item) =>
+          (item.to === 'segment' && !segmentIds.includes(item.toSegmentId!)) ||
+          (item.from === 'segment' && !segmentIds.includes(item.fromSegmentId!))
+      );
+      if (unmanaged) {
+        abortMigration('migration references unmanaged segment', journal.moves);
+        return;
       }
       const needVisible = journal.moves.filter((item) => item.to === 'segment');
       if (
@@ -929,7 +1068,7 @@ export const createMemoryManager = (
       journal.phase = 'verify';
       store!.markMigrationDirty();
       rawDirty = true;
-      freezeMoves(journal.moves);
+      freezeMoves(journal.moves, 'verification');
       log.info(
         'migration ' + journal.generation + ' copied; awaiting verification'
       );
@@ -986,7 +1125,10 @@ export const createMemoryManager = (
           resident.dirty = false;
           resident.dirtySince = undefined;
           resident.forceCommit = false;
-          clearPending(resident);
+          // 数据尚未装载时显式回到 loading，让下一 tick 从新后端装载；
+          // 否则会出现"无 pending 也无数据"的失真状态（accessor 永久 loading）。
+          if (resident.data === null) setPending(resident, 'loading');
+          else clearPending(resident);
         }
       } else {
         writeRawPartition(
@@ -1006,19 +1148,21 @@ export const createMemoryManager = (
           resident.dirty = false;
           resident.dirtySince = undefined;
           resident.forceCommit = false;
-          clearPending(resident);
+          if (resident.data === null) setPending(resident, 'loading');
+          else clearPending(resident);
         }
+        // 被腾退的页留到 cleanup 阶段（目录成功落盘后）再清空。
       }
-      // 旧页不再被目录引用，随目录切换当 tick 清空即可回收容量。
-      if (item.from === 'segment' && item.fromSegmentId !== undefined)
-        platform.writeSegment(item.fromSegmentId, '');
       delete journal.staged[identity];
     }
-    store!.namespace.migration = null;
+    // 目录切换只改 heap；被腾退的页要等包含新目录的整串写入成功之后，在 cleanup
+    // 阶段才清空——否则主 Memory 写失败叠加 global reset 会留下"存储目录仍指向
+    // 已清空页"的悬空引用，旧数据的唯一副本随之丢失。
+    journal.phase = 'cleanup';
     store!.markMigrationDirty();
     rawDirty = true;
-    log.info('migration ' + journal.generation + ' switched');
-    startNextMove();
+    migrationPersisted = false;
+    log.info('migration ' + journal.generation + ' switched; cleanup pending');
     return;
   };
 
@@ -1098,6 +1242,10 @@ export const createMemoryManager = (
       try {
         const loadedRoot = loadRawRoot(platform.readRaw());
         store = createRawStore(loadedRoot);
+        // 加载到的 journal 已经存在于存储中，可以直接进入后续阶段。
+        migrationPersisted = store.namespace.migration !== null;
+        // 加载期被安全跳过的内容（例如旧布局的原型键）：只记录诊断，不阻断启动。
+        for (const warning of loadedRoot.warnings) log.warn(warning);
         loaded = true;
       } catch (error) {
         fault = error instanceof Error ? error.message : String(error);
@@ -1111,14 +1259,25 @@ export const createMemoryManager = (
     /**
      * 重试等待中的分区。
      *
-     * 两种情形需要重试：上一 tick 申请激活的页本 tick 可见（segment-activating），
-     * 或分区还没有数据（loading，例如 switch 之后需要从新后端装载）。其他 pending
-     * 保持原样：recovery 需要等外部修复，migration/verification 由搬迁流程自己推进。
+     * 两种情形需要重试：①上一 tick 申请激活的页本 tick 可见；②分区没有数据
+     * （switch 之后或装载失败）。规则：
+     * - 冻结类 pending（migration/verification）必须保持——搬迁期间若恢复 ready，
+     *   插件的新提交不会被搬进目标，却会在 switch 时被清 dirty，造成静默丢失；
+     *   冻结时刻的数据由搬迁本身落盘。
+     * - 有未提交修改（dirty）时 heap 是事实源，只清 pending 让下一次提交重试，
+     *   绝不能用存储里的旧信封覆盖脏数据。
+     * - recovery 且无数据时允许重读自愈（结论保留在 writeError 中，语义是
+     *   "最近一次故障"，不代表当前仍不可用）。
      */
     for (const partition of partitions.values()) {
       const pendingReason = partition.pending?.reason;
-      if (pendingReason !== 'segment-activating' && pendingReason !== 'loading')
+      if (pendingReason === 'migration' || pendingReason === 'verification')
         continue;
+      if (partition.dirty) {
+        clearPending(partition);
+        continue;
+      }
+      if (partition.data !== null) continue;
       const restored = restorePartition(partition);
       if (restored.ok === false) {
         if (restored.reason === 'recovery') {
@@ -1184,6 +1343,7 @@ export const createMemoryManager = (
     try {
       platform.writeRaw(store!.serialize(external));
       rawDirty = false;
+      migrationPersisted = store!.namespace.migration !== null;
       store!.commitExternal(external);
       for (const partition of stagedRaw) {
         partition.dirty = false;
@@ -1232,7 +1392,10 @@ export const createMemoryManager = (
       localId: partition.localId,
       backend: partition.backend,
       segmentId: partition.segmentId,
-      pending: partition.pending?.reason ?? null,
+      // pending 以 accessor 的实际判定为准：无数据即 loading，避免状态与真实相反。
+      pending:
+        partition.pending?.reason ??
+        (partition.data === null ? 'loading' : null),
       dirty: partition.dirty,
       writeError: partition.writeError,
     })),
@@ -1248,6 +1411,7 @@ export const createMemoryManager = (
       segmentId,
       reason,
     })),
+    allocationSkipped: allocationSkipped.map((entry) => ({ ...entry })),
     unobservedSegments: unobservedSegments(),
     preservedRootKeys: store ? store.preservedKeys() : [],
   });

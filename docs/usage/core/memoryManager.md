@@ -66,7 +66,7 @@ const plugin: LeviathanPlugin = {
 | --- | --- | --- |
 | `version` | 是 | 正整数数据版本；升级时调用 `migrate`，降级被拒绝 |
 | `initialize()` | 是 | 没有历史数据时生成初始数据；必须返回键值对象 |
-| `migrate(memory, fromVersion)` | 升级时 | 接收旧数据，自行校验并返回新形状；存储中的版本高于 0 且低于当前版本时必须提供 |
+| `migrate(memory, fromVersion)` | 升级时 | 接收未知旧数据，自行校验并返回新形状；**只要存储里已有该分区的数据就必须提供**（含旧布局导入的版本 0——它表示"未知旧版本"，不会被当成新安装） |
 | `layer` | 是 | `critical` 当 tick 提交；`checkpoint` 按间隔合并提交 |
 | `checkpointInterval` | 否 | 仅 checkpoint 可用，正整数，默认 100 tick；从首次 dirty 起算 |
 | `priority` | 否 | 显式提供才参与固定 Segment 竞争；缺省或未入选使用主 Memory |
@@ -81,7 +81,7 @@ const plugin: LeviathanPlugin = {
 | `segment-activating` | 目标页尚未激活（请求后下一 tick 可见） | 下一 tick 重试 |
 | `migration` | 分区正在搬迁，写入被冻结 | 等待迁移完成，继续无关工作 |
 | `verification` | 搬迁副本等待回读校验 | 同上 |
-| `recovery` | 数据损坏、归属不符或版本异常 | 由 `getStatus().fault/writeError` 暴露；本分区保持不可用，等待存储被修复 |
+| `recovery` | 数据损坏、归属不符或版本异常 | 由 `getStatus().fault/writeError` 暴露；页内容恢复一致后会在后续 tick 自动重读自愈，`writeError` 保留最近一次故障供回溯 |
 
 `retryAt` 是建议重试 tick，不保证到期就绪。Framework 不会因为 pending 跳过插件的其它钩子、禁止其 Intent 或计入失败。
 
@@ -98,9 +98,9 @@ const plugin: LeviathanPlugin = {
 - `priority` 降序排名，只取前 10 个申请，同分按稳定身份排序；落选者与窗口后的新申请使用主 Memory。
 - 启动窗口在首个 tick 收尾时封存。框架在安全模式、插件因 CPU 未准入或 setup 失败时会延后封存，最多 `maxStartupDeferrals`（默认 10）个 tick，超限强制封存并在诊断里标记。
 - 页分配前必须先观察到页内容：只有"读到过且为空"的页参与分配；目录或迁移 journal 引用的页视为自有，其余非空页（其他工具数据、无归属的历史信封）登记为保留页并跳过，绝不覆盖。
-- 搬迁串行执行：copy（暂存并写目标信封）→ 下一 tick 回读校验 → 切换目录并清空被腾退的页；代际取自持久单调计数器，每次搬迁都是新值。中断后可跨 global reset 继续，且**不要求对应模块本轮重新申请**——数据从存储搬运，恢复以 journal 为准。
-- 搬迁期间（copy/verify/switch）相关分区保持 `pending`，写入被冻结；插件的新提交会被拒绝，避免"提交未搬进目标、switch 又清掉 dirty"的静默丢失。
-- 被抢占的页会先腾退，再分配给本批入选者；搬迁期间目标页非空且不属于本模块时中止搬迁并保留诊断。
+- 搬迁串行执行：copy（暂存并写目标信封）→ 下一 tick 回读校验 → 切换目录 → cleanup（**确认新目录已随主 Memory 落盘后**才清空被腾退的页）；代际取自持久单调计数器，每次搬迁都是新值。中断后可跨 global reset 继续，且**不要求对应模块本轮重新申请**——数据从存储搬运，恢复以 journal 为准。
+- 搬迁期间（copy/verify/switch）相关分区保持 `pending`，写入被冻结；插件的新提交会被拒绝，避免"提交未搬进目标、switch 又清掉 dirty"的静默丢失。cleanup 阶段目录已经切换，分区恢复可用。
+- 被抢占的页会先腾退，再分配给本批入选者；旧页只有在目录落盘成功之后才被清空，任何时刻都至少保留一份有效数据。
 
 ## 诊断
 
@@ -108,10 +108,11 @@ const plugin: LeviathanPlugin = {
 const status = memory.getStatus();
 // status.loaded / fault / tick
 // status.startupWindowOpen / startupWindowForced / startupDeferrals
-// status.allocations[]: owner、backend、segmentId、pending、dirty、writeError
+// status.allocations[]: owner、backend、segmentId、pending、dirty、writeError（最近一次故障，可能已恢复）
 // status.migration: { generation, phase, reason, moves } | null
 // status.reservedSegments[]: 被外部数据或未认领信封占用的页及原因
 // status.unobservedSegments[]: 尚未观察到内容、暂不参与分配的页
+// status.allocationSkipped[]: 分配规划中因数据未装载或损坏而落选的候选及原因
 // status.preservedRootKeys: 未被本模块认领的 Memory 根字段
 ```
 
@@ -122,8 +123,8 @@ const status = memory.getStatus();
 - 未知 schema、页归属不符、版本降级、缺少 `migrate` 的升级都会拒绝写入并给出诊断，不用空数据覆盖历史。
 - 旧 `leviathan` 命名空间只做一次性导入（插件 payload 与版本号），不删除、不改写，可随时回退。
 - 主 Memory 中其它工具的根字段原样保留，且不缓存其文本：写入时从宿主 `Memory` 现取现序列化，同一 global 内被替换或新增的根字段会被合并（深层原地修改不会被检测）。
-- 运行中以 heap 数据为事实源：分区数据装载后常驻内存，写回按提交策略延后；写入失败保留 dirty 并在下一 tick 重试。
-- 不自动合并控制台等外部对存储的编辑，但会合并宿主在同一 global 内替换或新增的根字段；完全 clean 的 tick 不写 RawMemory。
+- 运行中以 heap 数据为事实源：分区有未提交修改（dirty）时，重试装载绝不会用存储里的旧内容覆盖内存，页短暂不可见只会推迟提交。没有数据的分区不会参与 Segment 搬迁，并在 `allocationSkipped` 中给出原因。
+- 不自动合并控制台等外部对存储的编辑，但会传播宿主的根字段变化（替换、新增、**删除**）；完全 clean 的 tick 不写 RawMemory。
 
 ## 日志
 

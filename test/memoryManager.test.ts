@@ -1190,3 +1190,643 @@ describe('MemoryManager logging', () => {
     );
   });
 });
+
+/**
+ * 数据安全回归（历史处理记录见 docs/changelog/2026-09-12.md）。
+ *
+ * 覆盖的不变量：脏数据不被旧信封覆盖、switch 后不出现"无 pending 且无数据"、
+ * 旧布局版本 0 不被当作新安装、腾退页清理失败不阻断目录切换、未装载分区不参与
+ * 搬迁，以及外部根字段删除传播、原型键拒绝、initialize/migrate 返回值校验、
+ * 非托管页诊断。
+ */
+describe('MemoryManager audit closure', () => {
+  const envelopeOf = (
+    pluginId: string,
+    localId: string,
+    generation: number,
+    dataVersion: number,
+    payload: unknown
+  ) =>
+    JSON.stringify({
+      schemaVersion: 1,
+      owner: { pluginId, localId },
+      generation,
+      dataVersion,
+      payload,
+    });
+
+  it('keeps dirty heap data when the segment page is temporarily invisible (P1-1)', () => {
+    const s = sessions();
+    const first = createMemoryManager({
+      platform: s.plat.platform,
+      segmentIds: [0],
+    });
+    s.run(first, () => {
+      first.bind('dirty')('main', {
+        version: 1,
+        layer: 'critical',
+        priority: 1,
+        initialize: () => ({ n: 1 }),
+      });
+    });
+    s.settle(first);
+    expect(namespaceOf(s.plat.raw()).allocations.dirty.main.backend).toBe(
+      'segment'
+    );
+
+    // 新 global：分区 ready 后提交 n=2，并在本 tick 内让页不可见（提交只能保留 dirty）。
+    const second = createMemoryManager({
+      platform: s.plat.platform,
+      segmentIds: [0],
+    });
+    let accessor!: MemoryAccessor<{ n: number }>;
+    s.run(second, () => {
+      accessor = second.bind('dirty')('main', {
+        version: 1,
+        layer: 'critical',
+        priority: 1,
+        initialize: () => ({ n: 0 }),
+      });
+      const access = accessor.access();
+      expect(access.status).toBe('ready');
+      if (access.status === 'ready') access.commit((memory) => (memory.n = 2));
+      s.plat.hideSegments();
+    });
+    expect(second.getStatus().allocations[0].pending).toBe(
+      'segment-activating'
+    );
+    expect(second.getStatus().allocations[0].dirty).toBe(true);
+
+    // 下一 tick 页恢复可见：必须把 n=2 落盘，而不是被旧信封回退成 n=1。
+    s.run(second);
+    const page = namespaceOf(s.plat.raw()).allocations.dirty.main.segmentId;
+    expect(s.plat.content()[page]).toContain('"n":2');
+  });
+
+  it('recovers a partition whose data never loaded when a journal switches it (P1-2, P2-3)', () => {
+    const plat = createPlatform();
+    const raw = JSON.stringify({
+      memoryManager: {
+        schemaVersion: 1,
+        generationCounter: 2,
+        allocations: {
+          solo: { main: { backend: 'segment', segmentId: 0, generation: 1 } },
+        },
+        rawPartitions: {},
+        migration: {
+          generation: 2,
+          phase: 'switch',
+          reason: 'allocation',
+          moves: [
+            {
+              pluginId: 'solo',
+              localId: 'main',
+              dataVersion: 1,
+              from: 'segment',
+              fromSegmentId: 0,
+              to: 'raw',
+            },
+          ],
+          staged: { 'solo/main': { n: 7 } },
+        },
+      },
+    });
+    plat.setRaw(raw);
+    plat.platform.writeSegment(0, envelopeOf('solo', 'main', 1, 1, { n: 7 }));
+    plat.platform.activateSegments([]);
+    plat.nextTick();
+
+    const manager = createMemoryManager({
+      platform: plat.platform,
+      segmentIds: [0],
+    });
+    let tick = 1;
+    manager.begin(tick);
+    const accessor = manager.bind('solo')('main', {
+      version: 1,
+      layer: 'critical',
+      priority: 1,
+      initialize: () => ({ n: -1 }),
+    });
+    expect(accessor.access().status).toBe('pending');
+    manager.end(tick);
+    plat.nextTick();
+    tick++;
+
+    // switch 之后不能留下"无 pending 且无数据"的失真状态：诊断必须是 loading；
+    // journal 进入 cleanup（等目录落盘后再清页），不是直接消失。
+    const statusAfterSwitch = manager.getStatus();
+    expect(statusAfterSwitch.migration?.phase).toBe('cleanup');
+    expect(statusAfterSwitch.allocations[0].pending).toBe('loading');
+
+    // 下一 tick：从 switch 后的 Raw 分区装载，必须 ready，而不是永久 loading。
+    manager.begin(tick);
+    const access = accessor.access();
+    expect(access.status).toBe('ready');
+    if (access.status === 'ready') expect(access.query()).toEqual({ n: 7 });
+    manager.end(tick);
+    expect(manager.getStatus().allocations[0].pending).toBeNull();
+  });
+
+  it('skips unrecoverable partitions when planning allocation (P2-3)', () => {
+    const h = createHarness({ segmentIds: [0] });
+    // 页上是别人的信封：恢复必然失败，分区停在 recovery 且没有数据。
+    h.plat.platform.writeSegment(
+      0,
+      envelopeOf('ghost', 'main', 1, 1, { n: 1 })
+    );
+    h.plat.setRaw(
+      JSON.stringify({
+        memoryManager: {
+          schemaVersion: 1,
+          generationCounter: 1,
+          allocations: {
+            broken: {
+              main: { backend: 'segment', segmentId: 0, generation: 1 },
+            },
+          },
+          rawPartitions: {},
+          migration: null,
+        },
+      })
+    );
+    h.run(() => {
+      h.manager.bind('broken')('main', {
+        version: 1,
+        layer: 'critical',
+        priority: 1,
+        initialize: () => ({ n: 0 }),
+      });
+    });
+    h.run();
+
+    const status = h.manager.getStatus();
+    expect(status.allocations[0].pending).toBe('recovery');
+    expect(status.allocationSkipped).toContainEqual({
+      pluginId: 'broken',
+      localId: 'main',
+      reason: 'recovery',
+    });
+  });
+
+  it('refuses to treat a version 0 payload as a fresh install (P2-1)', () => {
+    const h = createHarness();
+    h.plat.setRaw(
+      JSON.stringify({
+        leviathan: {
+          schemaVersion: 1,
+          framework: {
+            pluginVersions: {},
+            pluginHealth: {},
+            intentReceipts: [],
+            profiler: {},
+          },
+          plugins: { legacy: { n: 42 } },
+        },
+      })
+    );
+
+    let accessor!: MemoryAccessor<{ n: number }>;
+    h.run(() => {
+      accessor = h.manager.bind('legacy')('main', {
+        version: 1,
+        layer: 'critical',
+        initialize: () => ({ n: 0 }),
+      });
+    });
+
+    // 缺少 migrate：拒绝而不是用 {n:0} 覆盖导入的真实 payload。
+    expect(accessor.access().status).toBe('pending');
+    expect(h.manager.getStatus().allocations[0].writeError).toMatch(
+      /missing migrate for stored dataVersion 0/
+    );
+  });
+
+  it('keeps the directory switch when clearing the vacated page fails (P2-2)', () => {
+    const sink = collecting();
+    const plat = createPlatform();
+    const platform: MemoryPlatform = {
+      ...plat.platform,
+      writeSegment: (id, value) => {
+        if (value === '') throw new Error('segment write refused');
+        plat.platform.writeSegment(id, value);
+      },
+    };
+    plat.setRaw(
+      JSON.stringify({
+        memoryManager: {
+          schemaVersion: 1,
+          generationCounter: 2,
+          allocations: {
+            solo: { main: { backend: 'segment', segmentId: 0, generation: 1 } },
+          },
+          rawPartitions: {},
+          migration: {
+            generation: 2,
+            phase: 'switch',
+            reason: 'allocation',
+            moves: [
+              {
+                pluginId: 'solo',
+                localId: 'main',
+                dataVersion: 1,
+                from: 'segment',
+                fromSegmentId: 0,
+                to: 'raw',
+              },
+            ],
+            staged: { 'solo/main': { n: 7 } },
+          },
+        },
+      })
+    );
+    plat.platform.writeSegment(0, envelopeOf('solo', 'main', 1, 1, { n: 7 }));
+    plat.nextTick();
+
+    const manager = createMemoryManager({
+      platform,
+      segmentIds: [0],
+      logging: sink.logging,
+    });
+    manager.begin(1);
+    manager.bind('solo')('main', {
+      version: 1,
+      layer: 'critical',
+      priority: 1,
+      initialize: () => ({ n: -1 }),
+    });
+    expect(() => manager.end(1)).not.toThrow();
+
+    // 清页失败：目录切换照常完成，journal 停在 cleanup 重试，页内容保持有效副本。
+    const afterSwitch = JSON.parse(plat.raw()).memoryManager;
+    expect(afterSwitch.allocations.solo.main.backend).toBe('raw');
+    expect(afterSwitch.migration?.phase).toBe('cleanup');
+    expect(manager.getStatus().allocations[0].backend).toBe('raw');
+    expect(plat.content()[0]).toContain('"n":7');
+
+    // 清理重试到上限后放弃并记录诊断，页保持"保留页"状态而不是被误回收。
+    for (let tick = 2; tick <= 5; tick++) {
+      manager.begin(tick);
+      manager.end(tick);
+      plat.nextTick();
+    }
+    expect(JSON.parse(plat.raw()).memoryManager.migration).toBeNull();
+
+    // 同一代际的清理失败只在首次尝试告警（重试静默），放弃时再记一条。
+    const lines = sink.text().split('\n');
+    expect(
+      lines.filter((line) =>
+        /not visible for cleanup|cleanup failed/.test(line)
+      )
+    ).toHaveLength(1);
+    expect(
+      lines.filter((line) => line.includes('cleanup gave up'))
+    ).toHaveLength(1);
+  });
+
+  it('propagates deletion of external root fields (P3-1)', () => {
+    const host: Record<string, unknown> = { other: { keep: true } };
+    const h = createHarness({ getHostMemory: () => host });
+    h.plat.setRaw(JSON.stringify({ other: { keep: true } }));
+
+    h.run(() => {
+      h.manager.bind('cleaner')('main', {
+        version: 1,
+        layer: 'critical',
+        initialize: () => ({ n: 0 }),
+      });
+    });
+    delete host.other;
+    h.run();
+
+    expect(JSON.parse(h.plat.raw()).other).toBeUndefined();
+  });
+
+  it('rejects prototype keys in the stored namespace (P3-2)', () => {
+    const h = createHarness();
+    h.plat.setRaw(
+      '{"memoryManager":{"schemaVersion":1,"generationCounter":0,' +
+        '"allocations":{"__proto__":{"main":{"backend":"raw","generation":0}}},' +
+        '"rawPartitions":{},"migration":null}}'
+    );
+    h.run(() => {
+      h.manager.bind('proto')('main', {
+        version: 1,
+        layer: 'critical',
+        initialize: () => ({ n: 1 }),
+      });
+    });
+
+    expect(h.manager.getStatus().fault).toMatch(/Invalid allocation key/);
+  });
+
+  it('rejects non-object data returned by initialize or migrate (P3-3)', () => {
+    const h = createHarness();
+    h.run(() => {
+      expect(() =>
+        h.manager.bind('array')('main', {
+          version: 1,
+          layer: 'critical',
+          initialize: () => [] as unknown as Record<string, never>,
+        })
+      ).toThrow(/must return a key-value object/);
+    });
+  });
+
+  it('diagnoses pages outside the managed set instead of waiting forever (P3-5)', () => {
+    const h = createHarness({ segmentIds: [0] });
+    h.plat.setRaw(
+      JSON.stringify({
+        memoryManager: {
+          schemaVersion: 1,
+          generationCounter: 1,
+          allocations: {
+            stray: {
+              main: { backend: 'segment', segmentId: 9, generation: 1 },
+            },
+          },
+          rawPartitions: {},
+          migration: null,
+        },
+      })
+    );
+    let accessor!: MemoryAccessor<{ n: number }>;
+    h.run(() => {
+      accessor = h.manager.bind('stray')('main', {
+        version: 1,
+        layer: 'critical',
+        initialize: () => ({ n: 0 }),
+      });
+    });
+
+    const status = h.manager.getStatus();
+    expect(status.allocations[0].pending).toBe('recovery');
+    expect(status.allocations[0].writeError).toMatch(/not managed/);
+    expect(accessor.access().status).toBe('pending');
+  });
+
+  it('treats an explicit priority 0 as a real priority and breaks ties by identity', () => {
+    const h = createHarness({ segmentIds: [0] });
+    h.run(() => {
+      h.manager.bind('zero')('main', {
+        version: 1,
+        layer: 'critical',
+        priority: 0,
+        initialize: () => ({ n: 0 }),
+      });
+      h.manager.bind('none')('main', {
+        version: 1,
+        layer: 'critical',
+        initialize: () => ({ n: 0 }),
+      });
+    });
+    h.settle();
+    expect(namespaceOf(h.plat.raw()).allocations.zero.main.backend).toBe(
+      'segment'
+    );
+    expect(namespaceOf(h.plat.raw()).allocations.none.main.backend).toBe('raw');
+
+    const tie = createHarness({ segmentIds: [0] });
+    tie.run(() => {
+      tie.manager.bind('bbb')('main', {
+        version: 1,
+        layer: 'critical',
+        priority: 5,
+        initialize: () => ({ n: 0 }),
+      });
+      tie.manager.bind('aaa')('main', {
+        version: 1,
+        layer: 'critical',
+        priority: 5,
+        initialize: () => ({ n: 0 }),
+      });
+    });
+    tie.settle();
+    const allocations = namespaceOf(tie.plat.raw()).allocations;
+    expect(allocations.aaa.main.backend).toBe('segment');
+    expect(allocations.bbb.main.backend).toBe('raw');
+  });
+
+  it('does not rebuild the main memory when only a segment partition changes', () => {
+    const h = createHarness({ segmentIds: [0] });
+    let accessor!: MemoryAccessor<{ n: number }>;
+    h.run(() => {
+      accessor = h.manager.bind('page')('main', {
+        version: 1,
+        layer: 'critical',
+        priority: 1,
+        initialize: () => ({ n: 0 }),
+      });
+    });
+    h.settle();
+    const rawBefore = h.plat.raw();
+
+    h.run(() => {
+      const access = accessor.access();
+      if (access.status === 'ready') access.commit((memory) => (memory.n = 5));
+    });
+
+    expect(h.plat.raw()).toBe(rawBefore);
+    const page = namespaceOf(rawBefore).allocations.page.main.segmentId;
+    expect(h.plat.content()[page]).toContain('"n":5');
+  });
+
+  it('aborts a migration whose payload exceeds page capacity and keeps raw data', () => {
+    const h = createHarness({ segmentIds: [0] });
+    let accessor!: MemoryAccessor<{ blob: string }>;
+    h.run(() => {
+      accessor = h.manager.bind('huge')('main', {
+        version: 1,
+        layer: 'critical',
+        priority: 1,
+        initialize: () => ({ blob: 'x'.repeat(100_001) }),
+      });
+    });
+    h.settle();
+
+    const namespace = namespaceOf(h.plat.raw());
+    expect(namespace.allocations.huge.main.backend).toBe('raw');
+    expect(namespace.rawPartitions.huge.main.payload.blob).toHaveLength(100001);
+    const status = h.manager.getStatus();
+    expect(status.allocations[0].writeError).toMatch(/exceeds capacity/);
+    expect(status.allocations[0].pending).toBeNull();
+    expect(accessor.access().status).toBe('ready');
+  });
+});
+
+/** 第 2 轮审计新增发现的回归：迁移冻结、旧布局原型键、超页数分配、switch 失败注入。 */
+describe('MemoryManager round-2 audit closure', () => {
+  const envelopeOf = (
+    pluginId: string,
+    localId: string,
+    generation: number,
+    dataVersion: number,
+    payload: unknown
+  ) =>
+    JSON.stringify({
+      schemaVersion: 1,
+      owner: { pluginId, localId },
+      generation,
+      dataVersion,
+      payload,
+    });
+
+  it('keeps priority partitions frozen for the whole migration (P1-F)', () => {
+    const s = sessions();
+    const manager = createMemoryManager({
+      platform: s.plat.platform,
+      segmentIds: [0],
+    });
+    let accessor!: MemoryAccessor<{ n: number }>;
+    s.run(manager, () => {
+      accessor = manager.bind('frozen')('main', {
+        version: 1,
+        layer: 'checkpoint',
+        checkpointInterval: 100,
+        priority: 1,
+        initialize: () => ({ n: 0 }),
+      });
+    });
+    // checkpoint 层让分区在搬迁期间保持 dirty：冻结必须把提交挡在外面，
+    // 否则 switch 会用旧快照落盘，冻结后的提交被静默丢弃。
+    s.run(manager, () => {
+      const access = accessor.access();
+      if (access.status === 'ready') access.commit((memory) => (memory.n = 1));
+    });
+    expect(manager.getStatus().migration).not.toBeNull();
+
+    for (let i = 0; i < 8; i++) {
+      s.run(manager, () => {
+        const status = manager.getStatus();
+        // cleanup 阶段的目录已经切换，分区不再冻结；冻结断言只覆盖 copy/verify/switch。
+        if (status.migration === null || status.migration.phase === 'cleanup')
+          return;
+        const access = accessor.access();
+        expect(access.status).toBe('pending');
+        if (access.status === 'pending')
+          expect(['migration', 'verification']).toContain(access.reason);
+      });
+    }
+    s.settle(manager, 20);
+
+    const page = namespaceOf(s.plat.raw()).allocations.frozen.main.segmentId;
+    expect(s.plat.content()[page]).toContain('"n":1');
+  });
+
+  it('ignores prototype keys when importing the legacy layout (P3-A)', () => {
+    const sink = collecting();
+    const h = createHarness({ logging: sink.logging });
+    h.plat.setRaw(
+      '{"leviathan":{"schemaVersion":1,"framework":{"pluginVersions":{"ok":1}},' +
+        '"plugins":{"__proto__":{"n":1},"ok":{"n":2}}}}'
+    );
+    h.run(() => {
+      const accessor = h.manager.bind('ok')('main', {
+        version: 1,
+        layer: 'critical',
+        initialize: () => ({ n: 0 }),
+      });
+      expect(readyData(accessor)).toEqual({ n: 2 });
+      const access = accessor.access();
+      if (access.status === 'ready') access.commit((memory) => (memory.n = 3));
+    });
+
+    const namespace = namespaceOf(h.plat.raw());
+    // 只有安全键被导入；序列化结果里不存在 __proto__ 记录。
+    expect(Object.keys(namespace.allocations)).toEqual(['ok']);
+    expect(JSON.stringify(namespace.allocations)).not.toContain('__proto__');
+    expect(sink.text()).toContain(
+      'legacy import skipped unsafe key: __proto__'
+    );
+  });
+
+  it('ranks more than ten applications and keeps the rest on raw memory', () => {
+    const h = createHarness();
+    const ids = Array.from(
+      { length: 12 },
+      (_, index) => 'p' + String(index).padStart(2, '0')
+    );
+    h.run(() => {
+      ids.forEach((id, index) => {
+        h.manager.bind(id)('main', {
+          version: 1,
+          layer: 'critical',
+          priority: 100 - index,
+          initialize: () => ({ n: index }),
+        });
+      });
+    });
+    h.settle(120);
+
+    const allocations = namespaceOf(h.plat.raw()).allocations;
+    const onSegment = ids.filter(
+      (id) => allocations[id].main.backend === 'segment'
+    );
+    const onRaw = ids.filter((id) => allocations[id].main.backend === 'raw');
+    expect(onSegment).toHaveLength(10);
+    expect(onRaw).toEqual(['p10', 'p11']);
+  });
+
+  it('keeps a valid copy when the directory write fails during switch', () => {
+    const plat = createPlatform();
+    plat.setRaw(
+      JSON.stringify({
+        memoryManager: {
+          schemaVersion: 1,
+          generationCounter: 2,
+          allocations: {
+            solo: { main: { backend: 'segment', segmentId: 0, generation: 1 } },
+          },
+          rawPartitions: {},
+          migration: {
+            generation: 2,
+            phase: 'switch',
+            reason: 'allocation',
+            moves: [
+              {
+                pluginId: 'solo',
+                localId: 'main',
+                dataVersion: 1,
+                from: 'segment',
+                fromSegmentId: 0,
+                to: 'raw',
+              },
+            ],
+            staged: { 'solo/main': { n: 7 } },
+          },
+        },
+      })
+    );
+    plat.platform.writeSegment(0, envelopeOf('solo', 'main', 1, 1, { n: 7 }));
+    // 让页在切换 tick 可见：旧实现会立刻清空它，新实现必须等目录落盘后才清。
+    plat.platform.activateSegments([0]);
+    plat.nextTick();
+
+    const manager = createMemoryManager({
+      platform: plat.platform,
+      segmentIds: [0],
+    });
+    manager.begin(1);
+    manager.bind('solo')('main', {
+      version: 1,
+      layer: 'critical',
+      priority: 1,
+      initialize: () => ({ n: -1 }),
+    });
+    plat.failNextWrite(new Error('memory full'));
+    expect(() => manager.end(1)).not.toThrow();
+
+    // 主 Memory 未落盘：存储仍是旧目录，且页里的有效信封没有被提前清空。
+    const stored = JSON.parse(plat.raw()).memoryManager;
+    expect(stored.allocations.solo.main.backend).toBe('segment');
+    expect(plat.content()[0]).toContain('"n":7');
+
+    // 下一 tick 重试写入：目录切换为 raw 且主 Memory 持有 payload，之后才进入清理。
+    manager.begin(2);
+    manager.end(2);
+    plat.nextTick();
+    const after = JSON.parse(plat.raw()).memoryManager;
+    expect(after.allocations.solo.main.backend).toBe('raw');
+    expect(after.rawPartitions.solo.main.payload).toEqual({ n: 7 });
+  });
+});

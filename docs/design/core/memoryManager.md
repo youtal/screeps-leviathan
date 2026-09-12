@@ -150,7 +150,8 @@ Segment 中的数据版本与 payload 一起写入，避免每次升级还要求
 恢复既有 journal / 收集申请
 → 冻结申请、规划目标分配
 → 复制与验证
-→ 切换正式目录并回收旧页
+→ 切换正式目录
+→ 延迟清理
 → READY（本 global 分配冻结）
 ```
 
@@ -163,7 +164,7 @@ Segment 中的数据版本与 payload 一起写入，避免每次升级还要求
 3. 将 B 信封写入 Segment 3，保留 B 的 Raw 副本。
 4. 后续 tick 重读 Segment 3，验证 owner、generation、数据版本及必要的内容校验。
 5. 提交正式目录：A 归 Raw、B 归 Segment。此后按新目录解析；journal 仍支持中断恢复。
-6. 目录提交后删除 B 旧副本与暂存/journal：旧页不再被目录引用，随切换清空即可回收容量。
+6. 确认目录提交后再删除 B 旧副本与暂存/journal：清理是独立阶段，必须在包含新目录的整串写入成功之后才执行（否则写失败叠加 global reset 会留下"目录指向已清空页"的悬空引用）。
 
 在第 3～5 步，正式目录可能仍指向旧 Segment，因此恢复逻辑必须优先解释 journal。只保留副本而恢复时不查 journal，仍然会造成错误读取。
 
@@ -207,6 +208,8 @@ Segment 中的数据版本与 payload 一起写入，避免每次升级还要求
 - clean tick、独立 Segment dirty 不触发主 RawMemory 重组、串行化失败后重试。
 - 旧 schema 迁移及无关根数据保留；目标环境真实 tick 末保存和容量口径。
 
+剩余验证项（后续独立任务，登记在此避免只在变更记录里出现）：verify 阶段读取异常的故障注入、主 Memory 暂存容量的专项计量。
+
 单元桩必须模拟 Segment 下一 tick 可见及 tick 末保存，而非将字符串赋值当作立即远端落盘。代码实现完成后按根 AGENTS.md 完成类型检查、测试、无密钥构建和差异检查；部署须另获明确要求。
 
 ## 11. 首版实现约定与交付范围
@@ -215,17 +218,18 @@ Segment 中的数据版本与 payload 一起写入，避免每次升级还要求
 
 - **平台端口**：RawMemory 与 Segment 的读写、激活请求通过可注入端口抽象，默认实现直连 Screeps API；可见页以 `RawMemory.segments` 的键为准，请求激活的页到下一 tick 生效。
 - **页所有权**：MemoryManager 排他占用固定页，激活请求提交精确集合而不并入外部活动页（避免超过单 tick 10 页上限）；只有"观察过内容且为空"的页可以分配，目录或 journal 引用的页视为自有，其余非空页（外部工具数据、无目录归属的历史信封）登记为保留页并给出诊断，绝不写入——没有读过内容的页不参与分配。
-- **目录与片段**：主 Memory 的 `memoryManager` 命名空间保存 schemaVersion、generationCounter、allocations、rawPartitions 与 migration，加载时逐项深度校验，非法记录直接进入故障状态；非托管根字段不缓存片段，写入时从宿主 Memory 现取现序列化，并用键集合/引用比较决定是否需要写回，因此 clean tick 不产生 RawMemory 写入，宿主替换或新增的根字段会如实合并。
+- **目录与片段**：主 Memory 的 `memoryManager` 命名空间保存 schemaVersion、generationCounter、allocations、rawPartitions 与 migration，加载时逐项深度校验（含拒绝原型相关键、容器使用 null 原型），非法记录直接进入故障状态；非托管根字段不缓存片段，写入时从宿主 Memory 现取现序列化，并用键集合/引用比较决定是否需要写回，因此 clean tick 不产生 RawMemory 写入，宿主的替换、新增与删除都会如实传播。
 - **提交**：critical 当 tick 提交、checkpoint 从首次 dirty 起算（默认 100 tick）；Raw 分区只重新序列化变化分区，Segment 分区只写自己的信封；写入失败保留 dirty 与诊断。Raw 分区的 dirty 在整串写入成功之后才清除。
 - **访问时效**：`access()` 返回的 ready 句柄绑定签发 tick 与当时的数据引用，跨 tick、分区进入 pending 或数据被重新加载后再调用会抛协议错误，避免旧句柄绕过迁移冻结。
-- **装载**：分区没有数据时按后端重读（Raw 记录或 Segment 信封），页未激活时保持 pending 并在后续 tick 重试；目录切换后分区恢复可用。
-- **版本判定**：同版本直接可用；版本 0 表示首次安装或旧布局导入的未知旧数据，按新数据初始化；旧版本升级必须有 `migrate`，没有则拒绝并给出诊断；新版本（降级）同样拒绝。
+- **装载与脏数据优先级**：heap 是稳态事实源——分区有未提交修改时，重试装载只清 pending、绝不用存储旧值覆盖内存；页短暂不可见只推迟提交。没有数据或处于损坏诊断的分区不参与搬迁，并在 `allocationSkipped` 中说明落选原因；`switch` 之后若数据仍未装载，分区显式回到 `loading` 而不是留下"无 pending 也无数据"。
+- **版本判定**：只有"完全没有历史记录"才是首次安装；任何已存储数据（含旧布局导入的版本 0，表示未知旧版本）都必须经 `migrate` 升级，缺少 migrate 一律拒绝写入并给出诊断。`initialize`/`migrate` 的返回值必须是键值对象，运行时校验。
+- **页回收**：腾退页的清空带可见性判断与错误边界，失败只记录诊断，不阻断目录切换（数据已在主 Memory 留有副本）。
 - **分配**：启动申请窗口在首个 tick 收尾封存；框架在安全模式、插件 CPU 未准入或 setup 失败时调用 `deferStartupWindow`，最多延后 `maxStartupDeferrals`（默认 10）个 tick，超限强制封存并记录诊断。priority 降序取前 10 名，同分按稳定身份排序；落选者与窗口后的新申请使用主 Memory；腾退中的页可在本批队列内复用。
-- **迁移**：串行执行 copy（暂存 + 写目标信封）→ verify（下一 tick 回读校验 owner/generation/dataVersion）→ switch（切换目录并清空被腾退的页，分区恢复可用）；代际取自持久单调计数器；数据取自存储与已冻结的内存副本，模块本轮未申请也能完成恢复；目标页非空且不属于本模块时中止搬迁。
+- **迁移**：串行执行 copy（暂存 + 写目标信封）→ verify（下一 tick 回读校验 owner/generation/dataVersion）→ switch（切换目录，分区恢复可用）→ cleanup（目录成功落盘后清空腾退页与暂存，写失败时停在 cleanup 重试）；代际取自持久单调计数器；数据取自存储与已冻结的内存副本，模块本轮未申请也能完成恢复；目标页非空且不属于本模块时中止搬迁。
 - **冻结语义**：搬迁的 copy/verify/switch 阶段，参与搬迁的分区保持 `pending('migration'|'verification')`，`access()` 不返回 ready——否则搬迁窗口内的新提交不会被搬进目标，却会在 switch 时被清 dirty 而静默丢失。中止搬迁会清 pending 并保留 dirty，提交随即恢复。
-- **故障语义**：数据损坏、归属不符或版本异常的分区进入 `recovery`，由 `getStatus().fault` 与分区 `writeError` 暴露，等待存储被修复；pending 只影响该分区的访问。
-- **旧布局导入**：只导入键值对象 payload，按原插件 ID 建立 Raw 分区并做深拷贝（不共享引用、不改写旧命名空间）。
-- **数据安全**：未知 schema、非法记录、页归属不符、版本降级、缺少 migrate 的升级一律拒绝写入并给出诊断。
+- **自愈与故障语义**：`recovery` 且无数据的分区会按 tick 重读，页内容恢复一致后自动回到 ready；`getStatus().allocations[].writeError` 记录"最近一次故障，可能已恢复"，当前可用性以 `pending` 与 `access()` 为准。
+- **旧布局导入**：只导入键值对象 payload；原型相关键（`__proto__`/`prototype`/`constructor`）跳过并记录诊断，容器使用 null 原型，避免记录静默消失或原型污染。
+- **数据安全**：未知 schema、非法记录、页归属不符、版本降级、缺少 migrate 的升级一律拒绝写入并给出诊断；旧 `leviathan` 布局做一次性深拷贝导入（不共享引用、不改写旧命名空间）。
 - **日志**：按 [Core 架构 §10](./README.md) 的通用规范接入——`logging` 注入（缺省兜底工厂）、作用域 `MemoryManager` 每实例派生一次；加载失败与不可自愈数据问题记 `error`，写入失败、页被占用、容量超限、窗口强制封存记 `warn`（同一原因一次），迁移阶段切换与恢复完成记 `info`，pending 往返记 `debug`；提交热路径不输出。结构化诊断仍以 `getStatus()` 为权威。
 
 首版未交付或待决：
@@ -233,4 +237,5 @@ Segment 中的数据版本与 payload 一起写入，避免每次升级还要求
 - 容量按字节的精确计量与目标运行时实测口径（当前按 JSON 字符数近似，超限拒绝写入）。
 - 迁移期间的在线修改（当前冻结搬迁分区）与多迁移并行。
 - 独立 heap 监控设施；旧布局导入不含 Profiler 统计与插件健康表，它们保留在原命名空间。
+- 应用层装配：`src/app` 尚未实例化 MemoryManager，正式启用需要 App 创建实例并注入 Framework；在此之前新持久化能力不进入游戏 bundle。
 - 同一 global 只应装配一个 MemoryManager；多实例会在同一命名空间上互相覆盖。
