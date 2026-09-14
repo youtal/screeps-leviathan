@@ -579,6 +579,9 @@ RIGHT: x = 49
 
 ### 7.4 流场复用
 
+参考成本场与残差复用的完整设计（数据布局、`cm` / `cmin` 门限、参考场索引与增量算法）见
+[goto 模块成本场设计](./goto-cost-field.md)。
+
 `GotoOptions.reuseFlowField` 控制是否允许复用现有流场建场。
 
 ```text

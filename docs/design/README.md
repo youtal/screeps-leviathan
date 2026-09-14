@@ -10,6 +10,7 @@
 - [Profiler](./core/profiler.md)：嵌套计时、统计存储与故障隔离。
 - [Runtime](./core/runtime.md)：共享能力和上下文组合。
 - [goto](./modules/goto.md)：跨房路由、CostMatrix、Flow Field 与避让。
+- [goto 成本场](./modules/goto-cost-field.md)：成本场与方向场布局、参考场索引、`cm` / `cmin` 与残差复用。
 - [RoomShortcuts](./modules/roomShortcuts.md)：房间查询缓存、事件更新与租约。
 
 源码和使用文档入口见 [文档总导航](../README.md)。
