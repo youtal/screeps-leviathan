@@ -1,6 +1,6 @@
 # 文档总导航
 
-[项目首页](../README.md) · [开发规范](../AGENTS.md) · [设计索引](./design/README.md) · [使用索引](./usage/README.md) · [更新记录](./changelog/README.md)
+[项目首页](../README.md) · [开发规范](../AGENTS.md) · [设计索引](./design/README.md) · [使用索引](./usage/README.md) · [测试文档](./testing/README.md) · [更新记录](./changelog/README.md)
 
 设计记录设计意图和交付状态；使用说明记录公共能力的调用方法；更新记录保存已完成变更的历史。设计中的 API 示例不表示已可调用，使用时查看对应使用说明。
 
@@ -36,6 +36,10 @@
 | --- | --- | --- |
 | 控制台格式化、表单和帮助 | [utils/console](../src/utils/console/) | 独立设计与使用说明待补充 |
 | 优先队列 | [priorityQueue.ts](../src/utils/priorityQueue.ts) | 独立设计与使用说明待补充 |
+
+## 测试环境
+
+- [Screeps 4.3 引擎集成测试](./testing/integration.md)：安装原生依赖、运行场景、目录约定、覆盖边界与排错方法。
 
 ## 路径规则
 

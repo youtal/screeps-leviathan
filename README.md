@@ -12,6 +12,17 @@ npm test
 npm run build
 ```
 
+真实 Screeps 4.3 引擎集成测试与完整本地验证分别使用：
+
+```bash
+npm run test:integration
+npm run test:all
+```
+
+集成环境需要 Node.js 22.12 以上版本（已验证 Node.js 24），首次安装还需要 Git、C/C++
+构建工具及由 uv 创建的项目内 Python 虚拟环境。完整准备步骤和场景约定见
+[集成测试环境](./docs/testing/integration.md)。
+
 `npm run build` 只构建代码，不需要 `.secret.json`。向验证环境上传代码时使用：
 
 ```bash
@@ -25,6 +36,7 @@ npm run upload:validation
 - [文档总导航](./docs/README.md)：按源码模块查找设计与使用说明。
 - [设计方案](./docs/design/README.md)
 - [使用说明](./docs/usage/README.md)
+- [测试文档](./docs/testing/README.md)
 - [更新简讯](./docs/changelog/README.md)
 
 仓库协作和自动化代理约定见 [AGENTS.md](./AGENTS.md)。
