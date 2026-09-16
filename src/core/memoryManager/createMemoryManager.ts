@@ -25,7 +25,7 @@
  *   是否重新申请，恢复时以 journal 为准。
  * - 数据安全：未知 schema、非法记录、页归属不符、版本降级、无 migrate 的升级都拒绝
  *   写入并给出诊断，不用空数据覆盖历史；旧 `leviathan` 命名空间只做一次性导入。
- * - 日志：按 Core 架构的通用规范接入——`logging` 注入（缺省兜底工厂）、作用域
+ * - 日志：按 Core 架构的通用规范接入——`logging` 由组合根显式注入、作用域
  *   `MemoryManager` 每实例派生一次；故障与状态迁移分级输出，同一原因只记一次，
  *   提交热路径不输出，日志端口异常不影响存储流程；权威诊断仍是 getStatus()。
  */
@@ -41,7 +41,6 @@ import type {
   PersistenceLayer,
 } from '@/contracts/memory';
 import type { LoggerFactory } from '@/contracts/logging';
-import { defaultLoggerFactory } from '@/core/logger';
 import { createRawStore, loadRawRoot, type RawStore } from './namespace';
 import {
   createEnvelope,
@@ -108,6 +107,11 @@ interface Partition {
 }
 
 export interface MemoryManagerOptions {
+  /**
+   * Runtime 先创建的日志工厂。该依赖必须显式提供，MemoryManager 不导入同级实现，
+   * 从而保证 Core 模块的依赖方向只由组合根决定。
+   */
+  logging: LoggerFactory;
   /** 平台端口；缺省直连 Screeps RawMemory/Segment。 */
   platform?: MemoryPlatform;
   /**
@@ -125,12 +129,6 @@ export interface MemoryManagerOptions {
   maxStartupDeferrals?: number;
   /** 等待页可见的最长 tick 数；超过仍未观察到全部页时放弃 Segment 分配。 */
   maxObservationTicks?: number;
-  /**
-   * 日志工厂，由 Runtime/App 与 Framework 共用同一个实例；缺省使用内核兜底工厂
-   * （只服务独立调用与测试）。作用域固定为 `MemoryManager`，每个实例只派生一次，
-   * 且只在状态迁移与故障上输出——提交热路径不打日志（见 Core 架构的通用规范）。
-   */
-  logging?: LoggerFactory;
 }
 
 /** 管理器对外能力：MemoryHost 生命周期 + 诊断快照。 */
@@ -139,7 +137,7 @@ export interface MemoryManager extends MemoryHost {
 }
 
 export const createMemoryManager = (
-  options: MemoryManagerOptions = {}
+  options: MemoryManagerOptions
 ): MemoryManager => {
   const platform = options.platform ?? createScreepsPlatform();
   const segmentIds = options.segmentIds ?? SEGMENT_IDS;
@@ -148,7 +146,7 @@ export const createMemoryManager = (
   const getHostMemory = options.getHostMemory ?? (() => undefined);
 
   /** 作用域日志器：固定名称、每实例一份；日志失败由 Logger 自身吞掉，不影响存储流程。 */
-  const log = (options.logging ?? defaultLoggerFactory).scope('MemoryManager');
+  const log = options.logging.scope('MemoryManager');
 
   const partitions = new Map<string, Partition>();
   let store: RawStore | null = null;

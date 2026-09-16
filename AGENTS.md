@@ -106,3 +106,11 @@ git diff --check
 - 其它持久化旁路：自行解析存储文本、把跨 global 状态塞进外部共享对象等。
 
 需要跨 global 保留状态的模块，必须通过 `context.memory(localId, options)` 申请分区，在 `pending` 时只跳过依赖存储的行为，其余逻辑照常执行。审查与自动化检查中发现的越界访问按阻断问题处理，而不是风格问题；`test/memoryBoundary.test.ts` 会扫描 `src/` 并在越界时报错。
+
+## 10. Core 同级依赖边界
+
+`src/core/` 下的同级能力模块不得直接导入彼此的具体实现。模块之间只允许依赖 `src/contracts/` 发布的协议，并由调用方显式注入所需实例；严禁在模块内部通过默认参数、模块级单例或临时工厂创建同级依赖的兜底实现。
+
+`src/core/runtime` 是唯一的 Core 组合根。它可以导入 Logger、EventBus、MemoryManager、Profiler 与 ErrorMapper 的具体工厂，按依赖有向无环图从前序到后序创建实例，并将完整 Runtime 交给 Framework。前序模块必须严格不依赖后序模块；Framework 只消费 Runtime 契约，不得再创建或替换其中的 Core 能力。
+
+独立单元测试也必须在测试装配边界显式提供依赖，不能以恢复生产代码中的隐藏缺省依赖换取测试便利。`test/coreDependencyBoundary.test.ts` 会扫描 Core 源码中的跨模块导入并在越界时报错。

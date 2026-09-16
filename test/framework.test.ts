@@ -3,9 +3,15 @@
  * 使用最小 Game 桩推进 tick，测试不访问真实游戏或网络；旧持久化实现测试随实现移除。
  * Memory/RawMemory 禁止访问测试独立覆盖停用行为；健康状态与 Profiler 仅在实例内保存。
  */
-import { createFramework, createErrorMapper } from '@/core/framework';
-import { createMemoryManager } from '@/core/memoryManager';
-import type { MemoryAccessor } from '@/contracts/memory';
+import { createFramework } from '@/core/framework';
+import { createErrorMapper } from '@/core/errorMapper';
+import {
+  createMemoryManager as createCoreMemoryManager,
+  type MemoryManagerOptions,
+} from '@/core/memoryManager';
+import { createRuntime } from '@/core/runtime';
+import { createLogging } from '@/core/logger';
+import type { MemoryAccessor, MemoryHost } from '@/contracts/memory';
 import type { MemoryPlatform } from '@/core/memoryManager/types';
 import type { LeviathanPlugin, PluginContext } from '@/contracts';
 import { createProfiler } from '@/core/profiler';
@@ -13,6 +19,10 @@ import type { ProfilerMemory } from '@/core/profiler/types';
 import type { EnvMethods } from '@/contracts';
 import { createIntentBroker } from '@/core/framework/intentBroker';
 import { createCpuGovernor } from '@/core/framework/cpuGovernor';
+
+/** 测试可独立创建存储，但仍必须在测试组合边界显式注入 Logger。 */
+const createMemoryManager = (options: Omit<MemoryManagerOptions, 'logging'>) =>
+  createCoreMemoryManager({ ...options, logging: createLogging() });
 
 /** Game/RawMemory 测试桩；raw 读写计数用于断言框架完全不接触存储。 */
 const harness = (plugins: LeviathanPlugin[] = [], extra: any = {}) => {
@@ -34,14 +44,44 @@ const harness = (plugins: LeviathanPlugin[] = [], extra: any = {}) => {
   });
   const read = jest.fn(() => raw);
   (globalThis as any).RawMemory = { get: read, set: write };
+  /** 大多数 Framework 用例不测试持久化：注入显式空端口，保留旧用例的无存储语义。 */
+  const unassembledMemory: MemoryHost = {
+    begin: () => undefined,
+    end: () => undefined,
+    deferStartupWindow: () => undefined,
+    bind: () => () => {
+      throw new Error('MemoryManager is not assembled');
+    },
+  };
+  const {
+    runtime: suppliedRuntime,
+    logging,
+    memory,
+    profiler,
+    enableProfiler,
+    loadSourceMap,
+    report: suppliedReport,
+    ...frameworkOptions
+  } = extra;
+  const runtime =
+    suppliedRuntime ??
+    createRuntime({
+      getGame: () => game,
+      logging,
+      memory: memory ?? unassembledMemory,
+      profiler,
+      enableProfiler,
+      report: suppliedReport ?? report,
+      loadSourceMap:
+        loadSourceMap ??
+        (() => {
+          throw new Error('no map');
+        }),
+    });
   const framework = createFramework({
     plugins,
-    getGame: () => game,
-    report,
-    loadSourceMap: () => {
-      throw new Error('no map');
-    },
-    ...extra,
+    runtime,
+    ...frameworkOptions,
   });
   return {
     framework,
@@ -691,7 +731,7 @@ describe('ErrorMapper', () => {
       sources: ['src/example.ts'],
       mappings: 'AAAA',
     }));
-    const mapper = createErrorMapper(load, jest.fn());
+    const mapper = createErrorMapper(createLogging(), load, jest.fn());
     expect(mapper.mapStack('at run (main:1:1)\nat host (other:2:3)')).toBe(
       'at run (src/example.ts:1:1)\nat host (other:2:3)'
     );
@@ -702,6 +742,7 @@ describe('ErrorMapper', () => {
   /** 加载 map 与上报日志都抛错时，capture 仍要返回原始失败信息；错误对象的 toString 抛错也不能让 capture 本身抛出。 */
   it('preserves business failure if loading, reporting or string conversion fails', () => {
     const mapper = createErrorMapper(
+      createLogging(),
       () => {
         throw new Error('map');
       },
@@ -740,9 +781,10 @@ describe('ErrorMapper', () => {
       info: jest.fn(),
       report: jest.fn(),
     }));
-    const mapper = createErrorMapper(() => ({}), undefined, {
-      scope,
-    } as unknown as Parameters<typeof createErrorMapper>[2]);
+    const mapper = createErrorMapper(
+      { scope } as unknown as Parameters<typeof createErrorMapper>[0],
+      () => ({})
+    );
 
     const meta = { tick: 1, pluginId: 'a', phase: 'tickExecute' } as const;
     mapper.capture(meta, () => {

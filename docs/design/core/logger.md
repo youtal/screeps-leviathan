@@ -1,6 +1,6 @@
 # Logger 设计
 
-交付状态：等级、作用域、格式化、双通道输出与 Runtime/Framework 装配已交付；日志限流/采样、结构化字段与内核插件化未交付。
+交付状态：等级、作用域、格式化、双通道输出与 Runtime 单一组合根装配已交付；日志限流/采样与结构化字段未交付。
 
 Logger 是基础输出能力，负责日志等级、模块作用域、格式化及输出端口，不参与具体游戏对象管理和业务决策。公共调用协议由 [contracts/logging.ts](../../../src/contracts/logging.ts) 发布，消费者不依赖输出实现；模块目录为 `src/core/logger`。
 
@@ -24,7 +24,7 @@ Runtime
 
 `createLogging(options)` 返回 `LoggerFactory`；`scope(name, options?)` 按作用域派生 `Logger`。装配在 App/Runtime 实例化阶段完成一次，运行期不再读取配置；作用域只能逐字段覆盖等级与邮件开关。
 
-Framework 在统一装配交付前可以自建实例，但仍接受可选注入：注入时与 Runtime 共用同一工厂，未注入时使用 `defaultLoggerFactory` 兜底，保证 `createFramework`、`createBus`、`createEnvMethods` 等入口可独立使用与测试。内核对 Logger 采用强制装配语义：集合固定，不通过普通插件的 `disable/unregister` 卸载；停止输出属于配置行为（等级关闭），不等于移除能力。
+Runtime 创建唯一 LoggerFactory，再将它显式注入所有同级能力。EventBus、MemoryManager、Profiler、ErrorMapper 与环境适配器不得导入 Logger 具体实现或建立默认单例；独立测试必须在测试组合边界提供工厂。内核对 Logger 采用强制装配语义：集合固定，不通过普通插件的 `disable/unregister` 卸载；停止输出属于配置行为（等级关闭），不等于移除能力。
 
 内核模块与普通模块的接入方式统一遵循 [Core 架构 §10](./README.md) 的通用规范：注入工厂、固定作用域且每实例派生一次、只在状态迁移与故障上输出、一次事件一次、日志不作为唯一诊断。
 
@@ -67,5 +67,4 @@ Framework 在统一装配交付前可以自建实例，但仍接受可选注入�
 
 - 高频 `error` 的限流/采样策略（按作用域或按标签去重、每分钟上限）尚未设计，当前依赖调用方自律与默认等级。
 - 是否需要结构化字段（tick、pluginId、分类）而非单一字符串；若引入，需要同时定义控制台渲染与邮件文本两种格式。
-- Logger 是否提升为带 manifest 的内核插件以纳入统一装配校验；当前以内核能力（工厂 + 注入）形式交付，不注册到插件注册表。
-- **单一组合根（待决）**：正式 App 只允许一个内核装配入口。设计取向是 Runtime 以完整的内核运行时对象交付能力集合（logging、事件总线、Profiler、错误映射与存储端口），Framework 接受该对象并消费其中的能力，而不是分别接受 `createContext` 与 `logging`；各能力的兜底实例只服务独立调用与测试，不构成第二条正式装配路径。该形态与 Core 架构的统一装配一并交付。
+- Logger 保持工厂式内核能力，不注册到普通插件注册表；Runtime 负责其强制装配与实例唯一性。

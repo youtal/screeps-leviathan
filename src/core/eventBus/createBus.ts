@@ -2,7 +2,7 @@
  * 文件摘要：实现支持 global、room 与 group 三种作用域的同步内存消息总线。
  *
  * core/eventBus 的运行时实现：types.ts 定义事件协议与存储结构，本文件按协议
- * 存取订阅者。总线由 createRuntime 或 Framework 创建一次并在模块间共享，事件
+ * 存取订阅者。总线由 createRuntime 创建一次并在模块间共享，事件
  * 常量与类型可从模块入口导入；诊断日志走装配方注入的 LoggerFactory。
  *
  * 输入是 subscribe/unsubscribe/publish 传入的作用域、事件名与数据；输出是三个
@@ -22,7 +22,6 @@ import type {
   EventType,
   LoggerFactory,
 } from '@/contracts';
-import { defaultLoggerFactory } from '@/core/logger';
 import { ListenersMap, ListenersStore } from './types';
 
 /**
@@ -59,12 +58,10 @@ const scopeLabel = (scope: EventScope): string => {
  * 工厂本身只创建闭包状态，不订阅、不发布，也不访问 Game 或 Memory：
  * 订阅表随实例驻留 heap，global reset 后由装配方（Runtime 或 Framework）重新创建。
  *
- * logging 由装配方注入，使总线的诊断日志与模块日志共用同一套等级、端口和邮件
- * 策略；未注入时使用 core/logger 的兜底工厂，保证 createBus() 仍可独立调用。
+ * logging 由装配方显式注入，使总线的诊断日志与模块日志共用同一套等级、端口和
+ * 邮件策略。EventBus 不导入同级 Logger 实现，也不在缺少依赖时创建隐藏实例。
  */
-export const createBus = (
-  logging: LoggerFactory = defaultLoggerFactory
-): Bus => {
+export const createBus = (logging: LoggerFactory): Bus => {
   /**
    * 总线日志使用 EventBus 作用域与装配方配置的等级（info 默认关闭），正常运行
    * 时不会被订阅/发布明细刷屏；排错时由装配方打开对应等级即可观察调用链。

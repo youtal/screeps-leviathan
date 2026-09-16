@@ -1,6 +1,6 @@
 # 跨模块契约设计
 
-交付状态：契约目录、公共类型抽离、实现显式类型承诺、编译期回归与 MemoryManager 运行时实现均已交付；统一内核装配未交付。
+交付状态：契约目录、公共类型抽离、实现显式类型承诺、CoreRuntime 与编译期回归均已交付。
 
 ## 定位与依赖原则
 
@@ -20,7 +20,7 @@
 | `errorMapper.ts` | Phase、PluginFailure、ExecutionResult、ErrorMapper、诊断及计时回调 |
 | `intent.ts` | GameIntent、IntentReceipt、CpuBudget |
 | `plugin.ts` | 清单、生命周期、上下文、框架配置与管理接口 |
-| `runtime.ts` | 模块上下文与派生工厂 |
+| `runtime.ts` | CoreRuntime、模块上下文与派生工厂 |
 | `memory.ts` | JSON、深只读、申请配置、稳定 Accessor、局部就绪联合与宿主生命周期端口 MemoryHost |
 
 Profiler 统计记录和存储容器、EventBus 监听器索引、Framework 健康表、Goto 缓存及偏好 schema 归各自模块。构造参数包含内部数据结构时保留在模块内，不强制发布所有工厂参数。

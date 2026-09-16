@@ -2,7 +2,14 @@
  * 文件摘要：保存 Runtime 装配参数，统计载荷属于 Profiler 内部模型。
  * 仅维护模块内部类型及契约兼容出口，不创建运行时状态或调用宿主。
  */
-import type { Bus, LoggerFactory, MemoryHost, Profiler } from '@/contracts';
+import type {
+  Bus,
+  ErrorMapper,
+  LoggerFactory,
+  MemoryHost,
+  PluginFailure,
+  Profiler,
+} from '@/contracts';
 import type { ProfilerMemory } from '../profiler/types';
 export type {
   Wrap,
@@ -18,8 +25,8 @@ export type {
  *
  * 这些选项主要服务于测试和未来的不同运行模式：
  * - bus：允许注入测试总线或已有总线。
- * - logging：注入 Runtime 组装的日志工厂；所有派生上下文与内核消费者共用它，
- *   缺省使用 core/logger 的兜底工厂（只服务独立调用与测试）。
+ * - logging：注入 Runtime 使用的日志工厂；省略时由 Runtime 创建唯一默认实例，
+ *   再显式交给所有派生上下文与 Core 消费者。
  * - memory：注入 Runtime 组装的 MemoryManager；派生上下文会按模块名绑定申请入口。
  *   独立 Runtime 不驱动 tick 生命周期，调用方需自行在边界调用它的 begin/end。
  * - profiler：允许禁用、替换或复用 profiler；注入后 enableProfiler 不再生效。
@@ -38,6 +45,13 @@ export interface RuntimeOptions {
   logging?: LoggerFactory;
   memory?: MemoryHost;
   profiler?: Profiler | null;
+  errorMapper?: ErrorMapper;
+  /** Framework 与 Profiler 读取当前 tick Game 的统一平台入口。 */
+  getGame?: () => Game;
+  /** ErrorMapper 首次处理堆栈时同步取得 source map；省略时加载 main.js.map。 */
+  loadSourceMap?: () => any;
+  /** 同步诊断出口；省略时由 ErrorMapper 记录 error 日志。 */
+  report?: (failure: PluginFailure) => void;
   enableProfiler?: boolean;
   getProfilerMemory?: () => ProfilerMemory;
   markProfilerMemoryDirty?: () => void;

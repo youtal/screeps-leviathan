@@ -8,6 +8,9 @@ import type { Profiler } from './profiler';
 import type { EnvContext } from './environment';
 import type { LogOptions } from './logging';
 import type { ApplyMemoryAccessor } from './memory';
+import type { LoggerFactory } from './logging';
+import type { MemoryHost } from './memory';
+import type { ErrorMapper } from './errorMapper';
 /**
  * 派生模块上下文时的可选配置。
  *
@@ -43,16 +46,24 @@ export interface ModuleContext extends EnvContext {
   memory?: ApplyMemoryAccessor;
 }
 
-/**
- * createRuntime 的返回类型。
- *
- * 当前 runtime 不直接暴露 root context，而是返回一个模块上下文工厂。
- * 这样 app 层可以创建唯一 root runtime，同时普通模块只能拿到派生后的
- * ModuleContext，避免直接操作 root 单例生命周期。
- *
- * options 只影响本次派生出的 env（日志开关与 notify），共享单例不随调用改变。
- */
 export type CreateModuleContext = (
   moduleName: string,
   options?: ModuleContextOptions
 ) => ModuleContext;
+
+/**
+ * Core 组合根一次性创建并发布的完整运行时。
+ *
+ * 具体 Core 模块只实现各自契约，不直接导入同级实现；Framework 也只消费本契约，
+ * 不再自行创建基础能力。这样实例唯一性、初始化顺序和依赖方向都由 Runtime 集中保证。
+ */
+export interface CoreRuntime {
+  /** 始终在调用时取得本 tick 的 Game，禁止消费者跨 tick 保存返回对象。 */
+  readonly getGame: () => Game;
+  readonly logging: LoggerFactory;
+  readonly bus: Bus;
+  readonly memory: MemoryHost;
+  readonly profiler: Profiler | null;
+  readonly errorMapper: ErrorMapper;
+  readonly createContext: CreateModuleContext;
+}

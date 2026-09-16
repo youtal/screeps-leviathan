@@ -16,11 +16,25 @@
  *
  * 运行方式：npm test（ts-jest，testEnvironment=node）；不读写真实游戏存储。
  */
-import { createMemoryManager } from '@/core/memoryManager';
+import {
+  createMemoryManager as createCoreMemoryManager,
+  type MemoryManagerOptions,
+} from '@/core/memoryManager';
 import { createLogging } from '@/core/logger';
 import type { MemoryAccessor, DeepReadonly } from '@/contracts/memory';
 import type { LogOptions, LoggerFactory } from '@/contracts/logging';
 import type { MemoryPlatform } from '@/core/memoryManager/types';
+
+type TestMemoryManagerOptions = Omit<MemoryManagerOptions, 'logging'> & {
+  logging?: LoggerFactory;
+};
+
+/** 测试装配器显式补齐 Logger；被测 MemoryManager 本身不再持有同级模块兜底依赖。 */
+const createMemoryManager = (options: TestMemoryManagerOptions) =>
+  createCoreMemoryManager({
+    ...options,
+    logging: options.logging ?? createLogging(),
+  });
 
 /** 假平台：raw 整串 + 持久化的 Segment 内容 + 一 tick 延迟的可见性。 */
 const createPlatform = () => {

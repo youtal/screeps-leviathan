@@ -18,7 +18,7 @@
 | Runtime | [core/runtime](../src/core/runtime/) | [设计](./design/core/runtime.md) | [使用](./usage/core/runtime.md) |
 | Profiler | [core/profiler](../src/core/profiler/) | [设计](./design/core/profiler.md) | [使用](./usage/core/profiler.md) |
 | EventBus | [core/eventBus](../src/core/eventBus/) | 独立文档待补充；分类见 Core 架构 | 待补充 |
-| ErrorMapper | [errorMapper.ts](../src/core/framework/errorMapper.ts) | 协议见 Framework 设计；分类见 Core 架构 | 公共出口说明待补充 |
+| ErrorMapper | [core/errorMapper](../src/core/errorMapper/) | [设计](./design/core/errorMapper.md) | [使用](./usage/core/errorMapper.md) |
 | Logger | [core/logger](../src/core/logger/) | [设计](./design/core/logger.md) | [使用](./usage/core/logger.md) |
 | MemoryManager | [core/memoryManager](../src/core/memoryManager/) | [设计](./design/core/memoryManager.md) | [使用](./usage/core/memoryManager.md) |
 

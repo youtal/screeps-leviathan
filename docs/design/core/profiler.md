@@ -1,6 +1,6 @@
 # Profiler 设计
 
-交付状态：函数计时与报告已交付；统一 Runtime 内核装配与 MemoryAccessor 持久化接入未交付。
+交付状态：函数计时、报告与统一 Runtime 装配已交付；MemoryAccessor 持久化接入未交付。
 
 Profiler 使用函数包装、CPU 起止差值和闭包调用栈统计 totalTime/selfTime/calls。父调用的 selfTime 扣除已被 Profiler 包装的子调用时间；未包装的辅助逻辑仍计入父级自身时间。
 

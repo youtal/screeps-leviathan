@@ -5,18 +5,11 @@
  * 不读写 RawMemory，也不解释持久化数据；global reset 后按 journal 与目录恢复。
  * Game 对象不得跨 tick 保存；本 tick 失败集合和意图每轮重建，注册/计时缓存随实例存活。
  */
-import { createBus } from '../eventBus';
 import type { Bus, EventScope, EventType, DataByEvent } from '@/contracts';
-import { createLogging } from '@/core/logger';
-import { createProfiler } from '../profiler';
-import { createEnvMethods } from '../runtime/env';
 import { createCpuGovernor } from './cpuGovernor';
-import { createErrorMapper } from './errorMapper';
 import { createIntentBroker } from './intentBroker';
 import { validId } from './pluginRegistry';
-import type { ApplyMemoryAccessor } from '@/contracts/memory';
 import type { Framework } from '@/contracts/plugin';
-import type { ProfilerMemory } from '../profiler/types';
 import { createPluginRegistry, PluginEntry } from './pluginRegistry';
 import type {
   FrameworkOptions,
@@ -27,33 +20,16 @@ import type {
 } from '@/contracts';
 import type { PluginHealth } from './types';
 
-/** 创建独立的 heap 实例；首次 loop 激活插件和统计器，所有状态在 global reset 后丢失。 */
-export const createFramework = (options: FrameworkOptions = {}): Framework => {
-  const getGame = options.getGame ?? (() => Game);
+/** 创建独立的 heap 调度实例；首次 loop 激活插件，所有调度状态在 global reset 后丢失。 */
+export const createFramework = (options: FrameworkOptions): Framework => {
+  const { runtime } = options;
+  const getGame = runtime.getGame;
   /** 健康表和统计容器随实例创建，跨 tick 复用；不恢复磁盘数据。 */
   const healthTable = new Map<string, PluginHealth>();
-  const profilerMemory: ProfilerMemory = {};
   const cpu = createCpuGovernor(getGame, options.reserveCpu, options.minBucket);
-  /**
-   * 日志工厂在装配阶段创建一次：注入的工厂与 Runtime 共用一套等级、输出端口和
-   * 邮件策略；缺省使用 core/logger 兜底工厂，保持 createFramework 可独立创建。
-   * 错误映射、事件总线、Profiler 与各插件 env 都从它派生作用域日志器。
-   */
-  const logging = options.logging ?? createLogging();
-  /**
-   * 未装配 MemoryManager 时的申请入口：直接抛配置错误，而不是返回永久 pending 的
-   * 句柄——插件依赖持久状态时必须显式装配存储，不能把配置问题伪装成等待。
-   */
-  const unboundMemory: ApplyMemoryAccessor = () => {
-    throw new Error('MemoryManager is not assembled');
-  };
-  const errors = createErrorMapper(
-    options.loadSourceMap,
-    options.report,
-    logging
-  );
+  /** Core 基础能力均由唯一 Runtime 注入；Framework 不创建任何同级模块实例。 */
+  const errors = runtime.errorMapper;
   const registry = createPluginRegistry();
-  const bus = createBus(logging);
   /** 连续失败达到该值即熔断；熔断插件不参与后续 tick，必须显式 recover 才重新准入。 */
   const threshold = options.failureThreshold ?? 3;
   if (!Number.isInteger(threshold) || threshold < 1)
@@ -71,8 +47,7 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
   >();
   /** setup 尚未登记 initialized 时暂存清理函数，以便部分初始化失败也能逆序释放。 */
   let activeCleanup: (() => void)[] | undefined;
-  let profiler = options.profiler;
-  let profileReady = false;
+  const profiler = runtime.profiler;
   /** 每个固定标签只 wrap 一次；Profiler 延迟就绪时清空，之后随实例存活。 */
   const wrappers = new Map<string, (callback: () => any) => any>();
   /**
@@ -201,28 +176,12 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
     return record;
   };
   /**
-   * 为一次插件激活创建能力对象，兼容原有 ModuleContext 业务工厂。
-   * Game 查询方法在调用时读取当前 Game；getObjectById 的断言保留宿主泛型重载签名。
-   * 自定义 createContext 可替换基础环境/总线，但仍会被生命周期权限代理包裹。
+   * 为一次插件激活创建能力对象。基础上下文必须来自 Runtime，Framework 再叠加
+   * 生命周期权限、服务、意图与自动清理代理，不允许在这里替换 Core 实例。
    */
   const context = (plugin: LeviathanPlugin): PluginContext => {
     const id = plugin.manifest.id;
-    const base = options.createContext
-      ? options.createContext(id)
-      : {
-          bus,
-          profiler: profiler ?? null,
-          env: {
-            ...createEnvMethods(id, {}, undefined, logging),
-            getGame,
-            getRoom: (name: string) => getGame().rooms[name],
-            getCreep: (name: string) => getGame().creeps[name],
-            getPowerCreep: (name: string) => getGame().powerCreeps[name],
-            getFlag: (name: string) => getGame().flags[name],
-            getObjectById: ((objectId: Id<_HasId>) =>
-              getGame().getObjectById(objectId)) as typeof Game.getObjectById,
-          },
-        };
+    const base = runtime.createContext(id);
     // 框架代理订阅自动归属插件；停用后释放。迟到的事件不得唤醒不可用插件。
     const scopedBus: Bus = {
       ...base.bus,
@@ -254,7 +213,7 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
       events: scopedBus,
       pluginId: id,
       cpu,
-      memory: options.memory ? options.memory.bind(id) : unboundMemory,
+      memory: runtime.memory.bind(id),
       services: {
         // unknown 服务载荷只在出口断言为 T；这不是运行时结构校验，使用者负责服务协议。
         get: <T>(name: string): T => {
@@ -357,7 +316,7 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
       // 用错误边界包裹：存储异常按内核故障记录并进入安全模式，绝不把异常留在
       // tick 之外（否则 running 无法复位，之后每个 tick 都会被判定为不可重入）。
       const memoryBegin = invoke('framework', 'framework', () =>
-        options.memory?.begin(getGame().time)
+        runtime.memory.begin(getGame().time)
       );
       if (!memoryBegin.ok) safeMode = true;
       // 先摘下本批队列；执行期间新排队的命令留给下一 tick，失败批次丢弃而不自动重试。
@@ -379,27 +338,6 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
         ordered.map((e) => [e.plugin.manifest.id, e.plugin])
       );
       registryReady = true;
-      // 延迟到 loop 创建 Profiler，避免模块导入或构造期访问 Game。
-      if (!profileReady) {
-        try {
-          profiler =
-            options.profiler !== undefined
-              ? options.profiler
-              : createProfiler({
-                  env: {
-                    ...createEnvMethods('Profiler', {}, undefined, logging),
-                    getGame,
-                  },
-                  getMemory: () => profilerMemory,
-                  enable: options.enableProfiler ?? false,
-                });
-        } catch {
-          // 性能组件是可选观测设施；初始化失败也必须保留异常隔离与主循环。
-          profiler = null;
-        }
-        profileReady = true;
-        wrappers.clear();
-      }
       const enabled = new Set(
         ordered
           .filter((e) => e.enabled && !health(e.plugin.manifest.id).circuitOpen)
@@ -566,10 +504,10 @@ export const createFramework = (options: FrameworkOptions = {}): Framework => {
         }
         // 提前中止（安全模式）、插件因 CPU 未准入或 setup 失败时都不封存启动申请
         // 窗口，留给后续 tick 继续收集；依赖未就绪导致的跳过不作为申请缺失处理。
-        if (safeMode || startupPending) options.memory?.deferStartupWindow();
+        if (safeMode || startupPending) runtime.memory.deferStartupWindow();
         // Memory 收尾在插件 end 与健康累计之后：封存窗口、推进迁移、提交 dirty 分区。
         const memoryEnd = invoke('framework', 'tickEnd', () =>
-          options.memory?.end(getGame().time)
+          runtime.memory.end(getGame().time)
         );
         if (!memoryEnd.ok) safeMode = true;
       } finally {

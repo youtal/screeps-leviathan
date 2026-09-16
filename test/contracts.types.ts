@@ -9,6 +9,7 @@
  */
 import type {
   Bus,
+  FrameworkOptions,
   Logger,
   LoggerFactory,
   LoggingOptions,
@@ -56,6 +57,10 @@ const manifest: PluginManifest = {
 };
 void incompleteLogger;
 void manifest;
+
+// @ts-expect-error Framework 必须消费完整 CoreRuntime，不能自行补建基础能力
+const incompleteFrameworkOptions: FrameworkOptions = { plugins: [] };
+void incompleteFrameworkOptions;
 
 /** 日志装配与作用域协议的正例：装配级配置 + 作用域覆盖都应可组合。 */
 export function verifyLoggingContract(factory: LoggerFactory): Logger {

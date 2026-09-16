@@ -13,6 +13,9 @@
  * Framework 的 PluginContext 取得能力，而不是直接使用该工厂。
  */
 export * from './eventBus';
+export * from './errorMapper';
 export * from './framework';
+export * from './logger';
+export * from './memoryManager';
 export * from './profiler';
 export * from './runtime';

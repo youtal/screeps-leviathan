@@ -6,6 +6,7 @@ Framework 工厂为 `createFramework`，实例提供可直接导出的 `loop`。
 
 ```ts
 import { createFramework } from '@/core/framework';
+import { createRuntime } from '@/core/runtime';
 import type { LeviathanPlugin } from '@/contracts/plugin';
 
 // 可重建缓存仅在本 global 内存活，不是持久化数据。
@@ -35,7 +36,8 @@ const counter: LeviathanPlugin = {
   },
 };
 
-const framework = createFramework({ plugins: [counter] });
+const runtime = createRuntime();
+const framework = createFramework({ runtime, plugins: [counter] });
 export const loop = framework.loop;
 ```
 
@@ -92,13 +94,13 @@ framework.register({
 
 Context 可以跨 tick 保留；停用后不应继续使用，Game 对象不能跨 tick 保存。
 
-## 持久化停用边界
+## 持久化边界
 
-Framework 不读取或写入 RawMemory，也不挂载全局 Memory。插件上下文不提供 persistence，清单不接受 persistence 配置，插件不接受 migrate 钩子；版本只作为正整数协议标识，不触发数据迁移。旧 JavaScript 插件携带这些字段时，注册批次会明确失败。
+Framework 不读取或写入 RawMemory，也不挂载全局 Memory。它只驱动 Runtime 提供的 MemoryHost，并通过 `context.memory` 为插件绑定 owner。清单不接受 persistence 配置，插件不接受框架级 migrate 钩子；分区版本和迁移由 MemoryManager 的申请选项表达。
 
-健康记录和默认 Profiler 累计值只存在于实例 heap，global reset 后丢失。业务自己的闭包可保存跨 tick 缓存，但不能依赖它跨 reset 恢复。已有游戏存储不会被清理或覆盖，也不会被框架读取恢复。
+健康记录和默认 Profiler 累计值只存在于实例 heap，global reset 后丢失。业务自己的闭包可保存跨 tick 缓存，但不能依赖它跨 reset 恢复。
 
-MemoryManager 仅有占位目录；[Memory 类型契约](../../usage/contracts.md) 不代表可调用的实现，不应导入不存在的工厂。
+Memory 的申请、pending 处理与提交规则见 [MemoryManager 使用说明](./memoryManager.md)。
 
 ## 意图提交和核验
 
@@ -132,18 +134,13 @@ onTickExecute(context) {
 
 | 配置               | 默认值                  | 说明                                           |
 | ------------------ | ----------------------- | ---------------------------------------------- |
+| `runtime`          | 必填                    | 完整 Core Runtime；Framework 不创建其中的能力  |
 | `plugins`          | `[]`                    | 初始插件列表                                   |
-| `enableProfiler`   | `false`                 | 默认统计器初始开关                             |
-| `profiler`         | 自动创建                | 注入已有统计器，null 关闭                      |
 | `reserveCpu`       | `5`                     | 收尾预留 CPU                                   |
 | `minBucket`        | `1000`                  | 普通插件准入下限                               |
 | `failureThreshold` | `3`                     | 连续失败 tick 的熔断阈值                       |
-| `getGame`          | 全局 Game               | 测试环境注入                                   |
-| `logging`          | 兜底日志工厂            | 注入 Runtime 的 LoggerFactory；省略时用内核兜底工厂 |
-| `memory`           | 未装配                  | 注入 MemoryManager；框架按 pluginId 绑定申请入口并在 tick 边界驱动 begin/end |
-| `createContext`    | Framework 默认上下文    | 高级依赖注入；各上下文应共享同一总线           |
-| `report`           | ErrorMapper 作用域日志  | 结构化失败处理函数；省略时走注入日志工厂       |
-| `loadSourceMap`    | require('main.js.map')  | 同步加载当前构建的 source map                  |
+
+Profiler、Logger、MemoryManager、ErrorMapper、Game 访问器及 source map/report 选项在创建 Runtime 时配置，不能通过 `FrameworkOptions` 分散替换。
 
 `critical` 仅给基础服务使用。其失败会阻止剩余业务提交，熔断后需显式 recover。安全模式不会自动执行生存策略。
 

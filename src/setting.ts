@@ -26,9 +26,8 @@ export const DEFAULT_LOG_CONFIG = {
 /**
  * Profiler 默认关闭，避免开发者未显式开启时承担每次函数调用的 CPU 取样成本。
  *
- * 目前只有独立 Runtime 工厂（core/runtime/createRuntime）读取该值；Framework 内置
- * Profiler 的初始开关来自 createFramework 的 options.enableProfiler，内核默认同样是
- * false。两处默认值需要保持一致，改动时请同时确认。
+ * Runtime 工厂（core/runtime/createRuntime）读取该值并创建共享 Profiler；Framework
+ * 只消费 Runtime 中的实例，不维护第二份默认开关。
  */
 
 export const DEFAULT_PROFILER_ENABLE = false;

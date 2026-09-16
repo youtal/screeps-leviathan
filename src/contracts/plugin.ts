@@ -3,12 +3,10 @@
  * 属于 contracts 的编译期公共约定；只依赖其他契约或宿主类型，不导入具体实现。
  * 实现通过显式类型标注承诺结构，调用者通过 import type 引用；不创建状态或运行时副作用。
  */
-import type { ModuleContext, CreateModuleContext } from './runtime';
-import type { Profiler } from './profiler';
+import type { ModuleContext, CoreRuntime } from './runtime';
 import type { CpuBudget, GameIntent, IntentReceipt } from './intent';
 import type { PluginFailure } from './errorMapper';
-import type { LoggerFactory } from './logging';
-import type { ApplyMemoryAccessor, MemoryHost } from './memory';
+import type { ApplyMemoryAccessor } from './memory';
 /** 注册描述；依赖字段引用插件 ID，provides 字段声明服务名，两者并非同一命名空间。 */
 export interface PluginManifest {
   /** 插件和诊断的归属键；注册后保持稳定。 */
@@ -72,32 +70,18 @@ export interface LeviathanPlugin {
   onTickEnd?(context: PluginContext): void;
 }
 
-/** 可选依赖注入及运行策略；默认依赖延迟到 loop 使用，导入模块不触发 Memory 解析。 */
+/** Framework 运行策略；所有基础能力必须由 Core Runtime 显式提供。 */
 export interface FrameworkOptions {
+  /** 唯一 Core Runtime；Framework 只消费，不创建或替换其中的同级能力。 */
+  runtime: CoreRuntime;
   /** 初始注册队列；完整依赖图到首次 tick 边界才验证。 */
   plugins?: readonly LeviathanPlugin[];
-  /** 每次返回当前 Game，避免跨 tick 捕获过期对象；测试可注入模拟环境。 */
-  getGame?: () => Game;
-  /** 注入 Runtime 组装的日志工厂；缺省使用 core/logger 兜底工厂，仅供独立调用与测试。 */
-  logging?: LoggerFactory;
-  /** 注入 Runtime 组装的 MemoryManager；框架在 tick 边界驱动其生命周期并为插件绑定申请入口。 */
-  memory?: MemoryHost;
-  /** 提供基础 Runtime；框架仍会代理订阅、追加服务和意图能力。 */
-  createContext?: CreateModuleContext;
-  /** undefined 使用内置实例，null 禁用观测；均不影响错误隔离。 */
-  profiler?: Profiler | null;
-  /** 内置 Profiler 的初始开关，默认 false；对注入实例无效。 */
-  enableProfiler?: boolean;
   /** 默认保留 5 CPU 用于收尾；这是准入阈值，不保证硬超时后还能执行 finally。 */
   reserveCpu?: number;
   /** 普通插件的 bucket 下限，默认 1000；关键插件仍受硬预算限制。 */
   minBucket?: number;
   /** 默认连续失败 3 个参与 tick 后熔断，需显式 recover。 */
   failureThreshold?: number;
-  /** 同步诊断出口；其异常被吞并，防止覆盖业务故障。 */
-  report?: (failure: PluginFailure) => void;
-  /** 首次错误时加载 source map；必须同步返回 trace-mapping 可解析的数据。 */
-  loadSourceMap?: () => any;
 }
 /** 诊断快照不允许修改框架内部状态；tick 在首次 loop 前为 undefined。 */
 export interface FrameworkStatus {

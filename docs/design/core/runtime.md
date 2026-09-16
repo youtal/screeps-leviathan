@@ -1,17 +1,39 @@
 # Runtime 设计
 
-交付状态：上下文派生、共享日志工厂、共享事件总线与统计装配已交付；统一内核装配未交付。
+交付状态：完整 Core Runtime、单向装配、模块上下文派生及 Framework 注入已交付；Profiler 的 MemoryAccessor 持久化接入未交付。
 
-本文定义轻量上下文工厂的交付阶段协议。Root Runtime 的统一内核组装与生命周期端口设计见 [Core 架构](./README.md)。
+## 定位
 
-Runtime 是核心设施的轻量组合层。它创建一条共享 EventBus、一个共享 LoggerFactory、一个可选 Profiler，并为每个模块派生带独立日志作用域和 Screeps `Game` 访问适配器的 `ModuleContext`。Runtime 不管理 tick 生命周期、插件依赖、Memory 挂载或写回；这些职责属于 Leviathan Framework。
+Runtime 是 Core 唯一的具体实现组合根。它负责按依赖有向无环图创建 Core 能力、持有每个 global 唯一实例，并通过 `CoreRuntime` 契约把完整能力集合交给 Framework。Runtime 不管理普通插件依赖、热插拔事务、CPU 准入或游戏决策。
 
-`createRuntime()` 返回模块上下文工厂。日志工厂、总线与 Profiler 保存在工厂闭包中并由所有派生上下文共享，`env` 则按模块名创建，使日志来源清晰且测试可以替换运行环境。Runtime 本身不直接访问全局 `Memory` 或 RawMemory。
+## 装配协议
 
-日志工厂由 Runtime 装配一次并注入模块 env、EventBus 与 Profiler，使全项目共用等级、输出端口和邮件策略；调用方可以注入 `logging` 复用已有配置，缺省时按项目默认等级创建。日志协议与降级行为见 [Logger 设计](./logger.md)。
+初始化顺序遵循“先创建依赖，再创建消费者”：
 
-独立 Runtime 默认把 Profiler 统计保存在闭包 heap 中，global reset 后丢失。这一默认行为防止它绕开统一的存储协议。需要保存统计时，调用者必须同时注入当前统计对象的访问器和写前标脏回调。
+```text
+Logger
+├── EventBus
+├── MemoryManager
+├── Profiler
+└── ErrorMapper
+        ↓
+CoreRuntime
+        ↓
+Framework
+```
 
-Runtime 允许受控可变闭包以减少重复创建日志工厂、总线和 Profiler 的开销。日志器、总线订阅、Profiler 标签和 heap 统计随当前 global 生命周期存在；脚本重载后由应用装配重新创建。模块不得跨 tick 保存 Game 对象。
+同级能力模块只引用 contracts，并在工厂参数中要求显式依赖。只有 Runtime 可以导入这些模块的具体工厂。前序能力严格不依赖后序能力；独立分支之间不强行建立无意义依赖。
 
-Runtime 只提供依赖组合，不提供插件权限和资源清理。业务模块应优先通过 Framework 的 `PluginContext` 运行，以获得受控订阅、服务依赖和意图仲裁。直接使用 Runtime 适合底层设施测试或尚未接入插件生命周期的纯模块。
+`CoreRuntime` 发布 `getGame`、`logging`、`bus`、`memory`、`profiler`、`errorMapper` 和 `createContext`。Framework 必须接收完整 Runtime，不接受分散的基础能力替换项。
+
+## 上下文与状态
+
+`createContext(moduleName, options)` 为普通模块派生 `ModuleContext`。所有上下文共享 Runtime 的 EventBus、Profiler 与 MemoryManager，并以模块名绑定 Memory owner；每次调用创建独立 Env 和日志作用域。Game 访问器在调用时取得当 tick 对象，不缓存跨 tick 引用。
+
+Logger、总线订阅、Profiler 统计、ErrorMapper 缓存和派生工厂都驻留 heap，随 global reset 重建。MemoryManager 的持久化数据按自身目录与 journal 恢复。默认 Profiler 数据驻留 heap；持久化统计必须经 MemoryManager 契约接入，不能建立存储旁路。
+
+## 故障与性能边界
+
+Runtime 构造只进行实例装配，不读取 RawMemory；MemoryManager 由 Framework 在 tick 边界驱动。Profiler 可以显式设为 `null`，其不可用不解除错误隔离。ErrorMapper 的计时包装在 Framework 建立测量函数后接入。
+
+Runtime 每个 global 只创建一次，避免重复总线、重复日志配置和并行存储管理器。测试可以注入契约实现，但也必须显式完成依赖装配。

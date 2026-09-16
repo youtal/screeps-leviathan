@@ -1,31 +1,50 @@
 # Runtime 使用说明
 
-`createRuntime` 创建共享核心设施，并返回按模块名派生上下文的函数：
+`createRuntime()` 创建完整 Core Runtime。正式应用创建一次，再将它交给 Framework：
 
 ```ts
+import { createFramework } from '@/core/framework';
 import { createRuntime } from '@/core/runtime';
 
-const createContext = createRuntime({ enableProfiler: false });
-const logisticsContext = createContext('Logistics');
-const defenseContext = createContext('Defense', { notify: true });
+const runtime = createRuntime({ enableProfiler: false });
+const framework = createFramework({ runtime, plugins: [] });
+
+export const loop = framework.loop;
 ```
 
-两个上下文共享 `bus`、`logging` 派生出的日志配置和 `profiler`，但拥有不同日志前缀的 `env`。`env` 提供 `getGame/getRoom/getCreep/getPowerCreep/getFlag/getObjectById`，便于模块测试时替换 Screeps 运行环境。
+直接使用模块上下文时，通过 `runtime.createContext` 派生：
 
-可用配置如下：
+```ts
+const logistics = runtime.createContext('Logistics');
+const defense = runtime.createContext('Defense', { notify: true });
+```
+
+两个上下文共享 `bus`、`profiler` 和 `memory` 主机，但拥有独立日志作用域。`env` 提供 `getGame/getRoom/getCreep/getPowerCreep/getFlag/getObjectById`；这些方法每次读取当前 Game。
+
+## 配置
 
 | 配置 | 作用 |
 | --- | --- |
+| `getGame` | 注入当前 Game 访问器，主要用于测试 |
+| `logging` | 注入 LoggerFactory；省略时 Runtime 创建一个项目默认工厂 |
 | `bus` | 注入已有 EventBus |
-| `logging` | 注入已有 LoggerFactory；所有模块与内核组件共用其等级、端口和邮件策略 |
-| `memory` | 注入 MemoryManager；派生上下文会按模块名绑定申请入口 |
-| `profiler` | 注入 Profiler；传入 `null` 可禁用 |
+| `memory` | 注入符合 MemoryHost 的存储实例；省略时创建 MemoryManager |
+| `profiler` | 注入 Profiler；传入 `null` 禁用 |
+| `errorMapper` | 注入 ErrorMapper |
 | `enableProfiler` | 控制默认 Profiler 的初始开关 |
-| `getProfilerMemory` | Profiler 的底层兼容适配器，返回当前统计对象 |
-| `markProfilerMemoryDirty` | 与底层适配器配套，在统计修改前标脏 |
+| `getProfilerMemory` | 返回默认 Profiler 的统计对象 |
+| `markProfilerMemoryDirty` | Profiler 修改统计前调用的标脏回调 |
+| `loadSourceMap` | ErrorMapper 首次映射时同步取得 source map |
+| `report` | ErrorMapper 的结构化故障出口 |
 
-没有提供存储适配器时，默认 Profiler 数据只保存在 Runtime 闭包 heap，不访问全局 `Memory`。这两个选项仅保留给底层集成与测试；业务模块不得用它们建立另一条 Memory 访问路径。
+注入项用于测试或宿主适配。应用不应分别创建一组能力再绕过 Runtime 交给 Framework。
 
-`logging` 省略时 Runtime 按项目默认等级创建工厂；模块仍可用 `createContext(name, { log, notify })` 覆盖自己的等级与错误邮件开关。日志等级、端口与邮件语义见 [Logger 使用说明](./logger.md)。
+## 返回值
 
-项目正式业务模块应通过 Framework 的 `PluginContext` 使用这些能力。Framework 管理基础设施与 heap Profiler 统计，插件无需自行创建 Runtime，也不应直接访问 `Memory` 或 RawMemory。
+`CoreRuntime` 提供：
+
+- `getGame`：取得当前 tick 的 Game；
+- `logging`、`bus`、`memory`、`profiler`、`errorMapper`：唯一 Core 实例；
+- `createContext(name, options)`：派生模块上下文。
+
+Profiler 的默认统计只保存在 heap。需要持久化时，不得直接访问 Memory 或 RawMemory；应通过 MemoryManager 设计的分区接入完成。

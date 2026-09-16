@@ -3,14 +3,11 @@
 `createMemoryManager` 提供持久化存储：模块按稳定身份申请分区，通过 `MemoryAccessor` 每 tick 判断就绪状态并读写自己的数据。Runtime 负责组装，Framework 在 tick 边界驱动 `begin/end`；模块不接触 RawMemory 与 Segment。
 
 ```ts
-import { createMemoryManager } from '@/core/memoryManager';
-import { createLogging } from '@/core/logger';
 import { createFramework } from '@/core/framework';
+import { createRuntime } from '@/core/runtime';
 
-// 单一组合根：同一个日志工厂同时交给 MemoryManager 与 Framework。
-const logging = createLogging();
-const memory = createMemoryManager({ logging });
-const framework = createFramework({ plugins: [myPlugin], memory, logging });
+const runtime = createRuntime();
+const framework = createFramework({ runtime, plugins: [myPlugin] });
 export const loop = framework.loop;
 ```
 
@@ -144,13 +141,13 @@ const status = memory.getStatus();
 
 ## 应用层装配
 
-`src/app/runtime.ts` 是唯一组合根：按"日志工厂 → MemoryManager → Framework"的顺序装配一次，并把同一个实例注入 Framework（`createFramework({ plugins, logging, memory })`）。业务模块只需通过 `context.memory` 申请分区，不需要也不允许自行创建存储入口。
+`src/core/runtime` 是 Core 组合根，创建 Logger 后显式创建 MemoryManager，再把完整 Runtime 交给 Framework。`src/app/runtime.ts` 只创建 Runtime、选择插件并创建 Framework。业务模块只需通过 `context.memory` 申请分区，不需要也不允许自行创建存储入口。
 
 **访问边界（AGENTS.md 第 9 节）**：`core/memoryManager` 是项目内唯一允许访问全局 `Memory`、`RawMemory` 与 Segment 的模块。其它模块若有跨 global 状态需求，必须走 `context.memory`；直接访问存储属于阻断问题，`test/memoryBoundary.test.ts` 会扫描 `src/` 自动拦截。
 
 ## 独立使用（不经 Framework）
 
-`createRuntime({ memory })` 会把按模块名绑定的申请入口放进 `ModuleContext.memory`；独立 Runtime 不驱动 tick，调用方需要自行在边界调用 `memory.begin(tick)` / `memory.end(tick)`。模块级测试可以直接 `createMemoryManager({ platform })` 注入假平台，不必启动框架。
+`createRuntime({ memory })` 会把按模块名绑定的申请入口放进 `ModuleContext.memory`；独立 Runtime 不驱动 tick，调用方需要自行在边界调用 `memory.begin(tick)` / `memory.end(tick)`。模块级测试可以直接 `createMemoryManager({ logging, platform })` 注入日志工厂和假平台，不必启动框架。
 
 ## 未交付
 

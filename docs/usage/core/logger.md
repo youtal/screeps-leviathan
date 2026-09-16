@@ -16,12 +16,12 @@ const logging = createLogging({
   notifyInterval: 60,       // Game.notify 分组间隔（分钟）
 });
 
-const createContext = createRuntime({ logging });
-const context = createContext('Logistics');
+const runtime = createRuntime({ logging });
+const context = runtime.createContext('Logistics');
 context.env.log.info('shared bus ready');
 ```
 
-Framework 路径同样接受注入；不注入时使用 `defaultLoggerFactory` 兜底，因此 `createFramework({ plugins })` 与 `createBus()` 可以直接调用，无需显式装配日志。
+Framework 从完整 Runtime 取得 Logger，不接受单独的日志替换项。直接创建 EventBus、MemoryManager、ErrorMapper 或环境适配器时，也必须显式传入 LoggerFactory。
 
 独立使用（脚本、测试、工具）时直接创建工厂：
 
@@ -87,17 +87,16 @@ log.report('stats');         // 无输出（本作用域关闭 report）
 内核模块（MemoryManager、EventBus、Profiler、ErrorMapper 等）按同一套规则接入，细则见 [Core 架构 §10](../../design/core/README.md)：
 
 ```ts
-import { defaultLoggerFactory } from '@/core/logger';
 import type { LoggerFactory } from '@/contracts/logging';
 
 interface Options {
-  /** 由 Runtime/App 注入；缺省为内核兜底工厂，仅服务独立调用与测试。 */
-  logging?: LoggerFactory;
+  /** 由 Runtime 或测试组合边界显式注入。 */
+  logging: LoggerFactory;
 }
 
-export const createKernelThing = (options: Options = {}) => {
+export const createKernelThing = (options: Options) => {
   // 作用域固定，每实例派生一次。
-  const log = (options.logging ?? defaultLoggerFactory).scope('KernelThing');
+  const log = options.logging.scope('KernelThing');
   // …只在状态迁移与故障处输出：log.info / log.warn / log.error
 };
 ```

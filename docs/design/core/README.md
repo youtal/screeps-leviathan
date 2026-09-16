@@ -1,8 +1,8 @@
 # Core 架构设计及开发原则
 
-交付状态：统一内核装配与注册模式未交付。
+交付状态：统一内核装配、单向依赖边界与事务性插件注册已交付。
 
-本设计定义 Core 的架构与开发原则。模块设计入口：[Framework](./framework.md)、[Runtime](./runtime.md)、[Profiler](./profiler.md)、[MemoryManager](./memoryManager.md)。
+本设计定义 Core 的架构与开发原则。模块设计入口：[Framework](./framework.md)、[Runtime](./runtime.md)、[Profiler](./profiler.md)、[ErrorMapper](./errorMapper.md)、[MemoryManager](./memoryManager.md)。
 
 ## 1. 定位与职责
 
@@ -76,9 +76,21 @@ PluginRegistry、生命周期执行器、CPU 准入、IntentBroker 属于 Framew
 
 ## 5. Runtime 组装与生命周期
 
-`createRuntime()` 返回 Root Runtime 及受控生命周期端口，并以完整内核运行时对象的形式交付能力集合（日志、事件总线、观测、错误映射与存储端口）；App 将其注入 Framework，Framework 只消费不重建，同一应用的内核能力由该 Runtime 唯一持有。各能力的兜底实例仅用于独立测试。单一组合根形态未交付。
+`createRuntime()` 返回完整 Root Runtime，以一个对象交付 Game 访问器、日志、事件总线、观测、错误映射、存储端口和模块上下文工厂。App 将其注入 Framework，Framework 只消费不重建，同一应用的内核能力由该 Runtime 唯一持有。
 
-创建连接以 Logging 为基础，ErrorMapper 保持独立可用，MemoryManager 不依赖 Profiler 才能恢复；Profiler 使用 MemoryAccessor 保存统计。ErrorMapper 的计时可以在 Profiler 就绪后接入，但错误报告和统计回路必须防止递归。
+具体实现依赖采用有向无环图，而不是要求所有模块形成无意义的全序：
+
+```text
+Logger
+├── EventBus
+├── MemoryManager
+├── Profiler 的环境日志
+└── ErrorMapper
+
+上述实例 ──→ Runtime ──→ Framework ──→ 普通插件
+```
+
+同级 Core 模块只依赖 contracts，不导入彼此的工厂。Runtime 是唯一可导入上述具体工厂的组合根；前序模块不得依赖后序模块。ErrorMapper 的计时由 Framework 在 Profiler 已经存在后接入，错误报告和统计回路必须防止递归。
 
 Framework 是 tick 驱动者，Runtime 封装内核组件的必要顺序：
 
@@ -127,7 +139,7 @@ Profiler 尚未取得持久化状态时，可以跳过依赖该状态的采样�
 
 Logger 是内核能力，由 Runtime 组装唯一工厂；内核模块与普通模块都通过注入获得作用域日志器。接入时必须遵守：
 
-1. **注入而不自建**：模块在自身选项中声明 `logging?: LoggerFactory`，缺省使用 `defaultLoggerFactory` 兜底（只服务独立调用与测试）；模块内部不得调用 `createLogging()` 建立第二套等级、输出端口或邮件策略。
+1. **注入而不自建**：模块在自身工厂中要求调用方提供 `LoggerFactory`；模块内部不得导入 Logger 具体实现、使用默认单例或调用 `createLogging()`。独立测试也在测试装配边界显式创建并注入 Logger。
 2. **作用域固定且每实例派生一次**：以模块名作为作用域（`MemoryManager`、`EventBus`、`Profiler`、`ErrorMapper`），在工厂创建时 `scope()` 一次并复用；禁止每次故障重新派生。
 3. **只在状态迁移与故障上输出**：每 tick 都会发生的路径（提交、心跳、pending 往返）只允许 `debug`；状态迁移用 `info`（默认关闭）；可自愈异常用 `warn`；不可自愈的数据问题用 `error`。不得在热路径输出 `info` 及以上等级。
 4. **一次事件一次**：同一故障、同一分区、同一原因只记录首次或原因变化的那一次，恢复后重置去重状态，避免逐 tick 刷屏。

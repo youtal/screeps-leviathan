@@ -3,8 +3,7 @@
  * trace-mapping 无需 Promise/WASM；解析器懒加载，最多缓存 64 条，捕获入口截断为 16KB。
  * 映射和日志故障均回退原始诊断，避免错误处理器递归抛错；缓存随 global reset 清空。
  *
- * 所属模块：core/framework 的内核组件，由 createFramework 创建（随后注入 Kernel 的计时包装），
- * 并经 framework/index 的 `export * from './errorMapper'` 成为公共能力，供外部复用堆栈映射。
+ * 所属模块：core/errorMapper 的具体实现，由 Runtime 组合根创建并交给 Framework 消费。
  * 输入为注入的 loadMap/report 回调、LoggerFactory 与待执行函数；输出 capture 的
  * ExecutionResult 判别联合、mapStack 的映射文本，以及 setMeasure 观测适配口。
  * 状态全部驻留 heap：加载尝试标记、TraceMap 实例、最多 64 条映射缓存、当前计时函数。
@@ -16,11 +15,11 @@ import type {
   LoggerFactory,
   PluginFailure,
 } from '@/contracts';
-import { defaultLoggerFactory } from '@/core/logger';
 
 /**
  * 创建同步故障边界，成功返回原值，失败返回诊断联合类型，调用者据此隔离插件。
- * loadMap 注入构建映射的读取方式，默认由 Screeps 模块系统加载上传的 main.js.map；
+ * logging 必须由 Runtime 或测试组合边界显式注入；loadMap 注入构建映射的读取方式，
+ * 默认由 Screeps 模块系统加载上传的 main.js.map；
  * trace-mapping 提供同步位置查询，避免异步初始化/WASM 与单 tick 调用约定冲突。
  * 默认加载器写在参数默认值里，只有首次映射时才真正 require：模块导入与正常 tick
  * 都不支付读取成本，本地/测试环境也不会因为缺少 main.js.map 而加载失败。
@@ -32,9 +31,9 @@ import { defaultLoggerFactory } from '@/core/logger';
  * 故障。日志能力不依赖映射器本身，因此这里不会形成"记录错误又触发错误"的回环。
  */
 export const createErrorMapper = (
+  logging: LoggerFactory,
   loadMap: () => any = () => require('main.js.map'),
-  report?: (failure: PluginFailure) => void,
-  logging: LoggerFactory = defaultLoggerFactory
+  report?: (failure: PluginFailure) => void
 ): import('@/contracts/errorMapper').ErrorMapper => {
   /**
    * 失败报告出口：显式注入优先，否则按 ErrorMapper 作用域记录 error 级日志。

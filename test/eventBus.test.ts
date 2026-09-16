@@ -14,7 +14,11 @@
  * 运行方式：npm test（ts-jest，testEnvironment=node）；不需要 .secret.json，
  * 不执行构建与网络请求。
  */
-import { createBus } from '@/core/eventBus';
+import { createBus as createCoreBus } from '@/core/eventBus';
+import { createLogging } from '@/core/logger';
+
+/** 单元测试显式完成 Logger → EventBus 装配，避免依赖生产代码中的隐藏缺省实例。 */
+const createBus = () => createCoreBus(createLogging());
 
 describe('EventBus', () => {
   afterEach(() => {

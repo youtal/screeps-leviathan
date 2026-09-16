@@ -15,6 +15,7 @@
  * 不执行构建与网络请求。
  */
 import { createBus } from '@/core/eventBus';
+import { createLogging } from '@/core/logger';
 import { createRuntime, createEnvMethods } from '@/core/runtime';
 import type { Profiler } from '@/contracts';
 import type { ProfilerMemory } from '@/core/profiler';
@@ -45,7 +46,12 @@ describe('Runtime env', () => {
   });
 
   it('should create module env methods backed by Game and module logger', () => {
-    const env = createEnvMethods('TestModule', { info: true }, true);
+    const env = createEnvMethods(
+      'TestModule',
+      createLogging(),
+      { info: true },
+      true
+    );
     const object = Game.getObjectById('object-id' as Id<_HasId>);
 
     expect(env.getGame()).toBe(Game);
@@ -72,7 +78,7 @@ describe('Runtime context factory', () => {
    * 由 Beta 发布、Alpha 订阅来验证跨模块通信确实走同一实例，而不是各自新建总线。
    */
   it('should share bus and profiler while creating module-specific env', () => {
-    const bus = createBus();
+    const bus = createBus(createLogging());
     const profiler: Profiler = {
       wrap: jest.fn(
         <F extends (...args: any[]) => any>(_: string, fn: F) => fn
@@ -82,10 +88,10 @@ describe('Runtime context factory', () => {
       reset: jest.fn(),
       report: jest.fn(),
     };
-    const createContext = createRuntime({ bus, profiler });
+    const runtime = createRuntime({ bus, profiler });
 
-    const alpha = createContext('Alpha');
-    const beta = createContext('Beta');
+    const alpha = runtime.createContext('Alpha');
+    const beta = runtime.createContext('Beta');
 
     expect(alpha.bus).toBe(bus);
     expect(beta.bus).toBe(bus);
@@ -107,8 +113,8 @@ describe('Runtime context factory', () => {
    * 未定义，防止与游戏业务 Memory 抢占命名空间（那也会放大每 tick 的序列化成本）。
    */
   it('should keep default profiler data out of global Memory', () => {
-    const createContext = createRuntime({ enableProfiler: true });
-    const context = createContext('Worker');
+    const runtime = createRuntime({ enableProfiler: true });
+    const context = runtime.createContext('Worker');
     const wrapped = context.profiler!.wrap('task', () => 'done');
 
     // wrap 在调用前后各采样一次 getUsed，差值即耗时；
@@ -126,12 +132,12 @@ describe('Runtime context factory', () => {
   it('should use injected profiler memory accessor', () => {
     const memory: ProfilerMemory = {};
     const markDirty = jest.fn();
-    const createContext = createRuntime({
+    const runtime = createRuntime({
       enableProfiler: true,
       getProfilerMemory: () => memory,
       markProfilerMemoryDirty: markDirty,
     });
-    const context = createContext('Worker');
+    const context = runtime.createContext('Worker');
 
     jest
       .spyOn(Game.cpu, 'getUsed')

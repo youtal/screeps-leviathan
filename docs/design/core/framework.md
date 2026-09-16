@@ -1,6 +1,6 @@
 # Leviathan Framework 设计
 
-交付状态：基础 Framework 协议与 MemoryHost 生命周期驱动已交付；Runtime 统一装配未交付。装配设计见 [Core 架构](./README.md)。
+交付状态：Framework 协议、Runtime 消费、MemoryHost 生命周期驱动与插件事务已交付。
 
 ## 1. 模块定位
 
@@ -25,12 +25,12 @@
 | Kernel / 生命周期         | `createFramework.ts`             | 驱动 loop、setup、三阶段、故障恢复和状态查询       |
 | PluginRegistry            | `pluginRegistry.ts`              | 候选注册表校验、依赖排序、稳定快照                 |
 | PluginContext             | `contracts/plugin.ts`、`createFramework.ts` | 注入 Runtime 风格上下文、服务、事件、意图与 Memory 申请入口 |
-| ErrorMapper               | `errorMapper.ts`                 | 同步堆栈还原及结构化异常捕获                       |
+| ErrorMapper               | `core/errorMapper`               | 由 Runtime 提供的同步堆栈还原及结构化异常捕获      |
 | CpuGovernor               | `cpuGovernor.ts`                 | 普通/关键插件准入和收尾预留                        |
 | IntentBroker              | `intentBroker.ts`                | 通道与共享锁仲裁、提交、回执                       |
 | EventBus / Profiler / Env | Core 能力                   | 强类型事件、嵌套 CPU 统计、Game 适配；日志由 Runtime 的 LoggerFactory 注入 |
 
-Kernel 与生命周期合并在工厂实现中，避免重复维护两套执行状态。采用 Runtime 上下文协议，Env 工厂供默认上下文复用，也允许注入 `createContext`。这些组件不为 Framework 另建重复实现。日志通过 `FrameworkOptions.logging` 注入：传入时与 Runtime 共用工厂，省略时使用 `defaultLoggerFactory` 兜底，使框架可独立创建；日志协议见 [Logger 设计](./logger.md)。
+Kernel 与生命周期合并在工厂实现中，避免重复维护两套执行状态。Framework 必须接收完整 `CoreRuntime`，并消费其中的上下文工厂、EventBus、Profiler、ErrorMapper 与 MemoryHost；Framework 不导入或创建这些同级 Core 能力的具体实现。
 
 ## 4. 初始化与 tick 生命周期
 
@@ -150,7 +150,7 @@ pluginId 由 Context 注入，插件不能伪造其他提交者。提交时复�
 
 Framework 不承担 RawMemory 解析、Memory 挂载、Segment 分配、数据迁移或写回。实例内健康表和默认 Profiler 统计在 global reset 后清空。
 
-持久化由 [MemoryManager](./memoryManager.md) 独立管理；Framework 通过可选的 MemoryHost 端口在 tick 边界驱动 begin/end，并在安全模式、CPU 未准入或插件 setup 失败时延后封存申请窗口。Runtime 统一装配遵循 [Core 架构](./README.md)，交付状态：未交付。
+持久化由 [MemoryManager](./memoryManager.md) 独立管理；Framework 通过 Runtime 中的 MemoryHost 端口在 tick 边界驱动 begin/end，并在安全模式、CPU 未准入或插件 setup 失败时延后封存申请窗口。Runtime 统一装配遵循 [Core 架构](./README.md)。
 
 ## 8. ErrorMapper、Profiler 与故障隔离
 
@@ -206,7 +206,7 @@ framework.errorMapper.mapStack
 framework.errorMapper.report
 ```
 
-Profiler 默认关闭，设置 enableProfiler 后采样。业务优先级应由后续策略层确定：生存、防御、Spawn 和关键物流优先，布局重算与远期规划可延期。
+Profiler 的初始开关由 Runtime 配置。业务优先级应由后续策略层确定：生存、防御、Spawn 和关键物流优先，布局重算与远期规划可延期。
 
 ## 10. 首版验收与后续范围
 

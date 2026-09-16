@@ -230,12 +230,11 @@ Segment 中的数据版本与 payload 一起写入，避免每次升级还要求
 - **自愈与故障语义**：`recovery` 且无数据的分区会按 tick 重读，页内容恢复一致后自动回到 ready；`getStatus().allocations[].writeError` 记录"最近一次故障，可能已恢复"，当前可用性以 `pending` 与 `access()` 为准。
 - **旧布局导入**：只导入键值对象 payload；原型相关键（`__proto__`/`prototype`/`constructor`）跳过并记录诊断，容器使用 null 原型，避免记录静默消失或原型污染。
 - **数据安全**：未知 schema、非法记录、页归属不符、版本降级、缺少 migrate 的升级一律拒绝写入并给出诊断；旧 `leviathan` 布局做一次性深拷贝导入（不共享引用、不改写旧命名空间）。
-- **日志**：按 [Core 架构 §10](./README.md) 的通用规范接入——`logging` 注入（缺省兜底工厂）、作用域 `MemoryManager` 每实例派生一次；加载失败与不可自愈数据问题记 `error`，写入失败、页被占用、容量超限、窗口强制封存记 `warn`（同一原因一次），迁移阶段切换与恢复完成记 `info`，pending 往返记 `debug`；提交热路径不输出。结构化诊断仍以 `getStatus()` 为权威。
+- **日志**：按 [Core 架构 §10](./README.md) 的通用规范接入——`logging` 由 Runtime 显式注入、作用域 `MemoryManager` 每实例派生一次；加载失败与不可自愈数据问题记 `error`，写入失败、页被占用、容量超限、窗口强制封存记 `warn`（同一原因一次），迁移阶段切换与恢复完成记 `info`，pending 往返记 `debug`；提交热路径不输出。结构化诊断仍以 `getStatus()` 为权威。
 
 首版未交付或待决：
 
 - 容量按字节的精确计量与目标运行时实测口径（当前按 JSON 字符数近似，超限拒绝写入）。
 - 迁移期间的在线修改（当前冻结搬迁分区）与多迁移并行。
 - 独立 heap 监控设施；旧布局导入不含 Profiler 统计与插件健康表，它们保留在原命名空间。
-- 应用层装配：`src/app` 尚未实例化 MemoryManager，正式启用需要 App 创建实例并注入 Framework；在此之前新持久化能力不进入游戏 bundle。
 - 同一 global 只应装配一个 MemoryManager；多实例会在同一命名空间上互相覆盖。

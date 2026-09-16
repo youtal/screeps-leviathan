@@ -84,7 +84,10 @@ const sandbox = (chunk) => {
       // 这里提供可读写的 segments 对象与激活入口即可。
       segments: {},
       setActiveSegments: (ids) => {
-        assert.ok(Array.isArray(ids) && ids.length <= 10, 'at most 10 segments');
+        assert.ok(
+          Array.isArray(ids) && ids.length <= 10,
+          'at most 10 segments'
+        );
       },
     },
     require: (name) => {
@@ -147,12 +150,17 @@ test('actual app bundle executes consecutive ticks without Node runtime dependen
  * src/core/framework/createFramework.ts，说明上传的 main.js.map 与产物实际匹配。
  */
 test('real generated stack maps to TypeScript using uploaded main.js.map module', async () => {
-  const chunk = await compile('src/core/framework/index.ts');
+  const chunk = await compile('src/core/index.ts');
   const h = sandbox(chunk);
   vm.runInContext(
     `
-    const framework = exports.createFramework();
-    const errors = exports.createErrorMapper();
+    const noMemory = {
+      begin() {}, end() {}, deferStartupWindow() {},
+      bind() { return () => { throw new Error('MemoryManager is not assembled'); }; }
+    };
+    const core = exports.createRuntime({ memory: noMemory });
+    const framework = exports.createFramework({ runtime: core });
+    const errors = core.errorMapper;
     globalThis.failure = errors.capture(
       { tick: 1, pluginId: 'probe', phase: 'setup' },
       () => framework.register({ manifest: { id: '__proto__', version: 1 } })
@@ -169,7 +177,8 @@ test('real generated stack maps to TypeScript using uploaded main.js.map module'
   vm.runInContext(
     `
     globalThis.runs = 0;
-    globalThis.runtime = exports.createFramework({ plugins: [{
+    const secondCore = exports.createRuntime({ memory: noMemory });
+    globalThis.runtime = exports.createFramework({ runtime: secondCore, plugins: [{
       manifest: { id: 'counter', version: 1 },
       onTickBegin(context) {
         if ('persistence' in context) throw new Error('obsolete persistence');
