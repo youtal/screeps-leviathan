@@ -8,7 +8,7 @@ Profiler 使用函数包装、CPU 起止差值和闭包调用栈统计 totalTime
 
 观测故障不能改变业务语义：开始取样失败则直接转调原函数；结束时先 pop，再尝试读取 CPU、更新父级 childTime 和写入数据。结束取样或存储错误被隔离，不覆盖业务异常。无法取样的调用不保证统计完整。
 
-Profiler 内部适配器每次操作调用 `getMemory` 定位统计命名空间，并在原地更新前调用 `markMemoryDirty`。存储归属及提交时机由宿主决定，Profiler 不假定持久化可用。这些函数属于装配适配器，不是业务模块的公共协议。
+Profiler 内部适配器每次操作调用 `ProfilerStorage.getMemory` 定位统计命名空间，并在原地更新前调用可选的 `markDirty`。两个行为由同一个存储端口表达，存储归属及提交时机由宿主决定，Profiler 不假定持久化可用。该端口属于 Profiler 的装配配置，不是业务模块的数据访问协议。创建时绑定方法所属对象，保留 this，之后每次访问读取对象中的当前统计表；绑定函数随实例跨 tick 复用，global reset 后重新建立。
 
 独立创建 Profiler 时，调用者可以提供自己的存储适配器；若由独立 Runtime 创建且没有注入适配器，统计只存在于该 Runtime 的 heap，不访问全局 `Memory`。Profiler 自身不读取、解析或序列化 RawMemory。
 

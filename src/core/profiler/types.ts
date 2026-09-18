@@ -3,30 +3,48 @@
  *
  * 模块角色：core/profiler 的构造依赖和统计记录类型文件，供工厂与数据访问层协作。
  *
- * 主要功能：声明 ProfilerContext、单标签 Record 和按标签索引的 ProfilerMemory，并转发公共 Profiler 接口。
+ * 主要功能：声明 ProfilerOptions、ProfilerStorage、ProfilerContext 和标签统计结构，并转发公共 Profiler 接口。
  *
- * 实现过程：上下文继承环境接口，补充统计数据访问依赖与初始开关；
+ * 实现过程：创建配置描述初始开关与存储对象，上下文提供环境和已选定的依赖；
  * 记录以 totalTime、selfTime、calls 三个数字保存汇总结果。
  *
- * 技术要点：ProfilerMemory 是统计表的类型名，不代表直接访问游戏 Memory。
+ * 技术要点：存储方法按原对象绑定 this；ProfilerMemory 是统计表的类型名，不代表直接访问游戏 Memory。
  * 本文件不创建记录或持久化数据，实际数据来源由装配方注入，公开操作协议来自 contracts/profiler。
  */
 import type { EnvContext } from '@/contracts/environment';
 export type { Profiler } from '@/contracts/profiler';
+
+/**
+ * Profiler 统计存储端口。
+ *
+ * getMemory 每次返回当前统计对象，使宿主可以在不替换 Profiler 实例的情况下切换
+ * 数据来源；方法调用保留存储对象的 this，创建后不重新选择方法。
+ * markDirty 在修改前调用，heap 存储可以省略，持久化适配器必须提供。
+ */
+export interface ProfilerStorage {
+  getMemory(): ProfilerMemory;
+  markDirty?(): void;
+}
+
+/** Runtime 创建 Profiler 时接受的模块级配置，不包含 Env 等由组合根注入的依赖。 */
+export interface ProfilerOptions {
+  /** 初始是否采样；省略时由 Runtime 使用项目默认值。 */
+  enabled?: boolean;
+  /** 统计落点；省略时 Runtime 创建当前 global 有效的 heap 存储。 */
+  storage?: ProfilerStorage;
+}
 /**
  * 创建 Profiler 所需的上下文。
  *
- * env 提供日志和 Game.cpu.getUsed 访问；getMemory 决定统计结果写入哪里；
- * enable 控制 profiler 初始是否采样。
+ * env 提供日志和 Game.cpu.getUsed 访问；storage 决定统计结果写入哪里；
+ * enable 控制 Profiler 初始是否采样。
  *
- * getMemory 是访问器而不是快照：Profiler 每次统计操作都会重新调用它，因此宿主可以在
- * 运行期切换命名空间。enable 只是初始值，运行期的 enable()/disable() 只改 Profiler
- * 闭包内的变量，不会回写本对象。markMemoryDirty 省略时表示统计不需要写回登记。
+ * storage.getMemory 是访问器而不是快照：Profiler 每次统计操作都会重新调用它，因此
+ * 宿主可以在运行期切换命名空间。enable 只是初始值，运行期的 enable()/disable()
+ * 只改 Profiler 闭包内的变量，不会回写本对象。
  */
 export interface ProfilerContext extends EnvContext {
-  getMemory: () => ProfilerMemory;
-  /** 持久化管理器的显式标脏回调；仅存于调用者闭包的统计可省略。 */
-  markMemoryDirty?: () => void;
+  storage: ProfilerStorage;
   enable: boolean;
 }
 

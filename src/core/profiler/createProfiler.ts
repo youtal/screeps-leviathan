@@ -27,16 +27,23 @@ import type { Wrap } from '@/contracts';
  * selfTime 会扣除这部分时间，从而区分“自身耗时”和“包含子调用的总耗时”。
  *
  * context.enable 只在创建时读取一次作为初始开关，之后的 enable()/disable() 只改内部
- * 变量、不回写上下文对象；getMemory 则保持为访问器，每次统计操作都重新求值，因此宿主
+ * 变量、不回写上下文对象；storage.getMemory 保持为访问器，每次统计操作都重新求值，因此宿主
  * 迁移或替换统计命名空间后，后续样本自动写入新对象。
  */
 export const createProfiler = (context: ProfilerContext): Profiler | null => {
-  // 只在这里读取一次 context：getMemory 留作惰性访问器，enableProfiler 是闭包内的可变开关。
-  let { getMemory, enable: enableProfiler } = context;
+  // 初始开关只读取一次；存储访问器保留在端口中，运行时每次读写都会重新调用。
+  let { enable: enableProfiler } = context;
   const { log, getGame } = context.env;
 
-  // 第三个参数是可选的标脏回调：省略表示宿主不需要写回登记（独立 Runtime 的 heap 统计）。
-  const db = createMemoryAccessor(getMemory, log, context.markMemoryDirty);
+  // 在创建时绑定存储对象，保留对象方法的 this；每次读写仍重新调用 getMemory，
+  // 因而适配器替换自身统计表后无需重建 Profiler。绑定函数跨 tick 复用，避免逐样本分配。
+  // markDirty 省略表示宿主不需要写回登记（默认 Runtime 的 heap 统计）。
+  const { storage } = context;
+  const db = createMemoryAccessor(
+    storage.getMemory.bind(storage),
+    log,
+    storage.markDirty?.bind(storage)
+  );
   if (!db) {
     log.error('无法创建 Profiler');
     return null;

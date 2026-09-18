@@ -17,6 +17,7 @@ import type {
   PluginContext,
   PluginManifest,
 } from '@/contracts';
+import type { RuntimeOptions, RuntimeOverrides } from '@/core/runtime';
 
 interface State {
   nested: { count: number };
@@ -61,6 +62,19 @@ void manifest;
 // @ts-expect-error Framework 必须消费完整 CoreRuntime，不能自行补建基础能力
 const incompleteFrameworkOptions: FrameworkOptions = { plugins: [] };
 void incompleteFrameworkOptions;
+
+/** Runtime 创建策略按模块归组；实例替换使用独立协议。 */
+const runtimeOptions: RuntimeOptions = {
+  platform: { getGame: () => Game },
+  profiler: { enabled: true },
+  errorMapper: { report: (_failure) => undefined },
+};
+const runtimeOverrides: RuntimeOverrides = { profiler: null };
+// @ts-expect-error Game 平台端口不得重新平铺到 RuntimeOptions 顶层
+const legacyRuntimeOptions: RuntimeOptions = { getGame: () => Game };
+void runtimeOptions;
+void runtimeOverrides;
+void legacyRuntimeOptions;
 
 /** 日志装配与作用域协议的正例：装配级配置 + 作用域覆盖都应可组合。 */
 export function verifyLoggingContract(factory: LoggerFactory): Logger {

@@ -86,6 +86,38 @@ describe('Profiler memory accessor', () => {
 });
 
 describe('Profiler', () => {
+  /** 对象方法可依赖 this；统计表替换后继续写新表，标脏和清零也必须使用原适配器。 */
+  it('preserves storage method receivers across updates, reports and reset', () => {
+    const storage = {
+      memory: {} as ProfilerMemory,
+      dirtyCalls: 0,
+      getMemory() {
+        return this.memory;
+      },
+      markDirty() {
+        this.dirtyCalls++;
+      },
+    };
+    const env = createEnv([0, 3, 4, 9]);
+    const profiler = createProfiler({ env, storage, enable: true })!;
+    const wrapped = profiler.wrap('task', () => 42);
+
+    expect(wrapped()).toBe(42);
+    const previous = storage.memory;
+    storage.memory = {};
+    expect(wrapped()).toBe(42);
+    expect(previous.task).toEqual({ totalTime: 3, selfTime: 3, calls: 1 });
+    expect(storage.memory.task).toEqual({ totalTime: 5, selfTime: 5, calls: 1 });
+    expect(storage.dirtyCalls).toBe(2);
+    profiler.report(false, 'task');
+    expect(env.log.report).toHaveBeenCalledWith(expect.stringContaining('总时间: 5'));
+    expect(storage.dirtyCalls).toBe(2);
+    profiler.reset();
+    expect(storage.memory).toEqual({});
+    expect(storage.dirtyCalls).toBe(3);
+    expect(previous.task.calls).toBe(1);
+  });
+
   /**
    * 构造两种观测故障：broken 的 defineProperty 抛错让统计写入失败，getter 的第二次
    * 调用抛错让 CPU 采样失败。无论哪种情况，业务异常与返回值都必须原样穿过 profiler：
@@ -103,7 +135,7 @@ describe('Profiler', () => {
     );
     const profiler = createProfiler({
       env,
-      getMemory: () => broken,
+      storage: { getMemory: () => broken },
       enable: true,
     })!;
     const original = new Error('business');
@@ -124,7 +156,7 @@ describe('Profiler', () => {
     env.getGame = () => ({ cpu: { getUsed: getter } }) as unknown as Game;
     const sampled = createProfiler({
       env,
-      getMemory: () => memory,
+      storage: { getMemory: () => memory },
       enable: true,
     })!;
     expect(() =>
@@ -142,7 +174,7 @@ describe('Profiler', () => {
     const env = createEnv([0, 1, 2, 3]);
     const profiler = createProfiler({
       env,
-      getMemory: () => current,
+      storage: { getMemory: () => current },
       enable: true,
     })!;
     const fn = profiler.wrap('task', () => 1);
@@ -158,7 +190,7 @@ describe('Profiler', () => {
     const memory: ProfilerMemory = {};
     const profiler = createProfiler({
       env: createEnv([1, 6]),
-      getMemory: () => memory,
+      storage: { getMemory: () => memory },
       enable: true,
     })!;
     const fn = jest.fn((value: number) => value + 1);
@@ -174,7 +206,7 @@ describe('Profiler', () => {
     const memory: ProfilerMemory = {};
     const profiler = createProfiler({
       env: createEnv([2, 9]),
-      getMemory: () => memory,
+      storage: { getMemory: () => memory },
       enable: true,
     })!;
     const wrapped = profiler.wrap('fail', () => {
@@ -190,7 +222,7 @@ describe('Profiler', () => {
     const memory: ProfilerMemory = {};
     const profiler = createProfiler({
       env: createEnv([0, 2, 5, 9]),
-      getMemory: () => memory,
+      storage: { getMemory: () => memory },
       enable: true,
     })!;
     const child = profiler.wrap('child', () => 'child');
@@ -206,7 +238,7 @@ describe('Profiler', () => {
     const memory: ProfilerMemory = {};
     const profiler = createProfiler({
       env: createEnv([0, 4]),
-      getMemory: () => memory,
+      storage: { getMemory: () => memory },
       enable: false,
     })!;
     const wrapped = profiler.wrap('toggle', () => 'ok');
@@ -228,7 +260,7 @@ describe('Profiler', () => {
     const memory: ProfilerMemory = {};
     const profiler = createProfiler({
       env: createEnv([0, 3]),
-      getMemory: () => memory,
+      storage: { getMemory: () => memory },
       enable: false,
     })!;
     const worker = {
@@ -260,7 +292,7 @@ describe('Profiler', () => {
     const env = createEnv([0, 1]);
     const profiler = createProfiler({
       env,
-      getMemory: () => memory,
+      storage: { getMemory: () => memory },
       enable: true,
     })!;
     const first = () => 'first';

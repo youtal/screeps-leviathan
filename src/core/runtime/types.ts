@@ -3,12 +3,12 @@
  *
  * 模块角色：core/runtime 的装配类型定义，约定调用方如何配置或替换基础能力。
  *
- * 主要功能：描述 Runtime 创建时的选项与依赖，并转发环境、函数包装和模块上下文类型。
+ * 主要功能：声明分组的 RuntimeOptions、平台访问选项与 RuntimeOverrides，并转发模块上下文类型。
  *
- * 实现过程：引用各能力的协议来约束输入，将日志、总线、存储、性能统计、错误处理和游戏环境
- * 的装配需求交给 createRuntime 解释，再以公共上下文类型约束返回能力。
+ * 实现过程：用各模块的创建选项描述配置，用 contracts 的接口描述可替换实例；
+ * MemoryManager 配置通过 Omit 排除 logging，因为该依赖必须由 Runtime 统一提供。
  *
- * 技术要点：可选字段的默认选择由工厂负责；Profiler 允许明确不提供实例，消费者须处理空值。
+ * 技术要点：第二参数的实例替换优先于第一参数的配置；Profiler 配置允许 false，替换项允许 null。
  * 本文件只做编译期检查，不执行配置回调、不创建实例，也不保存跨 tick 状态。
  */
 import type {
@@ -16,10 +16,13 @@ import type {
   ErrorMapper,
   LoggerFactory,
   MemoryHost,
-  PluginFailure,
   Profiler,
+  LoggingOptions,
 } from '@/contracts';
-import type { ProfilerMemory } from '../profiler/types';
+import type { ErrorMapperOptions } from '@/core/errorMapper';
+import type { MemoryManagerOptions } from '@/core/memoryManager';
+import type { ProfilerOptions } from '@/core/profiler';
+
 export type {
   Wrap,
   HasWrap,
@@ -29,39 +32,38 @@ export type {
   ModuleContext,
   CreateModuleContext,
 } from '@/contracts';
+
+/** Runtime 与 Framework 共用的平台入口；访问器必须在调用时返回当 tick 的 Game。 */
+export interface RuntimePlatformOptions {
+  getGame?: () => Game;
+}
+
 /**
- * 创建 root runtime 时可以注入的依赖。
+ * 创建 Root Runtime 的生产配置。
  *
- * 这些选项主要服务于测试和未来的不同运行模式：
- * - bus：允许注入测试总线或已有总线。
- * - logging：注入 Runtime 使用的日志工厂；省略时由 Runtime 创建唯一默认实例，
- *   再显式交给所有派生上下文与 Core 消费者。
- * - memory：注入 Runtime 组装的 MemoryManager；派生上下文会按模块名绑定申请入口。
- *   独立 Runtime 不驱动 tick 生命周期，调用方需自行在边界调用它的 begin/end。
- * - profiler：允许禁用、替换或复用 profiler；注入后 enableProfiler 不再生效。
- * - enableProfiler：控制默认 profiler 初始开关。
- * - getProfilerMemory：控制 profiler 数据落在哪里。它必须返回同一个常驻对象，
- *   访问器每次写入前都会重新调用它并原地累加；返回临时副本会让统计丢失。
- * - markProfilerMemoryDirty：与访问器配套，在 Profiler 原地写入前显式标脏，
- *   让注入存储的宿主知道该把哪块数据写回，避免整棵 Memory
- *   重新序列化。
- *
- * 未提供 getProfilerMemory 时，createRuntime 使用闭包 heap 对象作为默认落点，
- * 统计不进入持久化 Memory。
+ * 每个字段归拥有该行为的模块解释：Runtime 只负责依赖排序和转交，不把 Profiler、
+ * ErrorMapper 或 MemoryManager 的配置重新发布成一组平铺字段。false 明确禁用
+ * Profiler；省略 profiler 则按项目默认开关创建 heap 统计实例。
  */
 export interface RuntimeOptions {
-  bus?: Bus;
+  platform?: RuntimePlatformOptions;
+  logging?: LoggingOptions;
+  memoryManager?: Omit<MemoryManagerOptions, 'logging'>;
+  profiler?: ProfilerOptions | false;
+  errorMapper?: ErrorMapperOptions;
+}
+
+/**
+ * 测试或特殊宿主使用的实例替换入口。
+ *
+ * 替换项与生产配置分离，防止调用者误把“模块实例”当作模块配置。Runtime 仍然
+ * 负责选择最终实例并向后序模块注入；普通 App 不应使用该参数建立第二条装配路径。
+ * profiler 允许显式 null，用于验证关闭观测时 Framework 的降级行为。
+ */
+export interface RuntimeOverrides {
   logging?: LoggerFactory;
+  bus?: Bus;
   memory?: MemoryHost;
   profiler?: Profiler | null;
   errorMapper?: ErrorMapper;
-  /** Framework 与 Profiler 读取当前 tick Game 的统一平台入口。 */
-  getGame?: () => Game;
-  /** ErrorMapper 首次处理堆栈时同步取得 source map；省略时加载 main.js.map。 */
-  loadSourceMap?: () => any;
-  /** 同步诊断出口；省略时由 ErrorMapper 记录 error 日志。 */
-  report?: (failure: PluginFailure) => void;
-  enableProfiler?: boolean;
-  getProfilerMemory?: () => ProfilerMemory;
-  markProfilerMemoryDirty?: () => void;
 }

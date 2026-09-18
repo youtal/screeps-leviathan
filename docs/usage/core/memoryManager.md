@@ -147,7 +147,7 @@ const status = memory.getStatus();
 
 ## 独立使用（不经 Framework）
 
-`createRuntime({ memory })` 会把按模块名绑定的申请入口放进 `ModuleContext.memory`；独立 Runtime 不驱动 tick，调用方需要自行在边界调用 `memory.begin(tick)` / `memory.end(tick)`。模块级测试可以直接 `createMemoryManager({ logging, platform })` 注入日志工厂和假平台，不必启动框架。
+`createRuntime({}, { memory })` 会把测试或特殊宿主提供的 MemoryHost 按模块名绑定到 `ModuleContext.memory`；独立 Runtime 不驱动 tick，调用方需要自行在边界调用 `memory.begin(tick)` / `memory.end(tick)`。模块级测试可以直接 `createMemoryManager({ logging, platform })` 注入日志工厂和假平台，不必启动框架。
 
 ## 未交付
 

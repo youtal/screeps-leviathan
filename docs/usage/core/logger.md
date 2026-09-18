@@ -7,16 +7,15 @@
 由 Runtime 统一创建，所有模块与内核组件共用一套等级、端口和邮件策略：
 
 ```ts
-import { createLogging } from '@/core/logger';
 import { createRuntime } from '@/core/runtime';
 
-const logging = createLogging({
-  levels: { info: true },   // 打开 info；其余等级跟随项目默认
-  notify: 'error',          // 允许作用域发送 error 邮件
-  notifyInterval: 60,       // Game.notify 分组间隔（分钟）
+const runtime = createRuntime({
+  logging: {
+    levels: { info: true }, // 打开 info；其余等级跟随项目默认
+    notify: 'error',        // 允许作用域发送 error 邮件
+    notifyInterval: 60,     // Game.notify 分组间隔（分钟）
+  },
 });
-
-const runtime = createRuntime({ logging });
 const context = runtime.createContext('Logistics');
 context.env.log.info('shared bus ready');
 ```

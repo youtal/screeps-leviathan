@@ -3,7 +3,7 @@
  *
  * 模块角色：core/errorMapper 的具体实现，为框架提供同步执行的错误捕获与源码定位。
  *
- * 主要功能：执行回调并返回成功或故障结果，将构建产物堆栈映射到源码，输出诊断并接入计时。
+ * 主要功能：定义 ErrorMapperOptions，执行回调并返回成功或故障结果，映射源码堆栈并输出诊断。
  *
  * 实现过程：capture 捕获异常并整理归属与堆栈；mapStack 首次使用时加载 source map，
  * 借助 @jridgewell/trace-mapping 查询 main/main.js 的位置，再交给报告回调或注入的日志器。
@@ -18,15 +18,23 @@ import type {
   PluginFailure,
 } from '@/contracts';
 
+/** ErrorMapper 自身拥有的配置；LoggerFactory 是前序依赖，由 Runtime 单独注入。 */
+export interface ErrorMapperOptions {
+  /** 首次映射请求时同步取得 source map；省略时加载构建产物的 main.js.map。 */
+  loadSourceMap?: () => any;
+  /** 结构化故障出口；省略时使用 ErrorMapper 作用域的 error 日志。 */
+  report?: (failure: PluginFailure) => void;
+}
+
 /**
  * 创建同步故障边界，成功返回原值，失败返回诊断联合类型，调用者据此隔离插件。
- * logging 必须由 Runtime 或测试组合边界显式注入；loadMap 注入构建映射的读取方式，
- * 默认由 Screeps 模块系统加载上传的 main.js.map；
+ * logging 必须由 Runtime 或测试组合边界显式注入；options.loadSourceMap 配置构建
+ * 映射的读取方式，默认由 Screeps 模块系统加载上传的 main.js.map；
  * trace-mapping 提供同步位置查询，避免异步初始化/WASM 与单 tick 调用约定冲突。
- * 默认加载器写在参数默认值里，只有首次映射时才真正 require：模块导入与正常 tick
+ * 默认加载器在创建时选定，只有首次映射时才真正 require：模块导入与正常 tick
  * 都不支付读取成本，本地/测试环境也不会因为缺少 main.js.map 而加载失败。
  * loadMap 返回 any：TraceMap 接受原始 JSON 文本或已解析对象，由构造函数在运行时校验，
- * 若在公共选项里收紧类型就得把第三方类型泄漏给调用方（见 types.ts 的 loadSourceMap）。
+ * ErrorMapperOptions.loadSourceMap 不要求调用方依赖第三方的映射类型。
  *
  * report 缺省时使用注入日志工厂的 ErrorMapper 作用域输出：Screeps 中 console 输出
  * 有 CPU 与配额成本，生产环境可注入更省的实现；report 抛错会被吞掉，不会盖掉原始
@@ -34,9 +42,9 @@ import type {
  */
 export const createErrorMapper = (
   logging: LoggerFactory,
-  loadMap: () => any = () => require('main.js.map'),
-  report?: (failure: PluginFailure) => void
+  options: ErrorMapperOptions = {}
 ): import('@/contracts/errorMapper').ErrorMapper => {
+  const loadMap = options.loadSourceMap ?? (() => require('main.js.map'));
   /**
    * 失败报告出口：显式注入优先，否则按 ErrorMapper 作用域记录 error 级日志。
    * 作用域日志器在创建映射器时派生一次并复用：作用域名、等级与着色前缀都不随
@@ -46,7 +54,7 @@ export const createErrorMapper = (
    */
   const log = logging.scope('ErrorMapper');
   const reportFailure =
-    report ??
+    options.report ??
     ((failure: PluginFailure) =>
       log.error(
         failure.pluginId +

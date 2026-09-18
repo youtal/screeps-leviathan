@@ -20,8 +20,8 @@ const runtime = createRuntime();
 
 /**
  * 应用单例仅由本处组装；闭包持续跨 tick 运行，避免每次 loop 重复订阅或丢失缓存。
- * 这里没有传 enableProfiler，Profiler 按项目默认值关闭；需要采样时在创建 Runtime
- * 时显式开启。loop 由 src/index.ts 导出，本文件不主动调用它。
+ * 这里没有传 profiler.enabled，Profiler 按项目默认值关闭；需要采样时在创建
+ * Runtime 时显式开启。loop 由 src/index.ts 导出，本文件不主动调用它。
  */
 export const framework = createFramework({
   runtime,

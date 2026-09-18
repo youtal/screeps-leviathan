@@ -65,19 +65,25 @@ const harness = (plugins: LeviathanPlugin[] = [], extra: any = {}) => {
   } = extra;
   const runtime =
     suppliedRuntime ??
-    createRuntime({
-      getGame: () => game,
-      logging,
-      memory: memory ?? unassembledMemory,
-      profiler,
-      enableProfiler,
-      report: suppliedReport ?? report,
-      loadSourceMap:
-        loadSourceMap ??
-        (() => {
-          throw new Error('no map');
-        }),
-    });
+    createRuntime(
+      {
+        platform: { getGame: () => game },
+        profiler: { enabled: enableProfiler },
+        errorMapper: {
+          report: suppliedReport ?? report,
+          loadSourceMap:
+            loadSourceMap ??
+            (() => {
+              throw new Error('no map');
+            }),
+        },
+      },
+      {
+        logging,
+        memory: memory ?? unassembledMemory,
+        profiler,
+      }
+    );
   const framework = createFramework({
     plugins,
     runtime,
@@ -169,7 +175,7 @@ describe('Framework lifecycle', () => {
             getGame: () => h.game,
             log: { error: jest.fn() },
           } as unknown as EnvMethods,
-          getMemory: () => stats,
+          storage: { getMemory: () => stats },
           enable: true,
         }),
         loadSourceMap: () => {
@@ -731,7 +737,10 @@ describe('ErrorMapper', () => {
       sources: ['src/example.ts'],
       mappings: 'AAAA',
     }));
-    const mapper = createErrorMapper(createLogging(), load, jest.fn());
+    const mapper = createErrorMapper(createLogging(), {
+      loadSourceMap: load,
+      report: jest.fn(),
+    });
     expect(mapper.mapStack('at run (main:1:1)\nat host (other:2:3)')).toBe(
       'at run (src/example.ts:1:1)\nat host (other:2:3)'
     );
@@ -741,15 +750,14 @@ describe('ErrorMapper', () => {
 
   /** 加载 map 与上报日志都抛错时，capture 仍要返回原始失败信息；错误对象的 toString 抛错也不能让 capture 本身抛出。 */
   it('preserves business failure if loading, reporting or string conversion fails', () => {
-    const mapper = createErrorMapper(
-      createLogging(),
-      () => {
+    const mapper = createErrorMapper(createLogging(), {
+      loadSourceMap: () => {
         throw new Error('map');
       },
-      () => {
+      report: () => {
         throw new Error('logger');
-      }
-    );
+      },
+    });
     const result = mapper.capture(
       { tick: 1, pluginId: 'a', phase: 'tickBegin' },
       () => {
@@ -783,7 +791,7 @@ describe('ErrorMapper', () => {
     }));
     const mapper = createErrorMapper(
       { scope } as unknown as Parameters<typeof createErrorMapper>[0],
-      () => ({})
+      { loadSourceMap: () => ({}) }
     );
 
     const meta = { tick: 1, pluginId: 'a', phase: 'tickExecute' } as const;

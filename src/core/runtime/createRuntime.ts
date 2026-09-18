@@ -5,10 +5,12 @@
  *
  * 主要功能：创建或接受日志、总线、存储、Profiler 和错误映射实例，返回完整 CoreRuntime 与上下文工厂。
  *
- * 实现过程：按依赖顺序准备各实例，将日志工厂传给消费者；createContext 为模块派生日志环境、
+ * 实现过程：先按 RuntimeOverrides 选择已有实例，未替换的能力按分组配置创建；
+ * 将日志工厂传给消费者，createContext 为模块派生日志环境、
  * 绑定存储申请入口，同时复用同一总线和 Profiler。
  *
- * 技术要点：Game 通过函数延迟获取，不跨 tick 缓存；注入 profiler 为 null 表示不使用统计器。
+ * 技术要点：Game 通过函数延迟获取，不跨 tick 缓存；配置 profiler: false 不创建统计器，
+ * 实例替换优先于配置，overrides.profiler: null 明确禁用。
  * 默认统计表保存在 Runtime 内存中；实例跨 tick 复用，global reset 后重建，持久分区由 MemoryManager 恢复。
  */
 import { createBus } from '@/core/eventBus';
@@ -23,7 +25,7 @@ import type {
   ModuleContext,
   ModuleContextOptions,
 } from '@/contracts';
-import type { RuntimeOptions } from './types';
+import type { RuntimeOptions, RuntimeOverrides } from './types';
 
 /**
  * 创建当前 AI 的 root runtime。
@@ -37,40 +39,45 @@ import type { RuntimeOptions } from './types';
  * 派生 ModuleContext。这样模块可以共享核心单例，又拥有自己的日志前缀。
  * 工厂自身不缓存派生结果：同一 moduleName 重复调用会得到新的 env 对象。
  */
-export const createRuntime = (options: RuntimeOptions = {}): CoreRuntime => {
+export const createRuntime = (
+  options: RuntimeOptions = {},
+  overrides: RuntimeOverrides = {}
+): CoreRuntime => {
   /**
-   * 日志工厂只解析一次：注入用于测试收集输出或复用已有配置，缺省时按项目
-   * 默认等级创建一个独立工厂。同一 Runtime 派生的所有消费者共享它，
+   * 日志工厂只解析一次：测试替身优先，否则由 logging 配置创建；省略配置时按
+   * 项目默认等级创建。同一 Runtime 派生的所有消费者共享它，
    * 因此日志端口与邮件策略在整个运行期内一致。
    */
-  const logging = options.logging ?? createLogging();
+  const logging = overrides.logging ?? createLogging(options.logging);
   /**
-   * 总线只解析一次：注入用于测试替换或复用已有总线，缺省时新建一条独立
+   * 总线只解析一次：overrides 用于测试替换，缺省时新建一条独立
    * 总线，让不同 root runtime 的订阅互不干扰。总线自己的诊断日志走同一个
    * 日志工厂，避免内核组件各自持有第二套日志配置。
    */
-  const bus = options.bus ?? createBus(logging);
+  const bus = overrides.bus ?? createBus(logging);
   /**
    * MemoryManager 位于 logging 之后创建，只消费已经存在的日志契约实例。
-   * 显式注入主要服务平台测试；默认实例直到 begin 才读取 RawMemory。
+   * overrides.memory 服务测试或特殊宿主；默认实例直到 begin 才读取 RawMemory。
    */
-  const memory = options.memory ?? createMemoryManager({ logging });
-  const getGame = options.getGame ?? (() => Game);
+  const memory =
+    overrides.memory ??
+    createMemoryManager({ ...options.memoryManager, logging });
+  const getGame = options.platform?.getGame ?? (() => Game);
   /**
    * 默认 Profiler 统计的落点：一个只存在于本闭包 heap 的普通对象。
    *
    * 独立 Runtime 没有 Framework 的提交边界，无法判断何时该把统计写回 Memory，
    * 因此默认不触碰全局 Memory，避免绕开统一持久化协议；代价是 global reset
-   * 后统计清零。需要跨 global reset 保留时必须注入 getProfilerMemory 与
-   * markProfilerMemoryDirty，由调用者决定存储位置与写回时机。
+   * 后统计清零。需要其它落点时由 ProfilerOptions.storage 提供完整存储端口，
+   * Runtime 顶层不再暴露成对的底层回调。
    *
    * 该对象被所有派生上下文共享：Profiler 计时路径会在其中原地累加每个 label
    * 的 totalTime/selfTime/calls，报告与 reset 也直接读写同一份数据。
    */
   const heapProfilerMemory = {};
   /**
-   * 用 `=== undefined` 而非 `??` 判断：显式传入 `null` 表示“本次运行不使用
-   * Profiler”，与“未提供、需要默认创建”是两种语义。
+   * overrides.profiler 的 null 与 options.profiler 的 false 都表示禁用；前者服务
+   * 测试实例替换，后者是生产配置。undefined 才表示由 Runtime 创建默认实例。
    *
    * 默认开关取自 setting，默认关闭，避免未启用时也承担每次包裹调用的取样成本。
    * Profiler 的环境以 'Profiler' 为日志前缀单独创建（共用 Runtime 的日志工厂），
@@ -78,18 +85,20 @@ export const createRuntime = (options: RuntimeOptions = {}): CoreRuntime => {
    * 因此调用方按可空处理。
    */
   const profiler =
-    options.profiler === undefined
-      ? createProfiler({
-          env: createEnvMethods('Profiler', logging, {}, undefined, getGame),
-          getMemory: options.getProfilerMemory ?? (() => heapProfilerMemory),
-          markMemoryDirty: options.markProfilerMemoryDirty,
-          enable: options.enableProfiler ?? DEFAULT_PROFILER_ENABLE,
-        })
-      : options.profiler;
+    overrides.profiler !== undefined
+      ? overrides.profiler
+      : options.profiler === false
+        ? null
+        : createProfiler({
+            env: createEnvMethods('Profiler', logging, {}, undefined, getGame),
+            storage: options.profiler?.storage ?? {
+              getMemory: () => heapProfilerMemory,
+            },
+            enable: options.profiler?.enabled ?? DEFAULT_PROFILER_ENABLE,
+          });
   /** ErrorMapper 只接收已创建的日志实例；其计时适配由 Framework 在消费时设置。 */
   const errorMapper =
-    options.errorMapper ??
-    createErrorMapper(logging, options.loadSourceMap, options.report);
+    overrides.errorMapper ?? createErrorMapper(logging, options.errorMapper);
 
   const createContext = (
     moduleName: string,

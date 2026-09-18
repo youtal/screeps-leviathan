@@ -158,7 +158,7 @@ test('real generated stack maps to TypeScript using uploaded main.js.map module'
       begin() {}, end() {}, deferStartupWindow() {},
       bind() { return () => { throw new Error('MemoryManager is not assembled'); }; }
     };
-    const core = exports.createRuntime({ memory: noMemory });
+    const core = exports.createRuntime({}, { memory: noMemory });
     const framework = exports.createFramework({ runtime: core });
     const errors = core.errorMapper;
     globalThis.failure = errors.capture(
@@ -177,7 +177,7 @@ test('real generated stack maps to TypeScript using uploaded main.js.map module'
   vm.runInContext(
     `
     globalThis.runs = 0;
-    const secondCore = exports.createRuntime({ memory: noMemory });
+    const secondCore = exports.createRuntime({}, { memory: noMemory });
     globalThis.runtime = exports.createFramework({ runtime: secondCore, plugins: [{
       manifest: { id: 'counter', version: 1 },
       onTickBegin(context) {

@@ -3,7 +3,7 @@
  *
  * 模块角色：core/profiler 的公共入口，供 Runtime 创建统计器并引用构造所需的类型。
  *
- * 主要功能：导出 createProfiler、Profiler 接口、ProfilerContext 和 ProfilerMemory。
+ * 主要功能：导出 createProfiler、Profiler 接口，以及配置、存储对象、上下文和统计表类型。
  *
  * 实现过程：从 createProfiler.ts 转发工厂，从 types.ts 转发公共操作、上下文和统计表类型。
  *
@@ -11,4 +11,10 @@
  * 内部统计访问器保留在模块内，业务只通过公共 Profiler 接口使用计时能力。
  */
 export { createProfiler } from './createProfiler';
-export { Profiler, ProfilerContext, ProfilerMemory } from './types';
+export type {
+  Profiler,
+  ProfilerContext,
+  ProfilerMemory,
+  ProfilerOptions,
+  ProfilerStorage,
+} from './types';
