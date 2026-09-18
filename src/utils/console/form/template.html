@@ -1,34 +1,16 @@
 <!--
-  文件摘要：保存控制台表单及各类控件的 HTML 模板片段。
-  createForm 依赖 `;;` 的固定顺序拆分片段，并用 `{占位符}` 注入数据；按钮脚本
-  从 DOM 收集字段值后调用传入命令，checkbox 因可能多选而单独返回数组。
+  文件摘要
 
-  模块位置：src/utils/console/form 的模板资源，由 createForm.ts 通过
-  `import template from './template.html'` 导入，不做逻辑判断，也不含游戏状态。
+  模块角色：utils/console/form 的 HTML 模板资源，为渲染器提供表单结构与按钮交互脚本。
 
-  输入 / 输出：本文件是被动数据。createForm 在模块求值期用 split 把整段文本切成
-  7 段（顺序：表单外层 / select / option / input / checkbox / radio / 表单项容器），
-  再用 replaceHtml 把 `{占位符}` 替换成运行期内容，因此新增片段必须追加在末尾，
-  否则会打乱既有定位。
+  主要功能：定义表单外层、select、option、input、checkbox、radio 和字段容器七个片段。
 
-  构建约定：Rollup 的 htmlString 插件在构建期用 html-minifier-terser 压缩本文件，
-  `removeComments: true` 会删除所有 HTML 注释（包括本说明与下面各行注释中的
-  分隔符字样），因此产物里的分隔符只出现在真实片段之间；`collapseWhitespace`
-  负责去掉缩进，运行期再由 fixRetraction 折叠剩余换行。
+  实现过程：createForm 按双分号分隔符及固定顺序拆分片段，替换花括号占位符；
+  按钮点击后读取字段值，收集多选值为数组，将数据序列化并通过 Console.sendCommand 调用传入命令。
 
-  按钮脚本（表单外层片段内联）：
-  - `{formName}` 同时用于 form 的 name 与脚本中的 document.forms 查询，二者必须一致；
-  - `{elementNames}` 由 createForm 生成为 'a','b' 形式，外层方括号把它组成 JS 数组；
-  - 同名控件多于一个时 `form[eleName]` 是 RadioNodeList，脚本用首元素的 type 判断
-    是否为 checkbox：是则收集所有 checked 值成数组，否则直接取 value；
-  - 数据对象经 JSON.stringify 后拼成 `({command})(数据)` 交给控制台 Console.sendCommand
-    执行（第二个实参固定为 1，沿用社区示例的调用形式，参考链接见脚本内注释）。
-
-  维护注意：输出会经过 fixRetraction 删除换行，折叠后的 onclick 是一行完整 JavaScript，
-  因此脚本必须写成“单行安全”的形式：
-  - 不能使用 `//` 行注释，它会注释掉同一行后续的全部代码，需要注释时请用 `/* */`；
-  - 不能依赖自动分号插入（ASI），每条语句都要显式写出分号，否则相邻语句会被拼接
-    成一条非法语句（例如 `x = []` 与下一行的 `x.forEach(...)`）。
+  技术要点：片段顺序须与渲染器解构顺序一致，表单名同时用于 DOM 查询。
+  构建时 HTML 注释被移除；最终输出会删掉换行，内嵌脚本必须显式写分号并避免单行注释。
+  脚本在浏览器控制台页面中执行，模板文件本身不保存游戏状态。
 -->
 <!-- 表单外层模板 -->
 <form name="{formName}">

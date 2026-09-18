@@ -1,16 +1,15 @@
 /**
- * 文件摘要：创建当前应用唯一的 Core Runtime 与 Framework 实例，并注册服务插件。
+ * 文件摘要
  *
- * app 只选择部署插件；Core 内部能力由 runtime 按单向依赖顺序组装一次，再整体交给
- * Framework 消费。所有实例在同一 global 生命周期内共享。模块加载阶段只完成注册，插件
- * setup 延迟到首次 loop；Memory 的解析、Segment 激活与写回由 MemoryManager 在 tick
- * 边界驱动（Framework 调用 begin/end），因此导入本模块不访问 Game、不读写存储。
+ * 模块角色：app 的实例创建处，将选定的 Core 能力和业务插件组成可运行的应用。
  *
- * global reset 后引擎重新求值整个 bundle：注册队列、服务表、事件订阅、房间索引等 heap
- * 状态全部重建，持久状态由 MemoryManager 按目录与 journal 恢复。
+ * 主要功能：创建一份 Runtime、一份 Framework，并登记 roomShortcuts 服务插件。
  *
- * 访问边界（AGENTS.md 第 9 节）：MemoryManager 是项目内唯一允许接触 Memory/RawMemory
- * 的模块；其它模块只能通过 `context.memory` 申请分区，不得绕开本装配自建存储入口。
+ * 实现过程：先调用 createRuntime 组装基础能力，再将完整实例与插件列表交给 createFramework，
+ * 向游戏入口导出 framework，由其 loop 驱动插件和 MemoryManager 的 tick 生命周期。
+ *
+ * 技术要点：模块加载时完成实例创建和注册，插件 setup 延迟执行；本文件不直接访问游戏存储。
+ * 这些实例跨 tick 复用，global reset 后重新创建；持久数据的恢复由 MemoryManager 负责。
  */
 import { createFramework } from '@/core/framework';
 import { createRuntime } from '@/core/runtime';

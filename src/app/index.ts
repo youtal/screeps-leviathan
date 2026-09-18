@@ -1,15 +1,14 @@
 /**
- * 文件摘要：作为 App 层统一出口，暴露 Framework 实例和服务插件描述。
+ * 文件摘要
  *
- * core 与 modules 提供工厂和协议；app 创建 Framework 单例，服务实例在
- * 首次 loop 的 setup 中创建。调用方通过本入口取得可直接导出的 loop。
+ * 模块角色：app 的统一入口，供游戏入口取得已组装的应用。
  *
- * 这里是当前 AI 组合根的对外门户：`src/index.ts` 只从本入口取 framework，
- * 新增业务模块时在 modules.ts 声明插件描述、在 runtime.ts 注册，不需要改动本文件。
- * 两条 `export *` 会在求值时执行被再导出的模块（runtime.ts 又先执行 modules.ts），
- * 所以“导入本入口”本身就完成了实例创建与插件注册；但两者都不读取 Memory、
- * 不访问 Game，真正的挂载与 setup 在第一次 loop 内发生。global reset 后模块图
- * 重新求值，会得到全新的实例和注册队列。
+ * 主要功能：导出框架实例和应用选用的插件描述。
+ *
+ * 实现过程：分别转发 runtime.ts 与 modules.ts 的导出，实例创建和插件定义仍由各自文件负责。
+ *
+ * 技术要点：导入本入口会执行应用装配，插件 setup 则留到首次 loop。
+ * 本文件不另建缓存；global reset 后，所引用的应用实例也会重新创建。
  */
 export * from './runtime';
 export * from './modules';

@@ -1,16 +1,14 @@
 /**
- * 文件摘要：提供覆盖全部表单控件的 createForm 使用示例。
+ * 文件摘要
  *
- * 模块位置：src/utils/console/form 下的开发期样例，与渲染器 createForm.ts、类型契约
- * types.ts 并列；它只被 console/index.ts 中预留的公共导出引用，当前不属于生产路径。
+ * 模块角色：utils/console/form 的调用示例，展示各类控件如何组织成一个表单。
  *
- * 主要输入 / 输出：不接受参数，调用时把固定的控件描述交给 createForm，返回可直接
- * console.log 的 HTML 字符串。示例在被调用时读取 Game.time 并生成 HTML，可用于开发期
- * 检查 input、select、radio 与 checkbox 的渲染和命令参数传递方式。
+ * 主要功能：getForm 提供包含输入、下拉、多选和单选控件的示例 HTML。
  *
- * 状态与副作用：无模块级状态、无缓存、不访问 Memory；只有调用 getForm 时才会读取
- * Game.time 并拼接字符串，因此导入本文件不会产生任何副作用，可以安全地作为控制台
- * 调试入口按需调用。
+ * 实现过程：把固定控件描述和提交按钮命令传给 createForm，返回生成的字符串，供调用方自行打印。
+ *
+ * 技术要点：导入时不渲染，调用时由 createForm 读取 Game.time 生成表单名；没有状态缓存或存储访问。
+ * 这是示例函数，尚未由 console 公共入口导出，提交命令随 HTML 中的按钮点击而执行。
  */
 import { createForm } from './createForm';
 

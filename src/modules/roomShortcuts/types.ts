@@ -1,17 +1,15 @@
 /**
- * 文件摘要：声明 RoomShortcuts 的创建选项、缓存键和键到对象/id 的类型映射。
+ * 文件摘要
  *
- * 模块位置：src/modules/roomShortcuts 的类型契约，被 createRoomShortcuts.ts 与
- * test/roomShortcuts.test.ts 引用。模块在 app 层以 roomShortcutsPlugin 注册，并把工厂
- * 返回值发布为服务 'roomShortcuts'，因此这些类型同时约束实现与使用方。
+ * 模块角色：modules/roomShortcuts 的参数和缓存类型定义，约束查询实现的类别、ID 与结果关系。
  *
- * 主要输入 / 输出：RoomShortcutsOpt 描述工厂入参（模块上下文加两个可选开关）；
- * ALL_CACHED_KEY、CachedObject、CachedMap 给出 getter 泛型查询的“键 -> 值”对应关系；
- * ShortcutsCache 描述闭包内缓存的静态形状。运行时能力全部由 createRoomShortcuts 返回。
+ * 主要功能：声明上下文选项、建筑与资源类别、类别对应的游戏对象，以及按房间保存的 ID 缓存。
  *
- * 状态与副作用：映射类型把 Screeps 的 structureType 常量与 ConcreteStructureMap 对齐，并将
- * Source、Mineral 作为额外类别加入同一泛型查询协议。这些类型只参与编译检查，不为缓存增加
- * 运行时字段；文件末尾集中导出的符号全部是类型，编译后本文件不产生任何 JS 导出。
+ * 实现过程：在 ModuleContext 上增加强制刷新和缓存租期选项；以 ConcreteStructureMap 为基础补充
+ * Source、Mineral，再用索引访问类型将类别映射为对象类型，用 Partial 表达尚未建立的类别索引。
+ *
+ * 技术要点：缓存字段保存 Id 数组，实际对象由查询时还原；这些声明不分配缓存或读取 Game。
+ * 文件中的资源名常量用于类型键，对外导出的符号均为类型，缓存生命周期由 createRoomShortcuts 管理。
  */
 import type { ModuleContext } from '@/contracts';
 

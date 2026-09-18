@@ -1,14 +1,15 @@
 /**
- * 文件摘要：为一个 tick 收集意图，按优先级与互斥锁仲裁后同步提交。
- * 所有候选先完成仲裁再执行，避免提交异常改变胜者；同优先级按提交顺序决胜。
- * 闭包仅保存在本 tick，heap 回执只包含动作结果元数据，下一 tick 由业务插件核验事实。
+ * 文件摘要
  *
- * 所属模块：core/framework 的内核组件，由 createFramework 每个 loop 新建，经 PluginContext
- * 的 intents 能力对外暴露 submit/receipts/previous；不从 framework/index 导出。
- * 输入为 tick 号、插件提交的 GameIntent，以及 eligible/budget/execute/measure 四个注入回调；
- * 输出为每个候选的 IntentReceipt（仅驻留 heap）与动作的执行结果。
- * 本文件不写 Memory、不直接调用 Game API：动作交给注入的 execute，使裁决逻辑可以脱离
- * Screeps 单测；队列与回执随实例丢弃，global reset 后没有需要恢复的状态。
+ * 模块角色：core/framework 的单 tick 动作仲裁组件，由主循环创建并通过上下文接收意图。
+ *
+ * 主要功能：校验和收集意图，解决动作冲突，执行胜出的回调并提供回执副本。
+ *
+ * 实现过程：先按优先级降序、提交序号升序排列候选，以对象加通道和附加锁确定全部胜者，
+ * 再逐项检查插件可用性与 CPU 预算，通过注入的 execute 执行并记录结果。
+ *
+ * 技术要点：仲裁后不因执行失败重新选人；commit 封闭队列，禁止再次提交或重复执行。
+ * 队列仅供本 tick 使用，不直接访问 Game 或存储；回执表示调用结果，下一 tick 的实际效果由业务核验。
  */
 import type { ExecutionResult, GameIntent, IntentReceipt } from '@/contracts';
 /**

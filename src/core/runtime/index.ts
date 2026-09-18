@@ -1,12 +1,14 @@
 /**
- * 文件摘要：汇总导出 Runtime 工厂、环境适配器与上下文类型。
+ * 文件摘要
  *
- * core/runtime 的公共出口：app 与业务模块统一从 '@/core/runtime' 导入，避免
- * 依赖目录内部文件结构。core/runtime 不创建项目级单例，只导出创建 root runtime
- * 的工厂、模块 env 工厂，以及相关上下文类型；真正的项目装配发生在 src/app。
+ * 模块角色：core/runtime 的公共入口，供 app、集成代码和测试创建基础运行环境。
  *
- * 本文件只做重导出，没有运行时状态与副作用；事件协议类型由 '@/core/eventBus'
- * 提供，不在此处转出。
+ * 主要功能：导出 createRuntime、createEnvMethods，以及装配选项和上下文相关类型。
+ *
+ * 实现过程：分别转发 Runtime 工厂、环境构造函数与 types.ts，让调用方按需要创建完整能力或环境对象。
+ *
+ * 技术要点：入口没有默认实例，导入本文件不启动游戏循环或读取存储。
+ * 完整能力的创建顺序由 createRuntime 管理，业务模块通常直接接收 Framework 提供的上下文。
  */
 export { createEnvMethods } from './env';
 export { createRuntime } from './createRuntime';

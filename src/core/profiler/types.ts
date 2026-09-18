@@ -1,6 +1,15 @@
 /**
- * 文件摘要：保存 Profiler 装配上下文与统计数据；公共观测能力由 contracts 发布。
- * 仅维护模块内部类型及契约兼容出口，不创建运行时状态或调用宿主。
+ * 文件摘要
+ *
+ * 模块角色：core/profiler 的构造依赖和统计记录类型文件，供工厂与数据访问层协作。
+ *
+ * 主要功能：声明 ProfilerContext、单标签 Record 和按标签索引的 ProfilerMemory，并转发公共 Profiler 接口。
+ *
+ * 实现过程：上下文继承环境接口，补充统计数据访问依赖与初始开关；
+ * 记录以 totalTime、selfTime、calls 三个数字保存汇总结果。
+ *
+ * 技术要点：ProfilerMemory 是统计表的类型名，不代表直接访问游戏 Memory。
+ * 本文件不创建记录或持久化数据，实际数据来源由装配方注入，公开操作协议来自 contracts/profiler。
  */
 import type { EnvContext } from '@/contracts/environment';
 export type { Profiler } from '@/contracts/profiler';

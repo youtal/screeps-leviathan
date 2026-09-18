@@ -1,7 +1,15 @@
 /**
- * 文件摘要：发布模块上下文和上下文派生工厂。
- * 属于 contracts 的编译期公共约定；只依赖其他契约或宿主类型，不导入具体实现。
- * 实现通过显式类型标注承诺结构，调用者通过 import type 引用；不创建状态或运行时副作用。
+ * 文件摘要
+ *
+ * 模块角色：contracts 中的 Runtime 协议，连接 Core 装配、Framework 和模块上下文。
+ *
+ * 主要功能：声明完整 CoreRuntime、业务可用的 ModuleContext，以及按模块名派生上下文的方法。
+ *
+ * 实现过程：CoreRuntime 汇集日志、总线、存储、计时和错误处理接口；createContext 接收模块名与
+ * 日志选项，返回带环境、共享总线、可空 Profiler 和可选存储申请入口的上下文。
+ *
+ * 技术要点：只依赖其他契约；readonly 限制字段赋值，不冻结实例内部状态。
+ * getGame 要在调用时取得游戏对象，消费者不可跨 tick 保存结果；本文件不创建任何具体能力。
  */
 import type { Bus } from './eventBus';
 import type { Profiler } from './profiler';

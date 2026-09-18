@@ -1,16 +1,15 @@
 /**
- * 文件摘要：提供控制台模板替换、文本着色与链接生成等纯文本工具。
+ * 文件摘要
  *
- * 模块位置：src/utils/console 的基础实现层，被 console/index.ts 作为公共出口转发，
- * 同时被 form/、help/ 两个渲染器复用（它们只负责拼装模板，不做着色与输出）。
- * 日志能力已迁入 core/logger，本文件只保留它的格式化依赖（Color、dyeText、dye*）。
+ * 模块角色：utils/console 的基础文本工具实现，供日志前缀、表单和帮助渲染共用。
  *
- * 主要输入 / 输出：输入是普通字符串与颜色常量，输出是可直接 console.log 的 HTML
- * 字符串。所有函数（replaceHtml、fixRetraction、dyeText、dye*、createLink、
- * createRoomLink）都是纯函数：不读写 Memory、不写输出、不缓存状态。
+ * 主要功能：替换模板占位符、删除换行、生成着色文字和普通链接，以及当前 shard 的房间链接。
  *
- * 外部依赖：无。生成的 HTML 面向 Screeps 控制台渲染环境，因此可以直接使用
- * span/style/a 等标记；着色函数与 Logger 共用，但不因此让本文件依赖 core。
+ * 实现过程：replaceHtml 逐键执行全局正则替换，fixRetraction 删除换行字符；着色与链接函数拼接 HTML，
+ * createRoomLink 调用时读取 Game.shard.name，再委托 createLink 生成链接。
+ *
+ * 技术要点：没有结果缓存或日志输出；除房间链接需读取 Game 外，结果由传入参数决定。
+ * 文本未做 HTML 转义，替换键与值还遵循正则及 String.replace 的规则，调用方需按模板约定提供内容。
  */
 /**
  * 占位符名称到替换文本的映射。

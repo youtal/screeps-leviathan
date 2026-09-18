@@ -1,16 +1,15 @@
 /**
- * 文件摘要：把模块和函数的结构化说明渲染为 Screeps 控制台帮助 HTML。
+ * 文件摘要
  *
- * 模块位置：src/utils/console/help 的入口渲染器，依赖同目录的 template.html/style.html
- * （构建期由 Rollup 的 htmlString 插件压缩为字符串）与 types.ts 的描述类型；
- * 目前尚未在 console/index.ts 中导出，属于预留的公共能力。
+ * 模块角色：utils/console/help 的帮助渲染实现，将模块和函数说明组合成控制台面板。
  *
- * 主要输入 / 输出：输入是一个或多个 ModuleDescribe（模块名、介绍、FunctionDescribe 列表），
- * 输出是可直接 console.log 的单行 HTML 字符串。渲染是纯字符串拼接，不读写 Memory。
+ * 主要功能：显示模块介绍、函数标题、参数解释和调用示例，返回带折叠结构的单行 HTML。
  *
- * 状态与副作用：模块求值期只执行一次 template.split(';;') 得到 4 个模板片段常量（跨 tick 复用、
- * global reset 后重建），不写任何输出，渲染结果由调用方自行 console.log；渲染函数本身无缓存、
- * 无可变状态，因此导入本模块不会产生导入期副作用。
+ * 实现过程：加载时拆出四个模板片段，按模块、函数、内容行逐层填充并着色，
+ * 用函数名加 Game.time 生成折叠控件 ID，最后加入样式并去掉换行。
+ *
+ * 技术要点：模板片段跨 tick 复用，global reset 后重建；生成函数说明时读取 Game.time，
+ * 同 tick 同名函数可能产生重复 ID。函数只返回文本，不打印、不执行示例命令，也不缓存渲染结果。
  */
 import template from './template.html';
 import style from './style.html';

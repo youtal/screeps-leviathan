@@ -1,17 +1,16 @@
 /**
- * 文件摘要：补充项目需要的 Screeps 全局类型关系与通用对象别名。
+ * 文件摘要
  *
- * 声明合并让 RoomObject、Structure、Source 和 Mineral 具备 `_HasId` 约束，
- * 以便环境适配器和泛型工具接受这些对象；本文件不生成运行时代码。
+ * 模块角色：项目的全局类型补充，协调 Screeps 对象与泛型 ID 查询的类型关系。
  *
- * 为什么必须合并：@types/screeps 的 RoomObject 只声明 prototype/effects/pos/room，
- * 而 `Id<T extends _HasId>`、`Game.getObjectById<T extends _HasId>` 都要求 T 具备
- * `id: Id<this>`。给 RoomObject 合并 `_HasId` 后，它和三个子接口自动获得 id，
- * `Id<Structure>`、`Id<Source>` 这类写法才能在模块与测试中通过类型检查。
+ * 主要功能：补充 RoomObject、Structure、Source、Mineral 的继承关系，
+ * 并声明 AnyObject 和带 store 的 ObjectWithStore，供其他源码的参数和事件数据使用。
  *
- * 本文件没有顶层 import/export，属于全局环境声明，声明会与 @types/screeps 的同名
- * interface 合并；一旦补上 `export {}` 就会退化成模块，合并随之失效。interface 合并
- * 只能追加成员、不能改写既有成员类型，因此这里不重复声明 pos、room 等字段。
+ * 实现过程：通过同名 interface 声明合并，让 RoomObject 满足 _HasId 约束，
+ * 再用联合类型和接口继承描述通用对象。
+ *
+ * 技术要点：文件不含顶层 import/export，以保持全局声明；编译后不生成运行时代码。
+ * 这些声明只影响类型检查，不会给实际游戏对象添加 id 或 store 属性。
  */
 /** 只追加 id 约束；三个子接口重述既有继承关系，用于让合并后的成员在联合与泛型中可见。 */
 interface RoomObject extends _HasId {}

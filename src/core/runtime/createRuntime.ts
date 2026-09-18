@@ -1,17 +1,15 @@
 /**
- * 文件摘要：按单向依赖顺序组合全部 Core 能力，创建应用级 Root Runtime。
+ * 文件摘要
  *
- * core/runtime 的装配入口：创建 Logger 后依次组装 EventBus、MemoryManager、
- * Profiler 与 ErrorMapper，向 app 层提供完整 Root Runtime。它只做依赖组合，
- * 不管理 tick 生命周期或插件依赖（由 Framework 驱动），也不挂载或写回 Memory。
+ * 模块角色：core/runtime 的基础能力装配实现，是 Core 同级模块具体工厂的集中调用处。
  *
- * 输入是可选的 RuntimeOptions；输出是 CoreRuntime，其中包含唯一 Core 实例及
- * createContext。后者按模块名得到共享 bus/profiler、绑定 memory 与独立 env。
+ * 主要功能：创建或接受日志、总线、存储、Profiler 和错误映射实例，返回完整 CoreRuntime 与上下文工厂。
  *
- * 状态与副作用：共享单例与默认 Profiler 统计都存放在本函数闭包中，随当前
- * global 生命周期存在，global reset 后由调用方重新装配；默认统计对象只驻留
- * heap，不会被序列化进 Memory，需要持久化时必须由宿主注入存储
- * 接口提供的访问器和标脏回调。
+ * 实现过程：按依赖顺序准备各实例，将日志工厂传给消费者；createContext 为模块派生日志环境、
+ * 绑定存储申请入口，同时复用同一总线和 Profiler。
+ *
+ * 技术要点：Game 通过函数延迟获取，不跨 tick 缓存；注入 profiler 为 null 表示不使用统计器。
+ * 默认统计表保存在 Runtime 内存中；实例跨 tick 复用，global reset 后重建，持久分区由 MemoryManager 恢复。
  */
 import { createBus } from '@/core/eventBus';
 import { createErrorMapper } from '@/core/errorMapper';

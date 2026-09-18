@@ -1,7 +1,15 @@
 /**
- * 文件摘要：发布插件清单、生命周期、上下文和框架控制接口。
- * 属于 contracts 的编译期公共约定；只依赖其他契约或宿主类型，不导入具体实现。
- * 实现通过显式类型标注承诺结构，调用者通过 import type 引用；不创建状态或运行时副作用。
+ * 文件摘要
+ *
+ * 模块角色：contracts 中的插件与框架协议，约定业务模块如何注册、运行和取得依赖。
+ *
+ * 主要功能：声明插件清单、同步生命周期钩子、上下文能力、框架配置、控制方法和诊断快照。
+ *
+ * 实现过程：manifest 描述依赖与服务，setup 发布服务并登记清理；tick 钩子通过上下文查询环境、
+ * 申请存储、检查 CPU 和提交意图，Framework 接口提供注册、停用、卸载与恢复操作。
+ *
+ * 技术要点：插件 ID 与服务名用途不同；依赖排序、阶段权限和命令在 tick 边界生效等规则由框架执行。
+ * 这些接口本身不创建插件或保存状态，Runtime 必须由调用方显式提供。
  */
 import type { ModuleContext, CoreRuntime } from './runtime';
 import type { CpuBudget, GameIntent, IntentReceipt } from './intent';

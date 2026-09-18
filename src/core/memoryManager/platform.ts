@@ -1,16 +1,15 @@
 /**
- * 文件摘要：MemoryManager 的默认平台端口实现，直连 Screeps 的 RawMemory 与 Segment API。
+ * 文件摘要
  *
- * 模块位置：core/memoryManager 的平台适配层，由 createMemoryManager 在未注入端口时使用；
- * 测试通过注入端口完整替代它，因此本文件不参与单元测试的断言路径。
+ * 模块角色：core/memoryManager 对接 Screeps 的平台适配层，将宿主存储操作集中在一处。
  *
- * 输入输出：readRaw/writeRaw 对应 RawMemory.get/set 的完整字符串读写；readSegments/
- * writeSegment 对应 RawMemory.segments 的按页读写；activeSegments/activateSegments
- * 对应 RawMemory.getActiveSegments/setActiveSegments。所有方法都是薄包装，不做缓存与转换。
+ * 主要功能：提供主存储文本读写、Segment 读写、当前可见页面查询和下一轮页面激活请求。
  *
- * 运行时约束：setActiveSegments 只是"请求激活"，被请求的页要到下一 tick 才可读；
- * RawMemory.set 接收完整字符串，超限由引擎拒绝，因此容量检查在管理器侧完成。
- * 本文件不访问 Game、Memory 全局对象，也不写 Memory 根，避免与游戏自身的内存对象耦合。
+ * 实现过程：createScreepsPlatform 返回 MemoryPlatform 方法，将调用分别转给 RawMemory 的
+ * get、set、segments 与 setActiveSegments，激活前复制输入 ID 数组。
+ *
+ * 技术要点：创建适配器本身不访问存储，调用方法才产生读写或激活副作用；没有内部缓存。
+ * activeSegments 返回当前可见页面，申请激活不表示本 tick 就能读取，新页面的等待由管理器处理。
  */
 import type { MemoryPlatform } from './types';
 

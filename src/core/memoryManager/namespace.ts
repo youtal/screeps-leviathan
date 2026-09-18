@@ -1,18 +1,15 @@
 /**
- * 文件摘要：主 Memory 根命名空间的加载、深度校验与片段化序列化。
+ * 文件摘要
  *
- * 模块位置：core/memoryManager 的 Raw 后端基础层。createMemoryManager 在首次 begin
- * 调用 loadRawRoot 解析 RawMemory，随后用 createRawStore 维护"已提交文本片段"，
- * 使每 tick 只重新序列化变化的分区与目录，而不是整棵 Memory。
+ * 模块角色：core/memoryManager 的主存储格式处理层，供管理器加载目录和生成待写文本。
  *
- * 输入输出：输入是 RawMemory 的原始字符串、运行期对命名空间的原地修改，以及宿主
- * Memory 根对象；输出是下一次完整写入所需的 JSON 文本。片段只覆盖"我们拥有的"
- * 部分（allocations、migration、每个插件的 rawPartitions）；非托管根字段在写入时
- * 从宿主对象现取现序列化，既不缓存过期文本，也不会覆盖其他代码的数据。
+ * 主要功能：解析并校验命名空间，导入旧版插件数据，保留其他根字段，并按修改范围复用 JSON 片段。
  *
- * 数据安全约定：schema 版本、目录记录、迁移记录与 Raw 分区逐项深度校验，任一非法
- * 都抛错并由管理器进入故障状态（拒绝写入），避免遍历半损坏结构时才崩溃；旧
- * `leviathan` 命名空间只读取插件 payload 做一次性导入，绝不改写或删除。
+ * 实现过程：loadRawRoot 解析根对象，建立或验证分配表、分区和迁移记录；createRawStore 将这些对象
+ * 包装为带标脏、序列化及外部根字段同步方法的容器，按目录、迁移记录和插件分别缓存字符串。
+ *
+ * 技术要点：不直接调用 RawMemory；修改对应对象后必须清除其片段缓存，避免序列化旧值。
+ * 缓存属于实例，可跨 tick 使用，global reset 后重新建立；损坏格式抛错，危险对象键被拒绝。
  */
 import type { JsonValue } from '@/contracts/memory';
 import {

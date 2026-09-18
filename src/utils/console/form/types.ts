@@ -1,18 +1,15 @@
 /**
- * 文件摘要：声明控制台表单的控件描述、按钮参数和构造器类型。
+ * 文件摘要
  *
- * 模块位置：src/utils/console/form 的类型契约文件，被 createForm.ts（渲染）与
- * example.ts（示例数据）共同引用；本文件不含任何运行时值，编译后整体擦除。
+ * 模块角色：utils/console/form 的输入类型定义，约束调用方提供的表单数据和渲染器构造函数。
  *
- * 主要输入 / 输出：对调用方而言，输入契约是 HTMLElementDetail[]（每种控件的判别联合）
- * 与 ButtonDetail，输出契约是渲染函数签名 HTMLCreator；createForm 依赖这些类型完成
- * 映射查表与参数检查。
+ * 主要功能：声明四类控件、选项、按钮文字与命令，以及控件联合类型和 HTMLCreator 函数类型。
  *
- * 设计方式：每种控件以 `type` 字符串作为判别字段，HTMLElementDetail 因而形成判别联合；
- * createForm 可以据此选择对应构造器，调用方也能获得精确的字段检查。
- * HTMLElements 是唯一的事实来源——新增控件只需在其中登记，联合类型
- * （HTMLElements[keyof HTMLElements]）与 createForm 的 mapped type 构造器表会自动跟进，
- * 后者还会在缺少实现时直接报编译错误。
+ * 实现过程：各控件用 type 字面量区分，HTMLElements 将名称关联到具体描述，
+ * 再通过 HTMLElements[keyof HTMLElements] 生成联合，供渲染器按类型分派。
+ *
+ * 技术要点：新增控件需同步类型表和构造函数表；ButtonDetail.command 是待嵌入的命令字符串。
+ * 这些声明只参与编译检查，不校验运行时内容、不创建 DOM，也不执行命令。
  */
 /**
  * 所有表单控件共享的基础描述。

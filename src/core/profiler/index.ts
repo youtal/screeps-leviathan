@@ -1,12 +1,14 @@
 /**
- * 文件摘要：汇总导出 Profiler 工厂及其公共类型协议。
+ * 文件摘要
  *
- * createProfiler 是运行时创建 profiler 的工厂；类型出口用于 runtime 和测试
- * 引用 ProfilerMemory、ProfilerContext 等协议。
+ * 模块角色：core/profiler 的公共入口，供 Runtime 创建统计器并引用构造所需的类型。
  *
- * 本入口不导出 memory.ts 的 createMemoryAccessor：统计存储只应通过宿主提供的 getMemory
- * 适配，保持统计数据模型与公共观测能力的边界（测试仍可按路径直接导入该文件）。导入本入口
- * 不创建 Profiler、不访问 Game/Memory；工厂返回 null 的失败契约由调用方处理。
+ * 主要功能：导出 createProfiler、Profiler 接口、ProfilerContext 和 ProfilerMemory。
+ *
+ * 实现过程：从 createProfiler.ts 转发工厂，从 types.ts 转发公共操作、上下文和统计表类型。
+ *
+ * 技术要点：导入本入口不读取 CPU、不创建统计表，也不包装函数；这些动作由工厂及返回实例执行。
+ * 内部统计访问器保留在模块内，业务只通过公共 Profiler 接口使用计时能力。
  */
 export { createProfiler } from './createProfiler';
 export { Profiler, ProfilerContext, ProfilerMemory } from './types';

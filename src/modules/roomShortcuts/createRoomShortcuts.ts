@@ -1,26 +1,16 @@
 /**
- * 文件摘要：按房间缓存建筑、Source 与 Mineral 的 id，并提供强类型快捷查询。
+ * 文件摘要
  *
- * 模块位置：src/modules/roomShortcuts 的实现文件（同目录 types.ts 提供类型契约）。
- * app 层 roomShortcutsPlugin 在 setup 中调用本工厂，并把返回值发布为服务
- * 'roomShortcuts'，因此这里是“查询基础设施”，不做任何业务决策。
+ * 模块角色：modules/roomShortcuts 的查询实现，为插件提供按房间和对象类别访问建筑、矿物与矿源的方法。
  *
- * 主要输入 / 输出：输入是 RoomShortcutsOpt（模块上下文 + forceReInit/cacheLeaseTicks）；
- * 输出是一个查询对象，共 22 个以房间名为参数的 getter：13 个数组型
- * （spawn/extension/rampart/road/wall/keeperLair/portal/link/lab/container/tower/
- * powerBank/source）与 9 个单值型（observer/powerSpawn/extractor/nuker/factory/
- * storage/terminal/invaderCore/mineral）。集合查询无结果返回 `[]`，单对象查询无结果返回
- * `undefined`；房间尚未建设某类建筑属于正常状态，不记录警告。
+ * 主要功能：首次查询建立 ID 索引，复用索引取得本 tick 对象，并在建筑事件或缓存过期时更新。
  *
- * 状态与副作用：模块使用闭包保存按房间分组的堆内缓存，以一次 FIND 查询换取租约期间的低成本
- * `Game.getObjectById` 查询。全局建筑建成和毁坏事件用于增量维护缓存；固定 tick
- * 租约及视野丢失时的主动失效负责兜底，避免事件遗漏让陈旧数据长期存活。
- * 三个状态容器都只存在于当前 global 实例，不写入 Memory/RawMemory：global reset 或插件
- * 重新 setup 后从空状态按首次查询重建（见 docs/design/modules/roomShortcuts.md）。
+ * 实现过程：通过注入环境查询房间，用 room.find 和 Lodash 分组收集 ID；getter 再用 getObjectById
+ * 还原对象。建造事件补入 ID，拆除事件核验废墟后移除 ID，无法核验时让整个房间索引失效。
  *
- * 已接受的一致性风险：若房间失去视野期间没有任何 getter 调用，模块不会立即发现这次中断，
- * 旧缓存会继续使用到租约到期。期间新增的建筑可能延迟出现，已失效的 id 会在查询时被过滤，
- * 因此结果不会指向不存在的对象，只会暂时偏旧；租约提供最终一致。
+ * 技术要点：只跨 tick 保存 ID 和建立时间，不保存游戏对象；失去视野会清理索引，租期到后按查询重建。
+ * 单对象查询缺失返回 undefined，列表查询返回数组；工厂创建时订阅事件，global reset 后需重新创建。
+ * 缓存不写持久存储，放入 Framework 插件时由框架管理订阅释放。
  */
 import {
   RoomShortcutsOpt,

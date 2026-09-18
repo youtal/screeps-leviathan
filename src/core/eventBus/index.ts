@@ -1,13 +1,14 @@
 /**
- * 文件摘要：汇总导出 EventBus 工厂、事件常量以及公共类型协议。
+ * 文件摘要
  *
- * core/eventBus 的公共出口：业务模块与 Framework 都应从该入口导入总线能力，
- * 避免依赖模块内部文件结构。导出内容对应模块的三个层次 —— contracts 的类型
- * 协议、constants.ts 的事件常量、createBus 的运行时工厂。
+ * 模块角色：core/eventBus 的公共入口，整理总线实现、事件常量和类型的导出。
  *
- * 本文件不创建总线实例：createBus 只是工厂，实例由 createRuntime 或 Framework
- * 在自己的装配阶段创建并共享。因此导入本入口不会注册订阅、不会写入 Memory 或
- * Game，也不持有任何跨 tick 状态，global reset 后行为不变。
+ * 主要功能：提供 createBus、eventCategory、eventList，以及事件作用域与载荷类型。
+ *
+ * 实现过程：工厂和常量分别来自 createBus.ts 与 constants.ts，公共协议从 contracts 转发。
+ *
+ * 技术要点：导入时会建立事件常量，但不创建总线或登记订阅；订阅状态归工厂实例所有。
+ * Core 同级模块通过契约接收总线，生产实例由 Runtime 创建。
  */
 export { eventCategory, eventList } from './constants';
 export { createBus } from './createBus';

@@ -1,21 +1,15 @@
 <!--
-  文件摘要：定义 Screeps 控制台帮助面板、模块区块和 API 折叠项的样式。
-  createHelp 会把整个 style 标签与帮助 HTML 一并输出，类名仅供对应模板使用。
+  文件摘要
 
-  模块位置：src/utils/console/help 的样式资源，被 createHelp.ts 通过
-  `import style from './style.html'` 使用；本文件不含占位符，导入结果固定。
+  模块角色：utils/console/help 的样式资源，配合模板排列模块介绍与 API 说明。
 
-  输入 / 输出与副作用：样式随每次 createHelp 输出重复下发，仅作用于控制台渲染出的
-  DOM，不写入游戏状态；构建期 htmlString 插件以 `minifyCSS: true` 压缩 style 内容，
-  以 `removeComments: true` 删除本注释块，因此说明文字不会进入上传产物。
+  主要功能：设置模块标题、说明、可换行的 API 卡片和内容行，并控制详情折叠。
 
-  两个 style 块的分工：
-  - 模块样式：.module-help 是整体竖向容器，.module-container 是单个模块区块，
-    .module-info/.module-title/.module-describe 排布标题行，.module-api-list 让 API
-    卡片横向换行排列；
-  - api 样式：.api-content-line 是单行内容；.api-container 及其 input/label 规则实现
-    纯 CSS 折叠——input 被隐藏，label 常驻显示，`input + .api-content` 默认 max-height
-    为 0，`:checked` 时才展开，因此不需要任何脚本即可查看 API 详情。
+  实现过程：模块规则使用 flex 布局，API 规则隐藏 checkbox，并用相邻元素选择器和 :checked
+  改变内容区域的最大高度，使点击 label 即可展开或收起。
+
+  技术要点：不需要 JavaScript 来实现折叠；选择器依赖模板的类名与元素顺序。
+  样式作为固定字符串随每次帮助 HTML 输出，构建时压缩 CSS 并删除注释，不读取游戏状态。
 -->
 <!-- 模块样式 -->
 <style>

@@ -1,8 +1,15 @@
 /**
- * 文件摘要：封装 Profiler 统计容器的读取、累加与清空，属于本模块内部模型的访问层。
- * 输入为宿主 getMemory、Logger 和可选标脏回调，不直接读写 RawMemory 或全局 Memory。
- * 每次操作重取容器并原地更新；heap 生命周期由宿主控制，Framework 默认在 reset 后丢失统计。
- * 注入持久化存储时由宿主负责标脏及提交，访问器自身不缓存第二份引用、不序列化。
+ * 文件摘要
+ *
+ * 模块角色：core/profiler 的统计数据访问层，供计时实现统一查询、累加和清零。
+ *
+ * 主要功能：返回 get、getAll、update、clear 方法，并在数据来源不可用时报告创建失败。
+ *
+ * 实现过程：每次操作通过注入的 getMemory 取得统计表；缺失标签查询返回零值，更新时创建自有属性，
+ * 累加总耗时、自身耗时与次数，更新和清零前调用 markDirty 通知外部。
+ *
+ * 技术要点：不会直接访问游戏 Memory，也不缓存统计表引用；是否持久保存取决于注入的数据来源。
+ * Object.defineProperty 允许 __proto__ 等标签作为普通记录键；getAll 返回原表，调用方不应绕过访问方法修改。
  */
 import type { Record, ProfilerMemory } from './types';
 import type { Logger } from '@/contracts/logging';

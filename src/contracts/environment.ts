@@ -1,7 +1,14 @@
 /**
- * 文件摘要：发布可注入的游戏环境与日志依赖。
- * 属于 contracts 的编译期公共约定；只依赖其他契约或宿主类型，不导入具体实现。
- * 实现通过显式类型标注承诺结构，调用者通过 import type 引用；不创建状态或运行时副作用。
+ * 文件摘要
+ *
+ * 模块角色：contracts 中的游戏环境协议，让业务模块通过注入的环境访问 Screeps。
+ *
+ * 主要功能：声明 Game、房间、旗帜、两类 creep 与 ID 查询方法，以及日志和可选函数计时能力。
+ *
+ * 实现过程：EnvMethods 汇集这些方法，EnvContext 再将其作为 env 字段交给模块使用。
+ *
+ * 技术要点：getObjectById 沿用 Screeps 的泛型签名，保留 ID 与结果类型的对应关系；
+ * profiler 仅要求最小的 HasWrap 能力。文件只有类型，不缓存 Game，也不执行查询。
  */
 import type { Logger } from './logging';
 import type { HasWrap } from './profiler';

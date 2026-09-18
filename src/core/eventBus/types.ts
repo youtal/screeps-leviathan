@@ -1,6 +1,15 @@
 /**
- * 文件摘要：保存 EventBus 监听器索引；公共总线和事件协议由 contracts 发布。
- * 仅维护模块内部类型及契约兼容出口，不创建运行时状态或调用宿主。
+ * 文件摘要
+ *
+ * 模块角色：core/eventBus 的内部索引类型文件，同时保留公共事件协议的类型出口。
+ *
+ * 主要功能：描述事件到订阅者回调的 ListenersMap，以及 global、rooms、group 三类索引。
+ *
+ * 实现过程：用嵌套 Map 表达“事件名 → 订阅者名 → 回调”，再按作用域组合成 ListenersStore；
+ * 公共作用域与事件数据类型直接从 contracts 转发。
+ *
+ * 技术要点：内部容器用 unknown 接纳不同事件的回调，事件名与数据的精确对应由公开泛型接口保证。
+ * 文件只描述索引形状，不创建 Map；实际索引的增删和清理由 createBus 负责。
  */
 import type { EventType } from '@/contracts/events';
 export type * from '@/contracts/eventBus';

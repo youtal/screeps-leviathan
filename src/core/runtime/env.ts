@@ -1,17 +1,15 @@
 /**
- * 文件摘要：把 Screeps 全局对象包装成可注入的环境方法，并为模块派生作用域日志器。
+ * 文件摘要
  *
- * core/runtime 的适配层：业务模块依赖 EnvMethods 而不是直接散布全局访问，
- * 便于单元测试替换运行环境，运行时仍访问真实 Screeps API。
+ * 模块角色：core/runtime 的环境构造工具，为模块上下文提供游戏查询与带名称的日志器。
  *
- * 输入是模块名（同时作为日志前缀）、可选的 LogOptions、是否允许该模块发送错误邮件，
- * 以及 Runtime 组装的 LoggerFactory；输出是 EnvMethods —— 一组无状态的 Game 访问
- * 闭包，加上按模块作用域派生的 log。日志等级与输出端口全部由注入的工厂决定，
- * 本文件不再持有日志实现，因此 core 不再反向依赖 utils/console 的日志代码。
+ * 主要功能：生成 Game、房间、旗帜、creep、power creep 和 ID 查询方法，并组合 env.log。
  *
- * 状态与副作用：Game 查询函数只在调用时执行注入的 getGame，
- * 不缓存任何 Game 对象，因此跨 tick 不会持有失效引用；唯一状态来自注入的
- * 日志工厂（由装配方持有）。global reset 后模块重新求值，行为保持一致。
+ * 实现过程：createGameMethods 将查询委托给注入的 getGame；createEnvMethods 调用日志工厂的 scope，
+ * 应用模块名和局部日志选项后，将日志器与查询方法合并返回。
+ *
+ * 技术要点：每次查询才获取 Game，避免跨 tick 引用过期对象；测试可替换 getGame 和日志工厂。
+ * 返回方法可跨 tick 复用，不保存游戏查询结果，也不负责持久存储或创建 Profiler。
  */
 import type { LoggerFactory, LogOptions } from '@/contracts/logging';
 import type { EnvMethods } from '@/contracts';

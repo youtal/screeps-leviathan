@@ -1,7 +1,15 @@
 /**
- * 文件摘要：发布 MemoryManager 的申请、访问与宿主生命周期协议。
- * 属于 contracts 的编译期公共约定；只依赖其他契约或宿主类型，不导入具体实现。
- * 存储实现见 `src/core/memoryManager`；契约本身不创建状态或运行时副作用。
+ * 文件摘要
+ *
+ * 模块角色：contracts 中的持久存储协议，是业务模块与 MemoryManager 之间的访问约定。
+ *
+ * 主要功能：声明分区申请、初始化与版本迁移、读写访问，以及宿主 begin/end 生命周期。
+ *
+ * 实现过程：按 owner 绑定申请函数，以 localId 和选项取得稳定访问器；每 tick 调用 access，
+ * 根据 pending/ready 分支决定等待或通过 query、commit 访问数据。
+ *
+ * 技术要点：访问器可跨 tick 保留，ready 视图仅在签发 tick 和对应数据仍有效时使用。
+ * DeepReadonly 只提供编译期约束；commit 抛错不保证回滚，也不表示已经写入存储。本文件不执行持久化。
  */
 /** JSON 值的静态边界；循环引用、运行时输入及容量仍须实现校验。 */
 export type JsonValue =

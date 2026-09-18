@@ -1,9 +1,16 @@
 /**
- * 文件摘要：Framework 组合 CPU 准入、错误映射、插件注册和意图仲裁，提供同步 loop 和管理接口。
- * 生命周期变更在 tick 边界事务性生效；服务、上下文、健康状态及 Profiler 统计仅存在于实例 heap。
- * Memory 由注入的 MemoryManager 在 tick 边界驱动（begin/end），框架自身不挂载 Memory、
- * 不读写 RawMemory，也不解释持久化数据；global reset 后按 journal 与目录恢复。
- * Game 对象不得跨 tick 保存；本 tick 失败集合和意图每轮重建，注册/计时缓存随实例存活。
+ * 文件摘要
+ *
+ * 模块角色：core/framework 的主实现，将注入的 Runtime 与内部调度组件组织成游戏循环。
+ *
+ * 主要功能：管理插件注册和依赖、服务与订阅、生命周期、动作提交、失败统计及停用恢复。
+ *
+ * 实现过程：loop 在 tick 开始驱动存储并应用注册命令，再按依赖顺序初始化和执行插件，
+ * 集中仲裁意图，逆序执行收尾，最后更新健康记录并驱动存储提交；各阶段结合 CPU 检查与错误捕获。
+ *
+ * 技术要点：同一 tick 重复调用被跳过，重入被拒绝；注册命令整批校验后生效，连续失败会暂停插件。
+ * 服务、上下文和计时包装跨 tick 复用，意图与本轮失败集合每 tick 重建；global reset 后重建实例。
+ * 持久数据的加载与恢复完全交给 Runtime 的 MemoryManager，本文件不直接读写游戏存储。
  */
 import type { Bus, EventScope, EventType, DataByEvent } from '@/contracts';
 import { createCpuGovernor } from './cpuGovernor';

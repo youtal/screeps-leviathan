@@ -1,13 +1,15 @@
 /**
- * 文件摘要：提供 tick 内 CPU 准入检查，为 健康统计和后处理保留预算。
- * 使用 tickLimit 为硬边界、limit 为普通插件边界；低 bucket 暂缓普通插件。
- * 此组件不能抢占 JavaScript 函数，长任务必须主动检查 remaining 并分批运行。
+ * 文件摘要
  *
- * 所属模块：core/framework 的内核组件，由 createFramework 用 options 阈值构造，同时用于
- * 插件激活准入、tick 三阶段准入和意图提交预算；属于内部实现，不从 framework/index 导出。
- * 输入为 getGame 与两个阈值，输出为 types.ts 的 CpuBudget 协议（remaining/admit）闭包。
- * 组件不持有跨 tick 状态、不读写 Memory，因此 global reset 后无需恢复；代价是每次查询
- * 都重新采样 Game.cpu，用即时性换取"预算判断不会过期"。
+ * 模块角色：core/framework 的 CPU 预算检查组件，供插件调度和意图提交判断能否继续。
+ *
+ * 主要功能：返回 remaining 剩余预算与 admit 准入方法，为收尾工作预留 CPU。
+ *
+ * 实现过程：每次通过注入的 getGame 读取 CPU；剩余量按 tickLimit 扣除已用量和保留量，
+ * 普通插件另检查 bucket 与常规 limit，critical 插件可跳过这两项但仍受剩余量限制。
+ *
+ * 技术要点：创建时校验阈值，不缓存游戏对象或跨 tick 预算；缺失 CPU 字段时使用设定的默认值。
+ * 检查不会预占 CPU 或中断已运行的函数，长任务仍需主动分批执行。
  */
 // import type 编译后被擦除：本组件在运行时只依赖注入的 getGame，不引入任何模块级依赖。
 import type { CpuBudget } from '@/contracts';

@@ -1,24 +1,15 @@
 /**
- * 文件摘要：定义 goto 移动模块的目标、路径、缓存、选项、结果与公共接口协议。
+ * 文件摘要
  *
- * 模块位置：src/modules/goto 的类型契约。当前目录只有本文件，createGoto 与 roomRoute/、
- * costMatrix/、flowField/、movement/、avoidance/、debug/ 等实现文件按 docs/design/modules/goto.md
- * 的目录规划逐步落地；因此本文件是调用方与实现之间的唯一稳定接口约定。
+ * 模块角色：modules/goto 的寻路设计类型文件，为尚未交付的运行时实现规定接口与状态结构。
  *
- * 主要输入 / 输出：对外能力由 GotoModule 描述（goto/onTickEnd/避让策略注册/房间与边界偏好/
- * getDebugInfo）；调用方的输入形态是 GotoTarget 与 GotoOptions，输出形态是 GotoResult；
- * 内部实现则依赖 RoomEdge、CachedRoomExitRoute、CachedCostMatrix、FlowField、
- * PendingMove、AvoidanceRequest 等缓存与协作协议。
+ * 主要功能：描述目标和移动选项、结果、房间偏好、路线与代价矩阵缓存、流场、避让请求及调试统计。
  *
- * 状态与依赖：本文件是模块设计的类型契约，集中使用判别联合、泛型和 Screeps 原生类型，
- * 让调用方在编译期区分目标形态与移动结果。类型声明会在构建后擦除，不增加
- * 游戏 tick 的 CPU 或 Memory 开销；实际寻路算法将在对应实现文件中落地。
- * 唯一进入 Memory 的数据是 GotoMemory（用户偏好），其余缓存都在 heap 中随 global 生命周期失效。
+ * 实现过程：以 GotoModule 汇集预定公共方法，用判别联合区分目标与避让决定，
+ * 用模板字符串规定缓存键，并将持久偏好 GotoMemory 与内存缓存 GotoHeapState 分开描述。
  *
- * 与设计文档的差异：docs/design/modules/goto.md 的示例为说明方便使用 DirectionConstant 或
- * 列出 updateCostMatrix/reusedFlowField 等字段；本文件是实现的权威契约，其中房间出口相关的
- * direction 一律收窄为 ExitConstant（仅 4 个基本方向），GotoModule 与 GotoResult 只声明
- * 当前实现确实提供的成员，差异处均有单独说明。
+ * 技术要点：Map、Uint8Array 等字段表达预定的索引和紧凑方向数据；PluginContext 提供依赖接口。
+ * 这里只定义类型，不执行寻路、移动、缓存淘汰或存储申请，不能将这些声明视为已经可调用的实现。
  */
 import type { PluginContext } from '@/contracts';
 

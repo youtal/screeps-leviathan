@@ -1,11 +1,15 @@
 /**
- * 文件摘要：声明 app 层使用的服务插件，业务工厂由 Framework 的 setup 调用。
- * RoomShortcuts 只依赖注入上下文，Kernel 不导入业务实现。
- * 事件订阅经框架自动登记清理，停用后释放，重新启用时重建模块闭包缓存。
+ * 文件摘要
  *
- * 本文件是业务模块与 Framework 之间的适配层：业务工厂保持“只接收上下文、
- * 返回能力对象”的既有形态，插件负责把这份能力注册成依赖者可见的服务。
- * 因此这里不导入 Kernel 内部实现，新增模块也只需追加一个插件描述。
+ * 模块角色：app 中连接业务模块与框架插件接口的文件，决定业务能力如何成为服务。
+ *
+ * 主要功能：声明 roomShortcuts 插件，向其他插件提供同名房间查询服务。
+ *
+ * 实现过程：在 manifest 中登记插件名、服务名和 critical 标记；setup 接收框架上下文，
+ * 调用 createRoomShortcuts，再用 services.provide 发布返回的查询方法。
+ *
+ * 技术要点：导入时只生成插件描述；房间缓存和事件订阅在 setup 时创建。
+ * 订阅由框架记录并在停用时释放，重新启用或 global reset 后重新建立；本插件没有 tick 钩子。
  */
 import { createRoomShortcuts } from '@/modules/roomShortcuts/createRoomShortcuts';
 import type { LeviathanPlugin } from '@/contracts';

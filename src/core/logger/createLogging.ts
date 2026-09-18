@@ -1,21 +1,15 @@
 /**
- * 文件摘要：实现内核日志能力——等级过滤、作用域前缀、着色格式化和双通道输出。
+ * 文件摘要
  *
- * 模块位置：core/logger 的运行时实现（模块入口见 ./index.ts，公共协议见
- * `src/contracts/logging.ts`）。createLogging 在 Runtime 装配阶段调用一次，
- * 返回的 LoggerFactory 被注入模块环境（env.log）与内核消费者（EventBus、
- * Profiler、ErrorMapper），使全项目共享同一套等级、端口与邮件策略。
+ * 模块角色：core/logger 的日志实现，为 Runtime 和业务模块提供共享配置下的作用域日志器。
  *
- * 输入是装配级 LoggingOptions（等级、邮件策略、分组间隔、端口覆盖）与每次
- * scope() 传的作用域名/局部覆盖；输出是遵循 Logger 契约的作用域日志器。
- * 作用域名会成为 `[name] ` 前缀，并按等级着色，文本渲染复用 utils/console 的
- * dyeText，HTML 表单与帮助面板不因为共用着色函数而进入内核职责。
+ * 主要功能：控制日志等级、添加名称与颜色前缀，向控制台输出，并按策略发送 error 通知。
  *
- * 状态与副作用：闭包只保存解析后的等级、策略与端口引用，不读写 Memory、
- * 不依赖 Profiler/ErrorMapper，也不访问 Game——只有启用邮件且真的触发 error
- * 时，默认端口才会调用 Game.notify。global reset 后由装配方重新创建。
- * 性能取舍：等级关闭时在格式化前直接返回，热路径只付一次布尔判断；输出端口
- * 抛错被吞掉并只丢失当条日志，观测失败绝不中断业务，也不递归记录。
+ * 实现过程：创建工厂时合并默认配置和输出接口；scope 再应用局部配置，返回六种日志方法。
+ * 启用的消息经 dyeText 生成前缀后送往输出接口，关闭的等级在格式化前返回。
+ *
+ * 技术要点：每个作用域按等级按需缓存前缀，随日志器跨 tick 复用，global reset 后重建。
+ * 默认输出使用 console.log 和 Game.notify；输出异常被吞掉，邮件关闭策略不可由作用域重新开启。
  */
 import type {
   Logger,

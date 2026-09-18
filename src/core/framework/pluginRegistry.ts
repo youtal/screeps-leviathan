@@ -1,13 +1,15 @@
 /**
- * 文件摘要：保存插件注册状态并验证依赖图，生成确定性的生命周期执行列表。
- * Map 保留注册顺序；稳定 Kahn 拓扑排序只在注册集合改变时重算，tick 热路径复用结果。
- * 执行期间变更由 Kernel 使用候选注册表在下一 tick 原子应用。
+ * 文件摘要
  *
- * 所属模块：core/framework 的内核组件，由 createFramework 创建并独占调用（register/enable/
- * unregister 只排队命令，循环边界再调用 replace）；不从 framework/index 导出。
- * 输入是候选注册表 Map<id, PluginEntry>，输出是校验通过的依赖顺序数组（ordered）；
- * 校验失败通过同步抛错上报，由 Kernel 记为整批命令失败，旧注册表保持不变。
- * 状态仅在 heap：已接受记录 entries 与缓存的排序结果 sorted，global reset 后由 app 重新注册。
+ * 模块角色：core/framework 的插件登记与依赖排序组件，为主循环提供确定的执行顺序。
+ *
+ * 主要功能：验证插件标识、服务唯一性和依赖关系，拒绝缺失依赖或循环依赖，并保存有效注册表。
+ *
+ * 实现过程：对候选 Map 先作校验，再反复选择依赖已满足的插件；可选依赖存在时也参与排序，
+ * 就绪候选按优先级选择，同优先级保持注册顺序。全部成功后才替换注册表与排序结果。
+ *
+ * 技术要点：排序只在 replace 时计算，ordered 返回数组副本，copy 提供独立的登记项供批量修改。
+ * 注册表和排序缓存跨 tick 保存于实例内存，global reset 后由 app 重新注册，不写持久存储。
  */
 import type { LeviathanPlugin } from '@/contracts';
 /** 稳定标识限定字符并排除原型保留键；插件与服务共享校验，不依赖存储实现。 */

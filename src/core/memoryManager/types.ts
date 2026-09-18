@@ -1,15 +1,15 @@
 /**
- * 文件摘要：保存 MemoryManager 的内部存储模型与平台端口定义。
+ * 文件摘要
  *
- * 模块位置：core/memoryManager 的内部类型层。公共申请/访问协议由
- * `src/contracts/memory.ts` 发布，本文件只描述"主 Memory 目录 + Segment 信封 +
- * 迁移 journal + 平台端口"这些实现细节，不对外导出。
+ * 模块角色：core/memoryManager 的内部存储格式与平台类型定义，约束各实现文件之间的数据。
  *
- * 设计边界：目录与 Raw 分区是 JSON 数据，随主 RawMemory 一起读写；Segment 信封
- * 自带 owner/generation/dataVersion，使单页可以独立校验归属与版本；迁移 journal
- * 记录跨后端搬迁的可恢复中间状态；generationCounter 是持久单调计数器，保证每次
- * 搬迁使用全新的代际，旧页残留信封不会被误认成本次写入。平台端口把 RawMemory 与
- * segments 抽象出来，使单元测试可以完整模拟"Segment 下一 tick 可见"的调度约束。
+ * 主要功能：声明分配目录、Raw 分区、迁移记录、Segment 页面、平台方法及状态诊断，集中提供格式常量。
+ *
+ * 实现过程：用 backend 区分存储位置，用迁移 phase 描述复制到清理的阶段；
+ * owner、generation 与 dataVersion 分别标识分区归属、分配代次和业务数据版本。
+ *
+ * 技术要点：默认管理 Segment 0–9，容量常量为 100000 字符；类型只描述格式，不执行验证或读写。
+ * 公开的业务申请协议位于 contracts/memory，本文件的运行时内容仅为这些配置常量。
  */
 import type { JsonValue } from '@/contracts/memory';
 

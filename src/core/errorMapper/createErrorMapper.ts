@@ -1,13 +1,15 @@
 /**
- * 文件摘要：同步还原构建堆栈并提供不会覆盖原始错误的捕获边界。
- * trace-mapping 无需 Promise/WASM；解析器懒加载，最多缓存 64 条，捕获入口截断为 16KB。
- * 映射和日志故障均回退原始诊断，避免错误处理器递归抛错；缓存随 global reset 清空。
+ * 文件摘要
  *
- * 所属模块：core/errorMapper 的具体实现，由 Runtime 组合根创建并交给 Framework 消费。
- * 输入为注入的 loadMap/report 回调、LoggerFactory 与待执行函数；输出 capture 的
- * ExecutionResult 判别联合、mapStack 的映射文本，以及 setMeasure 观测适配口。
- * 状态全部驻留 heap：加载尝试标记、TraceMap 实例、最多 64 条映射缓存、当前计时函数。
- * 依赖第三方包 @jridgewell/trace-mapping 提供同步位置查询；本文件不读写 Memory。
+ * 模块角色：core/errorMapper 的具体实现，为框架提供同步执行的错误捕获与源码定位。
+ *
+ * 主要功能：执行回调并返回成功或故障结果，将构建产物堆栈映射到源码，输出诊断并接入计时。
+ *
+ * 实现过程：capture 捕获异常并整理归属与堆栈；mapStack 首次使用时加载 source map，
+ * 借助 @jridgewell/trace-mapping 查询 main/main.js 的位置，再交给报告回调或注入的日志器。
+ *
+ * 技术要点：拒绝异步返回；捕获入口将消息和堆栈各截到 16KB，映射缓存最多保留 64 条，按插入顺序淘汰。
+ * 加载每实例只尝试一次，映射或报告故障不覆盖原始错误；解析器和缓存跨 tick 复用，global reset 后重建。
  */
 import { TraceMap, originalPositionFor } from '@jridgewell/trace-mapping';
 import type {

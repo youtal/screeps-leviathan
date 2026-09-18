@@ -1,24 +1,14 @@
 <!--
-  文件摘要：定义 Screeps 控制台表单控件的内联样式。
-  createForm 将整个 style 标签与表单 HTML 拼接后输出；hopgoldy 前缀用于降低
-  与游戏页面既有样式发生选择器冲突的概率。
+  文件摘要
 
-  模块位置：src/utils/console/form 的样式资源，仅被 createForm.ts 通过
-  `import style from './style.html'` 使用，不参与任何逻辑判断。
+  模块角色：utils/console/form 的样式资源，配合模板控制表单在游戏控制台中的外观。
 
-  输入 / 输出：本文件不含占位符，导入结果就是一段固定字符串；createForm 把它原样
-  前置到表单 HTML 之前，因此样式随每次输出重复下发，不需要页面额外注入。
+  主要功能：设置字段与标签排列、深色输入和选择控件，以及提交按钮样式。
 
-  依赖与构建约定：Rollup 的 htmlString 插件在构建期用 html-minifier-terser 处理，
-  `minifyCSS: true` 会压缩 style 内容、`removeComments: true` 会删除本注释块，
-  因此下面的说明文字不会出现在上传产物里。
+  实现过程：以 hopgoldy 类名匹配模板中的元素，用内联 style 标签随 createForm 的 HTML 一起输出。
 
-  样式分组（按选择器）：
-  - .hopgoldy-field / .hopgoldy-field span：表单项容器与标签，横向排列并统一标签颜色；
-  - input.hopgoldy、select.hopgoldy：深色输入控件，用 !important 覆盖控制台页面对
-    输入元素的内边距与背景设定；
-  - button.hopgoldy：提交按钮，使用 pointer 光标提示可点击。
-  所有规则都是页面级内联样式，只在控制台渲染本次输出时生效，不写入游戏状态。
+  技术要点：固定样式不含占位符；部分规则用 !important 覆盖游戏页面的既有样式。
+  构建插件压缩 CSS 并删除注释，样式随每次表单输出重复包含；它影响匹配的页面元素，不读写游戏存储。
 -->
 <style>
     .hopgoldy-field {

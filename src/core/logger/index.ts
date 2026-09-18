@@ -1,12 +1,14 @@
 /**
- * 文件摘要：Logger 内核模块的公共出口：装配工厂与契约类型转导。
+ * 文件摘要
  *
- * 模块位置：core/logger 的 barrel。Runtime 在装配阶段调用 createLogging 创建
- * 唯一工厂，再注入模块环境与内核消费者；同级模块不会从这里取得默认单例。
+ * 模块角色：core/logger 的公共入口，供 Runtime 取得日志工厂和调用方引用日志类型。
  *
- * 主要能力：createLogging（装配级工厂，遵守 `src/contracts/logging.ts` 的
- * LoggerFactory 协议）。本文件不定义日志行为、不访问 Game/Memory，也不在模块
- * 求值阶段创建任何实例。
+ * 主要功能：导出 createLogging，以及 Logger、LoggerFactory、配置与输出接口等公共协议。
+ *
+ * 实现过程：转发 createLogging.ts 的具名工厂，并以类型导出转发 contracts/logging。
+ *
+ * 技术要点：入口不创建默认日志实例，不输出消息或访问 Game；配置与前缀缓存由工厂及其作用域持有。
+ * Core 同级模块接收注入的 LoggerFactory，不通过此入口取得隐藏的共享实例。
  */
 export { createLogging } from './createLogging';
 

@@ -1,18 +1,15 @@
 /**
- * 文件摘要：把结构化表单描述渲染为可在 Screeps 控制台中显示和执行的 HTML。
+ * 文件摘要
  *
- * 模块位置：src/utils/console/form 的入口渲染器。它向下依赖同目录的 template.html、
- * style.html（由 Rollup 的 htmlString 插件在构建期压缩成字符串）与 types.ts 的控件描述，
- * 向上仅被 example.ts 引用，尚未经 console/index.ts 暴露为公共 API。
+ * 模块角色：utils/console/form 的表单渲染实现，将控件描述转换为控制台可显示的 HTML。
  *
- * 主要输入 / 输出：输入为表单名、控件描述数组（判别联合 HTMLElementDetail[]）与按钮参数
- * ButtonDetail；输出是单行 HTML 字符串（内联 style + form），可直接 console.log 到控制台。
- * 渲染过程是纯字符串拼接，不读写 Memory；唯一运行时依赖是 Game.time（用于表单 DOM 名）。
+ * 主要功能：生成输入框、下拉框、单选框、多选框及带命令的提交按钮，返回单行表单字符串。
  *
- * 状态与副作用：模块求值期执行一次 template.split(';;')，把模板片段解构为模块级常量，
- * 属于跨 tick 复用、随 global reset 重建的预计算；createForm 本身无可变状态与缓存。
- * 拼接结果会经过 fixRetraction 折叠为单行，因此内嵌脚本必须写成单行安全的 JavaScript：
- * 不使用 `//` 行注释，并显式写出每条语句的分号（折叠后不再有换行可供自动分号插入）。
+ * 实现过程：模块加载时将模板按分隔符拆为七段，按 detail.type 选择构造函数并填充占位符，
+ * 再组合表单外层、内联样式和按钮参数，删除换行后返回。
+ *
+ * 技术要点：映射类型要求每种控件都有构造函数；Game.time 参与表单名，同 tick 同名仍可能重复。
+ * 模板片段跨 tick 复用，global reset 后重建；不自动打印或提交命令，按钮行为由输出中的脚本在点击时执行。
  */
 import template from './template.html';
 import style from './style.html';

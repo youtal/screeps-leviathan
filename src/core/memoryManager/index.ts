@@ -1,13 +1,14 @@
 /**
- * 文件摘要：MemoryManager 模块的公共出口：工厂、诊断类型与契约转导。
+ * 文件摘要
  *
- * 模块位置：core/memoryManager 的 barrel。Runtime 在装配阶段调用 createMemoryManager
- * 创建唯一实例，Framework 在 tick 边界驱动 begin/end；模块通过 `context.memory`
- * （由 `host.bind(owner)` 绑定）申请分区。
+ * 模块角色：core/memoryManager 的公共入口，向 Runtime 提供管理器工厂并发布访问类型。
  *
- * 主要能力：createMemoryManager（平台端口可注入的存储实现）与 MemoryManagerStatus
- * 诊断快照；平台端口、命名空间与迁移的细节类型保持模块内部，不对外导出。
- * 本文件不创建实例、不访问 RawMemory，导入它只建立工厂引用。
+ * 主要功能：导出 createMemoryManager、创建选项、管理器与诊断类型，以及公共分区申请协议。
+ *
+ * 实现过程：从主实现转发工厂和配置，从内部类型文件转发状态，从 contracts/memory 转发访问约定。
+ *
+ * 技术要点：入口不创建管理器或读取存储；Raw 格式处理和 Segment 平台操作不在此公开。
+ * 实例由 Runtime 组装，Framework 驱动 begin/end，业务通过绑定的 memory 入口申请分区。
  */
 export { createMemoryManager } from './createMemoryManager';
 export type {

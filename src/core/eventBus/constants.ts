@@ -1,19 +1,15 @@
 /**
- * 文件摘要：集中声明 EventBus 的事件分类与完整事件名常量。
+ * 文件摘要
  *
- * core/eventBus 的协议数据层：分类名与事件名的拼接规则必须与 types.ts 中
- * EventType 的 `${category}:${eventName}` 模板保持一致；这些常量导出的目的
- * 就是让 publish/subscribe 不再各处手写字符串，避免拼写漂移。
+ * 模块角色：core/eventBus 的事件名称表，为调用方提供可复用的事件字符串。
  *
- * 输入/输出：本文件不含函数与参数，只导出两个只读常量对象 —— eventCategory
- * 提供分类名，eventList 在其基础上拼出可直接使用的事件名。
+ * 主要功能：导出分类名 eventCategory 和完整事件名 eventList，减少发布、订阅时手写名称的错误。
  *
- * 状态与副作用：全部值在模块加载时求值一次，之后只读，不占用 Memory，也不随
- * global reset 改变。`satisfies` 会在编译期检查值是否合法，同时保留对象自身的
- * 精确字面量类型，不会把所有属性宽化成笼统的 `EventType`。
+ * 实现过程：先定义分类名，再以模板字符串拼接“分类:事件”；satisfies 根据 contracts 的 EventType
+ * 检查所有事件值是否合法，并保留各属性的精确字面量类型。
  *
- * 维护顺序：先在 contracts/events 的 EventRegistry 注册分类与事件，再补这里的常量；
- * 反过来 satisfies 会直接报编译错误，避免出现无法被 publish 使用的事件名。
+ * 技术要点：as const 提供编译期只读约束，不会在运行时冻结对象。常量在模块加载时建立，
+ * 不记录订阅、没有过期状态；新增事件须同步维护 contracts/events 的目录。
  */
 import type { EventType } from '@/contracts';
 

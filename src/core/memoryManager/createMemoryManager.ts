@@ -1,33 +1,17 @@
 /**
- * 文件摘要：MemoryManager 实现——申请窗口、固定 Segment 分配、Raw/Segment 双后端与可恢复迁移。
+ * 文件摘要
  *
- * 模块位置：core/memoryManager 的编排层，由 Runtime 组装、Framework 在 tick 边界调用
- * （begin → 插件阶段 → end）。公共协议见 `src/contracts/memory.ts`：模块拿到的是
- * `MemoryAccessor`，每 tick 通过 `access()` 收窄 pending/ready，不接触物理后端。
+ * 模块角色：core/memoryManager 的主实现，统一协调分区申请、存储读写、Segment 分配和恢复。
  *
- * 输入输出：输入是宿主平台端口（RawMemory/Segment，可注入替代）、`bind(owner)` 得到的
- * 申请入口与各模块的 `MemoryApplicationOptions`；输出是持久化到主 Memory 命名空间与
- * Segment 页的数据，以及 `getStatus()` 诊断快照。
+ * 主要功能：提供按 owner 绑定的申请入口、pending/ready 访问器、tick 生命周期及状态诊断，
+ * 支持初始化、数据版本迁移、关键数据提交和按间隔保存的检查点。
  *
- * 关键约定（对应设计文档）：
- * - 启动申请窗口：首次 tick 的 end 阶段封存申请，按 priority 降序竞争固定 10 页；
- *   窗口之后的新申请一律使用 Raw；已存在身份沿用原分配，不因热插拔切换后端。
- * - 页所有权：只有"本管理器目录或 journal 引用"的页才可写；其余非空页（其他工具
- *   数据、无目录归属的历史信封）登记为保留页并跳过，未观察过内容的页也不参与分配。
- * - pending 只影响依赖该 Accessor 的行为：页未激活、迁移冻结、写入校验、数据损坏
- *   分别对应 segment-activating/migration/verification/recovery，均不熔断插件。
- * - ready 句柄按 tick 失效：access() 返回的 query/commit 只在签发 tick 内有效，跨 tick、
- *   分区进入 pending 或数据被重新加载后调用会抛协议错误，避免旧引用绕过迁移冻结。
- * - 提交边界：critical 分区当 tick 提交，checkpoint 从首次 dirty 起算（默认 100 tick）；
- *   Raw 分区按片段重建整串，Segment 分区只写自己的信封；写失败保留 dirty 与诊断。
- * - 迁移串行且逐步推进：copy（暂存 + 写目标信封）→ verify（下一 tick 回读校验）→
- *   switch（切换目录、清理暂存）；数据取自存储与已冻结的内存副本，不依赖模块本轮
- *   是否重新申请，恢复时以 journal 为准。
- * - 数据安全：未知 schema、非法记录、页归属不符、版本降级、无 migrate 的升级都拒绝
- *   写入并给出诊断，不用空数据覆盖历史；旧 `leviathan` 命名空间只做一次性导入。
- * - 日志：按 Core 架构的通用规范接入——`logging` 由组合根显式注入、作用域
- *   `MemoryManager` 每实例派生一次；故障与状态迁移分级输出，同一原因只记一次，
- *   提交热路径不输出，日志端口异常不影响存储流程；权威诊断仍是 getStatus()。
+ * 实现过程：begin 加载目录并观察 Segment，申请时匹配或创建分区；启动申请窗口结束后按优先级分配，
+ * 用迁移记录逐步完成复制、校验、切换和清理，end 推进迁移并提交需要保存的数据。
+ *
+ * 技术要点：namespace 负责主存储解析与序列化，segments 校验页面身份，platform 执行宿主访问。
+ * 分区对象与脏标记跨 tick 保存在实例内存；ready 视图会检查 tick 和数据引用，禁止继续使用过期视图。
+ * global reset 后根据持久目录与迁移记录恢复，未就绪分区返回 pending，外来 Segment 内容不会被直接覆盖。
  */
 import type {
   ApplyMemoryAccessor,

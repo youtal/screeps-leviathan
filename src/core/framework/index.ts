@@ -1,16 +1,14 @@
 /**
- * 文件摘要：导出 Framework 工厂和公共插件协议。
+ * 文件摘要
  *
- * app 负责选择插件并创建实例，框架实例 loop 可直接用作 Screeps 主循环。
- * 本文件仅整理出口，不创建实例或访问 Game/Memory；内部仲裁和注册组件不作为公共出口。
+ * 模块角色：core/framework 的公共入口，供 app 创建游戏循环及引用插件相关类型。
  *
- * 所属模块：core/framework 的公共入口（barrel），被 src/app/runtime.ts、src/core/index.ts
- * 以及业务模块的类型导入引用；出口包括 createFramework 工厂（消费 Runtime 并返回 loop 与管理
- * 方法）以及 types.ts 的插件协议与公共数据类型。ErrorMapper 由独立同级模块导出。
- * 调用方以 FrameworkOptions 与插件描述为输入创建实例，本文件自身没有运行时状态和副作用。
- * 导入不会创建 Runtime 或触发初始化副作用；Screeps 打包为单个 main.js，多出口不产生额外传输成本。
- * cpuGovernor/intentBroker/pluginRegistry 刻意不导出：
- * 它们的契约只在内核内部稳定，暴露给业务会限制后续重构（需要时经 Context 能力访问）。
+ * 主要功能：导出 createFramework 和 types.ts 汇集的协议。
+ *
+ * 实现过程：具名转发工厂并转发类型文件，将 CPU 检查、插件注册表和意图仲裁保留为内部组件。
+ *
+ * 技术要点：导入本文件不创建框架；调用工厂时必须显式传入完整 Runtime。
+ * 实际插件状态由返回的框架实例持有，本入口没有跨 tick 状态或游戏访问。
  */
 // 导出语句顺序不影响求值（ES 模块的导出都会被提升），此处只按阅读顺序排列，不表达依赖关系。
 // types.ts 只含类型声明，运行时等价于空导出，仅提供编译期协议。
