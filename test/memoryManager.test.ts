@@ -1844,3 +1844,291 @@ describe('MemoryManager round-2 audit closure', () => {
     expect(after.rawPartitions.solo.main.payload).toEqual({ n: 7 });
   });
 });
+
+/** 审计 A01/A02：从真实持久 journal 恢复，检查页面写入归属及业务访问冻结。 */
+describe('audit P1 migration recovery', () => {
+  const envelopeOf = (
+    pluginId: string,
+    localId: string,
+    generation: number,
+    dataVersion: number,
+    payload: object
+  ): string =>
+    JSON.stringify({
+      schemaVersion: 1,
+      owner: { pluginId, localId },
+      generation,
+      dataVersion,
+      payload,
+    });
+  const seeded = (phase: 'copy' | 'verify' | 'switch', target = 0) => ({
+    memoryManager: {
+      schemaVersion: 1,
+      generationCounter: 2,
+      allocations: { worker: { main: { backend: 'raw', generation: 1 } } },
+      rawPartitions: {
+        worker: { main: { dataVersion: 1, payload: { n: 1 } } },
+      },
+      migration: {
+        generation: 2,
+        phase,
+        reason: 'allocation',
+        moves: [
+          {
+            pluginId: 'worker',
+            localId: 'main',
+            dataVersion: 1,
+            from: 'raw',
+            to: 'segment',
+            toSegmentId: target,
+          },
+        ],
+        staged: phase === 'copy' ? {} : { 'worker/main': { n: 1 } },
+      },
+    },
+  });
+
+  it.each([
+    ['copy', 0, 'foreign-data'],
+    ['copy', 99, 'foreign-data'],
+    ['verify', 0, envelopeOf('other', 'main', 2, 1, { n: 9 })],
+    ['verify', 0, envelopeOf('worker', 'main', 99, 1, { n: 9 })],
+    ['verify', 0, envelopeOf('worker', 'main', 2, 9, { n: 9 })],
+    ['verify', 99, envelopeOf('worker', 'main', 2, 1, { n: 1 })],
+    ['switch', 0, 'replaced-after-verification'],
+  ] as const)(
+    'preserves unowned target in %s on page %s',
+    (phase, target, text) => {
+      const plat = createPlatform();
+      plat.setRaw(JSON.stringify(seeded(phase, target)));
+      plat.platform.writeSegment(target, text);
+      plat.platform.activateSegments([target]);
+      plat.nextTick();
+      const write = jest.fn(plat.platform.writeSegment);
+      const manager = createMemoryManager({
+        platform: { ...plat.platform, writeSegment: write },
+        segmentIds: [0],
+      });
+      manager.begin(1);
+      manager.end(1);
+      expect(write).not.toHaveBeenCalled();
+      expect(plat.content()[target]).toBe(text);
+      expect(namespaceOf(plat.raw()).allocations.worker.main.backend).toBe(
+        'raw'
+      );
+      expect(namespaceOf(plat.raw()).rawPartitions.worker.main.payload).toEqual(
+        { n: 1 }
+      );
+    }
+  );
+
+  it('reclaims only its own abandoned target copy', () => {
+    const plat = createPlatform();
+    // 重启看到 copy journal，但目标写入已完成：中止时可以回收这一代的副本。
+    plat.setRaw(JSON.stringify(seeded('copy')));
+    plat.platform.writeSegment(0, envelopeOf('worker', 'main', 2, 1, { n: 1 }));
+    plat.platform.activateSegments([0]);
+    plat.nextTick();
+    const write = jest.fn(plat.platform.writeSegment);
+    const manager = createMemoryManager({
+      platform: { ...plat.platform, writeSegment: write },
+      segmentIds: [0],
+    });
+    manager.begin(1);
+    manager.end(1);
+    expect(write).toHaveBeenCalledWith(0, '');
+    expect(namespaceOf(plat.raw()).allocations.worker.main.backend).toBe('raw');
+  });
+
+  it.each([
+    ['foreign-data', 1, 0],
+    [envelopeOf('other', 'main', 1, 1, { n: 8 }), 1, 0],
+    [envelopeOf('worker', 'main', 7, 1, { n: 8 }), 1, 0],
+    [envelopeOf('worker', 'main', 1, 1, { n: 1 }), undefined, 0],
+    [envelopeOf('worker', 'main', 1, 1, { n: 1 }), 1, 99],
+  ] as const)(
+    'does not clear an unverifiable cleanup source %#',
+    (text, fromGeneration, source) => {
+      const plat = createPlatform();
+      const snapshot = seeded('switch');
+      const ns: any = snapshot.memoryManager;
+      ns.migration.phase = 'cleanup';
+      ns.allocations.worker.main.generation = 2;
+      ns.migration.moves = [
+        {
+          pluginId: 'worker',
+          localId: 'main',
+          dataVersion: 1,
+          from: 'segment',
+          fromSegmentId: source,
+          fromGeneration,
+          to: 'raw',
+        },
+      ];
+      plat.setRaw(JSON.stringify(snapshot));
+      plat.platform.writeSegment(source, text);
+      plat.platform.activateSegments([source]);
+      plat.nextTick();
+      const write = jest.fn(plat.platform.writeSegment);
+      const manager = createMemoryManager({
+        platform: { ...plat.platform, writeSegment: write },
+        segmentIds: [0],
+      });
+      for (let tick = 1; tick <= 4; tick++) {
+        manager.begin(tick);
+        manager.end(tick);
+      }
+      expect(write).not.toHaveBeenCalled();
+      expect(plat.content()[source]).toBe(text);
+    }
+  );
+
+  it.each([false, true])(
+    'checks all directory references before cleanup (referenced=%s)',
+    (referenced) => {
+      const plat = createPlatform();
+      const snapshot: any = seeded('switch');
+      const ns = snapshot.memoryManager;
+      ns.migration.phase = 'cleanup';
+      ns.allocations.worker.main.generation = 2;
+      ns.migration.moves = [
+        {
+          pluginId: 'worker',
+          localId: 'main',
+          dataVersion: 1,
+          from: 'segment',
+          fromSegmentId: 0,
+          fromGeneration: 1,
+          to: 'raw',
+        },
+      ];
+      if (referenced)
+        ns.allocations.other = {
+          main: { backend: 'segment', segmentId: 0, generation: 1 },
+        };
+      plat.setRaw(JSON.stringify(snapshot));
+      const text = envelopeOf('worker', 'main', 1, 1, { n: 1 });
+      plat.platform.writeSegment(0, text);
+      plat.platform.activateSegments([0]);
+      plat.nextTick();
+      const write = jest.fn(plat.platform.writeSegment);
+      const manager = createMemoryManager({
+        platform: { ...plat.platform, writeSegment: write },
+        segmentIds: [0],
+      });
+      manager.begin(1);
+      manager.end(1);
+      if (referenced) {
+        expect(write).not.toHaveBeenCalled();
+        expect(plat.content()[0]).toBe(text);
+      } else {
+        expect(write).toHaveBeenCalledWith(0, '');
+        expect(plat.content()[0]).toBe('');
+      }
+    }
+  );
+
+  it.each(['copy', 'verify', 'switch'] as const)(
+    'freezes restored %s access, then persists edits after thaw across reset',
+    (phase) => {
+      const plat = createPlatform();
+      plat.setRaw(JSON.stringify(seeded(phase)));
+      if (phase !== 'copy')
+        plat.platform.writeSegment(
+          0,
+          envelopeOf('worker', 'main', 2, 1, { n: 1 })
+        );
+      plat.platform.activateSegments([0]);
+      plat.nextTick();
+      const manager = createMemoryManager({
+        platform: plat.platform,
+        segmentIds: [0],
+      });
+      manager.begin(1);
+      const accessor = manager.bind('worker')('main', {
+        version: 1,
+        layer: 'critical',
+        initialize: () => ({ n: 0 }),
+      });
+      expect(accessor.access().status).toBe('pending');
+      manager.end(1);
+      plat.nextTick();
+      let edited = false;
+      for (let tick = 2; tick <= 10; tick++) {
+        manager.begin(tick);
+        const access = accessor.access();
+        const migration = manager.getStatus().migration;
+        if (migration && migration.phase !== 'cleanup')
+          expect(access.status).toBe('pending');
+        if (access.status === 'ready' && !edited) {
+          access.commit((data) => {
+            data.n = 2;
+          });
+          edited = true;
+        }
+        manager.end(tick);
+        plat.nextTick();
+      }
+      expect(edited).toBe(true);
+      const restored = createMemoryManager({
+        platform: plat.platform,
+        segmentIds: [0],
+      });
+      restored.begin(11);
+      expect(
+        readyData(
+          restored.bind('worker')('main', {
+            version: 1,
+            layer: 'critical',
+            initialize: () => ({ n: 0 }),
+          })
+        )
+      ).toEqual({ n: 2 });
+    }
+  );
+
+  it('defers a late schema upgrade until a hidden target is verified and switched', () => {
+    const plat = createPlatform();
+    plat.setRaw(JSON.stringify(seeded('verify')));
+    plat.platform.writeSegment(0, envelopeOf('worker', 'main', 2, 1, { n: 1 }));
+    const manager = createMemoryManager({
+      platform: plat.platform,
+      segmentIds: [0],
+    });
+    manager.begin(1);
+    manager.end(1); // 页不可见，不应解除 verification 冻结。
+    const migrate = jest.fn((data: any) => ({ n: data.n + 10 }));
+    manager.begin(2);
+    const accessor = manager.bind('worker')('main', {
+      version: 2,
+      layer: 'critical',
+      initialize: () => ({ n: 0 }),
+      migrate,
+    });
+    expect(accessor.access().status).toBe('pending');
+    expect(migrate).not.toHaveBeenCalled();
+    manager.end(2);
+    plat.nextTick();
+    for (let tick = 3; tick <= 8; tick++) {
+      manager.begin(tick);
+      manager.end(tick);
+      plat.nextTick();
+    }
+    expect(migrate).toHaveBeenCalledTimes(1);
+    expect(readyData(accessor)).toEqual({ n: 11 });
+    const restored = createMemoryManager({
+      platform: plat.platform,
+      segmentIds: [0],
+    });
+    restored.begin(9);
+    expect(
+      readyData(
+        restored.bind('worker')('main', {
+          version: 2,
+          layer: 'critical',
+          initialize: () => ({ n: 0 }),
+        })
+      )
+    ).toEqual({ n: 11 });
+  });
+});

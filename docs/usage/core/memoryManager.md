@@ -149,6 +149,12 @@ const status = memory.getStatus();
 
 `createRuntime({}, { memory })` 会把测试或特殊宿主提供的 MemoryHost 按模块名绑定到 `ModuleContext.memory`；独立 Runtime 不驱动 tick，调用方需要自行在边界调用 `memory.begin(tick)` / `memory.end(tick)`。模块级测试可以直接 `createMemoryManager({ logging, platform })` 注入日志工厂和假平台，不必启动框架。
 
+## 迁移恢复注意事项
+
+- global reset 后恢复 copy/verify/switch 时，重新申请仍返回 pending；业务版本升级回调延后到后端切换完成再执行，不能在冻结期间写入。
+- 页不可见不会解除迁移冻结；只跳过依赖该分区的行为。
+- 清理前检查管理范围、所有目录引用和信封 owner/代次/数据版本。旧 cleanup 记录缺少源代次时保留原页并输出诊断，不自动清空身份不明的数据。
+
 ## 未交付
 
 - 同一 global 只应装配一个 MemoryManager：多个实例各自持有 heap 快照，会在同一命名空间上互相覆盖。

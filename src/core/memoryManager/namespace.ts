@@ -10,6 +10,7 @@
  *
  * 技术要点：不直接调用 RawMemory；修改对应对象后必须清除其片段缓存，避免序列化旧值。
  * 缓存属于实例，可跨 tick 使用，global reset 后重新建立；损坏格式抛错，危险对象键被拒绝。
+ * 迁移源代次允许旧记录缺省，但存在时必须为非负整数；清理资格由管理器进一步核验。
  */
 import type { JsonValue } from '@/contracts/memory';
 import {
@@ -93,6 +94,7 @@ const validateMove = (value: unknown, where: string): MigrationMove => {
     dataVersion,
     from,
     fromSegmentId,
+    fromGeneration,
     to,
     toSegmentId,
   } = value;
@@ -107,6 +109,8 @@ const validateMove = (value: unknown, where: string): MigrationMove => {
     throw new Error('Invalid migration backend at ' + where);
   if (from === 'segment' && !isNonNegativeInteger(fromSegmentId))
     throw new Error('Migration source segment missing at ' + where);
+  if (fromGeneration !== undefined && !isNonNegativeInteger(fromGeneration))
+    throw new Error('Invalid migration source generation at ' + where);
   if (to === 'segment' && !isNonNegativeInteger(toSegmentId))
     throw new Error('Migration target segment missing at ' + where);
   return {
@@ -115,6 +119,7 @@ const validateMove = (value: unknown, where: string): MigrationMove => {
     dataVersion,
     from,
     fromSegmentId: from === 'segment' ? (fromSegmentId as number) : undefined,
+    fromGeneration: fromGeneration as number | undefined,
     to,
     toSegmentId: to === 'segment' ? (toSegmentId as number) : undefined,
   };

@@ -6,7 +6,8 @@
  * 主要功能：声明分配目录、Raw 分区、迁移记录、Segment 页面、平台方法及状态诊断，集中提供格式常量。
  *
  * 实现过程：用 backend 区分存储位置，用迁移 phase 描述复制到清理的阶段；
- * owner、generation 与 dataVersion 分别标识分区归属、分配代次和业务数据版本。
+ * owner、generation 与 dataVersion 分别标识分区归属、分配代次和业务数据版本；
+ * 迁移另保存 fromGeneration，供目录切换后的源页清理证明归属。
  *
  * 技术要点：默认管理 Segment 0–9，容量常量为 100000 字符；类型只描述格式，不执行验证或读写。
  * 公开的业务申请协议位于 contracts/memory，本文件的运行时内容仅为这些配置常量。
@@ -66,6 +67,8 @@ export interface MigrationMove {
   dataVersion: number;
   from: Backend;
   fromSegmentId?: number;
+  /** 源页代次；清理必须匹配。旧 journal 可缺省，但无法证明归属时保留源页。 */
+  fromGeneration?: number;
   to: Backend;
   toSegmentId?: number;
 }
