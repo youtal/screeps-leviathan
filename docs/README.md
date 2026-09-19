@@ -26,7 +26,7 @@
 
 | 模块 | 源码 | 设计 | 使用说明 |
 | --- | --- | --- | --- |
-| goto | [modules/goto](../src/modules/goto/) | [设计](./design/modules/goto.md) | 待交付 |
+| goto | 未交付；规划路径 `src/modules/goto/` | [设计](./design/modules/goto.md) | 待交付 |
 | RoomShortcuts | [modules/roomShortcuts](../src/modules/roomShortcuts/) | [设计](./design/modules/roomShortcuts.md) | 独立说明待补充；[Framework 接入示例](./usage/core/framework.md) |
 | App | [app](../src/app/) | 装配原则见 Core 架构 | [项目入口](../README.md) |
 

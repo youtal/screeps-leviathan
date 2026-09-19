@@ -1,1085 +1,342 @@
-# goto 模块技术设计
+# goto：原生寻路、方向缓存与移动协作设计
 
-交付状态：部分交付。类型契约已交付；移动执行、路由、流场及避让能力未交付。
+交付状态：设计已形成；运行时实现、公共类型、使用说明及测试均未交付。目标模块路径为 `src/modules/goto/`。下文接口是设计协议，不是已发布 API。
 
-待决设计事项：公共契约须统一 CostMatrix 手动更新入口、缓存复用结果字段及出口方向类型，相关命名须在交付前确定。
+## 1. 模块职责与存储边界
 
-## 1. 模块定位
+goto 负责移动规划、CostMatrix 复用、方向缓存、己方 creep 阻塞检测和避让协作。房间路线使用 `Game.map.findRoute`，格子路径使用 `PathFinder.search`，不实现寻路算法。方向缓存只记录原生搜索已探明的路径，不计算完整流场。
 
-`goto` 是 Screeps creep 移动系统的基础模块。它负责跨房间路由选择、房间内移动决策、路径缓存、动态阻塞处理和 creep 避让协调。
+**只有房间有向权重纳入 MemoryManager 持久化管理。** 包括该权重表的 schema 和修订号；不包含其他业务状态。terrain、热点厌恶区域配置、CostMatrix、pathCache、路由缓存、工作状态、策略表、移动记录、请求和预约全部由工厂闭包 heap 持有。global reset 后重建，热点规则和策略由应用配置重新注入。禁止直接访问 Memory、RawMemory 或 creep.memory。
 
-`goto` 不包装 `Creep.moveTo`，而是使用“跨房 A* + 房内 Flow Field”的两层寻路结构：
+首期支持普通 Creep、同 shard 常规房间出口和同房相邻空位避让。PowerCreep 的主动移动、portal、pull、跨 shard 和多人推挤链不在本协议内；PowerCreep 的占位仍须作为动态障碍观察。
 
-1. **跨房间层**：在房间图上使用 A* 算法搜索房间序列。
-2. **房间内层**：在单个房间内基于 CostMatrix 构建 Flow Field，由 creep 读取当前位置对应的方向并执行移动。
+正确性以已观察的环境事实为边界。无视野房间只能提供估计；搜索未完成不等于不可达；API 返回 OK 不等于实际移动成功。对房间偏好、格子成本、工作约束分别作出保证，不承诺联合全局最优。
 
-该模块只处理移动基础设施，不处理业务行为。搬运、采矿、战斗、升级等业务模块只调用 `goto`，并通过 options 或避让策略描述自己的移动偏好。
+## 2. 对外接口与实例生命周期
 
-## 2. 设计目标
+### 2.1 工厂与返回对象
 
-`goto` 首版完成以下能力：
+拟定入口为 `createGoto(options: GotoOptions): GotoModule`。每个实例拥有独立闭包，不依赖模块级隐含单例。同一 creep 不能同时交给多个实例；应用装配时必须划定实例控制范围。
 
-- 支持同房和跨房移动。
-- 支持跨房 A* 路由搜索。
-- 支持按房间、按房间边界调整通行成本和通行状态，并支持**持久化到 Memory**。
-- 支持有向边权重，即 A->B 与 B->A 的通行成本可独立设置。
-- 支持每个房间 4 套基础 CostMatrix。
-- 支持 CostMatrix 二次加工，降低热门结构周围拥堵。
-- 支持基于 Flow Field 的房内移动。
-- 支持强制完整建场，禁用现有流场复用。
-- 支持 Flow Field 缓存、质量分数、生成时间、活跃时间和保留性评分清理。
-- 支持重大 CostMatrix 更新主动失效与 Flow Field 周期性评估失效。
-- 支持 creep 阻塞检测、轻量避让请求与可选避让策略注册。
-- 支持 tick 间移动结果检查和 stuck 统计。
-- 支持 debug 信息和可选房间可视化。
+`GotoOptions` 包含：
 
-**持久化说明**：
+| 配置组 | 内容 |
+| --- | --- |
+| identity | pluginId、serviceName；全框架唯一 |
+| profiles | 带稳定 ID/version 的地形、road 成本和热点厌恶规则；未知房间处理模式 |
+| policies | 按 owner、role、state 登记的应答与方向策略 |
+| cache | 房间数、goal 数、矩阵/方向数组及依赖索引字节上限 |
+| search | maxOps、每 tick 搜索次数、分段重试次数和 CPU 准入阈值 |
+| traffic | 请求容量、协议超时、重复请求冷却和优先级规则 |
 
-- 用户手动定义的房间偏好、边界（有向边）偏好计划通过 Framework 的统一持久化接口存储，确保在脚本重启或 global reset 后依然有效。
-- 所有的性能开销项（CostMatrix、Flow Field、跨房路由场缓存、避让请求等）只存在于 heap 中。脚本重新载入后，这些数据从空缓存开始运行，避免继承上一次 global 生命周期中的副作用。
+工厂只校验配置并创建闭包，不能在 import 或工厂调用时申请 Memory、订阅事件或读取 Game。框架 setup 负责服务发布、申请权重分区和登记清理；tick 钩子负责环境观察、规划和收尾。显式注入可测试的平台适配端口，生产端口由应用装配提供。
 
-## 3. 模块结构
+返回对象包含以下能力；同一服务对象也通过 `plugin` 的 setup 发布，直接持有工厂返回值不绕过生命周期和 owner 校验。
+
+| 成员 | 参数与返回 | 约束 |
+| --- | --- | --- |
+| `plugin` | 可注册的 `LeviathanPlugin` | 消费者 manifest.requires 包含其 pluginId |
+| `goto(context, creep, target, work, options?)` | 收集一次移动要求，返回 tick 内有效的 RequestHandle | 仅 owner 的 onTickBegin；target 含位置及 range，options 指定 profile |
+| `hold(context, creep, work)` | 登记原地工作及避让能力，返回 RequestHandle | 与 goto 共用每 creep 每 tick 一次登记额度 |
+| `flush(context)` | 将该 owner 的最终计划提交为意图，返回动作关联列表 | 仅 owner 的 onTickExecute；每 owner 每 tick 最多一次；无计划不提交 |
+| `getResult(handle)` | 返回排队、规划、应答或提交结果的只读快照 | tick/generation 过期返回 expired，不暴露可变计划 |
+| `cancel(context, creepId, generation)` | 撤销本人本轮计划和配对；幂等 | commit 前有效；已调用原生 move 后不能承诺撤回 |
+| `release(context, creepId)` | 解除本人长期 owner 绑定，并取消相关请求 | 不清除公共方向缓存 |
+| `weights` | 有向权重的 get/list/set/delete/update/reset，详见 §4 | 持久化唯一入口；未就绪返回 pending |
+| `configureProfile(profile)` | 创建或显式替换 profile；替换必须递增 version | setup 或 tick 边界生效，清除依赖该版本的 heap 缓存 |
+| `setRoomAreas(room, profileId, areas)` | 替换该房间/profile 的厌恶区域，返回区域 revision | 仅 heap；修改在下一 tick 边界生效，不使用时间过期 |
+| `registerPolicies(context, definitions)` | 登记 owner 的策略，返回 dispose 句柄 | owner setup；替换版本须递增，停用清理 |
+| `invalidateRoom(room, reason, changedPositions?)` | 标记结构待核验；位置集合是更新提示 | 不能通过通知直接声明环境已经核验 |
+| `inspect(query)` | 有界返回配置版本、缓存及交通指标副本 | 不返回内部矩阵或数组引用 |
+
+`WorkState` 至少包含 role、state、generation、interruptible、工作锚点/允许范围；可选 policyKey 和轻量业务数据。目标、工作限制或关键状态改变时增加 generation。所有 profile、位置、range、owner 和调用阶段在收集时验证；错误返回 invalid/phaseError/ownerConflict，不消费有效登记额度。
+
+### 2.2 tick 阶段与动作归属
+
+每个 creep 每 tick 只有一个 owner、一次有效 goto/hold 登记和至多一次原生 move 调用。内部可以调整最终方向，但不得以第二次 move 覆盖第一次 move。Framework 意图提交本身不等于调用游戏动作；不走路的 hold 不调用 move。
+
+CPU 收益分两部分：不产生不必要的 move 意图可减少固定意图费用；只做一次移动决策可减少脚本计算和方向覆盖。官方驱动的 intents.set 对同对象、同动作的覆盖不重复计入 0.2，因此不能把“少调用一次同 tick move”一律折算为节省 0.2；真实收益应按最终意图及脚本 CPU 测量。[官方驱动实现](https://github.com/screeps/driver/blob/master/lib/runtime/runtime.js)
+
+采用如下时序：
+
+1. **goto.onTickBegin**：建立本轮收集表，验证双表 tick 连续性，准备权重快照。
+2. **所有消费者 onTickBegin**：提交 goto/hold 和本 tick 工作快照。不在此时提交 GameIntent，也不要求被阻塞者先于请求者登记。
+3. **goto.onTickExecute**：此时所有 begin 均已结束。集中核验、查方向缓存、搜索、产生避让请求、调用响应者策略、预留目的格，并发布本 tick 最终计划。新请求当 tick 得到应答。
+4. **消费者 onTickExecute**：按最终计划调用 flush(context)，以本人的上下文提交 move 意图。业务若改变工作状态，先 cancel，再决定其他行为。
+5. **Framework commit**：检查计划未撤销、身份/工作/政策版本仍有效后，至多调用一次 creep.move。匹配回执及实际位置用于后续核验。
+6. **goto.onTickEnd**：轮换移动双表、释放本 tick 临时矩阵和预约，执行有界回收，不提交移动动作。
+
+此顺序利用 Framework 的“全部 begin → 全部 execute → commit → end”协议和消费者对 goto 的依赖顺序。onTickEnd 属于收尾，不能提交动作；集中规划应放在 goto.onTickExecute。消费者必须在 begin 完成移动所需工作决策，在 execute 调用 flush；未调用 flush 的 owner 不会获得自动代执行。goto 没有通过自己的上下文冒用消费者动作的权限。
+
+begin 抛错或 owner 被跳过时，其收集记录可能仍存在，但不会绕过 Framework 资格检查执行。配对计划要求双方都在本轮登记并提交；框架随后拒绝某个 owner、CPU 耗尽或引擎冲突仍可能导致单边失败，按 §8 恢复。消费者暂停/停用时停止参与应答。
+
+目标格预约覆盖本实例全部普通移动和避让移动，同时使用统一的 GameIntent 目标格锁。跨实例要使用同一锁命名约定；其他业务不得再直接调用受管 creep 的移动 API。
+
+## 3. 四类成本与两种长期矩阵
+
+### 3.1 数据组成
+
+| 层 | 数据 | 保存方式 |
+| --- | --- | --- |
+| a 地形 | 原生 terrain 查询对象；profile 的 plainCost/swampCost | terrain 可跨 profile 共用；成本参数按 profile 固定，global 内无时间有效期 |
+| b 厌恶区域 | source、mineral、controller 等热点附近的额外代价及用户禁区 | 按 room/profile 固定；与 a 构成只读 AB 基底，无时间有效期 |
+| c 房间结构 | road、rampart、其他建造结构及影响通行的施工状态 | 不建立独立 C 矩阵缓存；采集后叠加到 AB clone，缓存结果 ABC |
+| d creep | 当 tick 单位占位，按 ignore/blockOwned/blockAll 等选项配置 | 需要时 clone ABC 后叠加；临时矩阵及其搜索结果不加入共享缓存 |
+
+长期矩阵只有 AB 基底和 ABC 一般使用矩阵；a 的默认地形成本可保留为搜索参数，AB 无调整格用 0，不强制物化平原/沼泽成本。b 的软厌恶采用非负附加值；profile 对道路成本的覆盖不能意外抹掉这些附加值。
+
+合成顺序为：先判定不可通行；可通行格以 profile 的 roadCost（存在可走道路时）或地形成本作为基本值，再加 b 的软厌恶，饱和到 254。硬禁区、阻挡结构使用 255。更新 road 格时须重新取 b 的区域规则/紧凑附加数据，不能把 AB 中已合成的地形代价再加一次。为减小 heap，不要求额外常驻一张 B 成本矩阵。
+
+road 使用 profile 的明确 cost。**所有非己方 rampart 都视为不可通行，包括 public rampart**；这是一项防止通行权限突然收回的保守政策，不是对游戏可通行规则的描述。代价是放弃他人的公共通道。己方 rampart 也不能使同格阻挡建筑变得可通行；同格多对象按最强硬限制合成。源、矿和控制器的本体通行规则与附近的软厌恶分开。特殊地形/道路组合交由引擎适配规则判定，不能仅凭 terrain 标记覆盖合法道路。
+
+施工点按类型、所有权及引擎通行规则处理，不能一律当墙或一律忽略。d 只修改副本；可移除自身占位，但不能清除 a/b/c 的硬禁止。共享方向搜索忽略瞬时 creep；即时绕行才启用 d，结果最多保存本 tick 方案所需的下一步。
+
+### 3.2 结构更新、局部修补与版本
+
+每个 ABC 保存 `matrixVersion`、`updatedAt` 和 `observedAt`。`matrixVersion` 使用实例 generation 加单调序号，`updatedAt` 是最近内容更新 tick；仅用 Game.time 不足以区分同 tick 多次更新。版本比较使用完整标识相等，不以时间大小代替身份校验。
+
+首次需要可见房间时，每 tick 至多采集一次结构通行描述；房间级采集可供多个 profile 合成使用。本 tick 临时对象索引在结束后释放，不建立长期的第三层矩阵。允许保留用于变化检测的紧凑结构描述或精确摘要，其开销计入元数据预算。摘要碰撞不能成为漏掉更新的理由。
+
+变化范围完整且较小时，逐格从 AB 恢复基础值，再读取该格所有结构重新合成 ABC，覆盖建筑拆除、道路消失和同格 rampart 等情况。不能只把新增障碍写为 255 而不处理删除。变化范围不明、首次可见、重新取得视野或更新格过多时从 AB clone 完整重建。实际通行成本改变即增加 matrixVersion；只观察而未改变时只更新 observedAt，不让缓存每 tick 失效。
+
+对外部事件采用“标脏提示 + 可见事实核验”。已标脏但预算不足以核验时禁止把矩阵作为有效命中。所有局部更新在发布前完成；单次搜索使用固定版本，不能读到半更新矩阵。修改 b 或 profile 属于显式配置替换，要重建 AB/ABC 并换版本。
+
+### 3.3 无视野与 heap 回收
+
+AB 不设 TTL，但允许按内存上限淘汰；“无有效期”不等于永不回收。首次观察热点信息前不能把缺省空区域永久标记为已知；已知热点坐标和 profile 可一直复用，显式区域配置更新才换版本。
+
+无视野时 ABC 是 lastSeen 快照。strict 模式拒绝未知结构房间；explore 模式可使用快照或 terrain/已知热点估计，标记 unverified。重新可见后先刷新，不能因时间戳未变化就宣称结构未变化。ABC 的 observedAt 供风险判断，不替代 matrixVersion。
+
+矩阵、方向表、路由、依赖索引分别设数量/字节上限。LRU 淘汰后重建使用新 generation/版本，旧路径不能误命中。global reset 清空全部 heap，只有房间有向权重从 MemoryManager 恢复。
+
+## 4. 有向房间权重
+
+持久化表只有相邻有向边：`(shard, fromRoom, toRoom) → { cost } | { blocked: true }`。A→B 与 B→A 完全独立；缺省 cost=1。cost 为有限 `[1,1000]` 数值，NaN、Infinity、0、负数均拒绝；封禁在原生回调边界转换为 Infinity。
+
+不额外持久化房间进入权重、热点区域、profile 或路径。希望降低/提高某房间进入偏好时，调用方对该房间各相邻入边作一次批量更新；反向出边保持不变。硬环境禁行高于自定义成本，封禁边不能因目标位于其后而被绕过。单位身处某房间时是否能撤离，由出边单独决定。
+
+| weights 接口 | 契约 |
+| --- | --- |
+| `get(from, to)` | 返回显式配置、有效默认值和 revision；缺项明确标记 inherited |
+| `list({from?, to?, cursor?, limit})` | 有界返回配置副本；游标绑定 revision，变化后要求重新分页 |
+| `set(from, to, rule, expectedRevision?)` | 新增或替换一条有向规则；是 update 的单项形式 |
+| `delete(from, to, expectedRevision?)` | 删除后恢复默认成本；不存在则 unchanged |
+| `update(changes, expectedRevision?)` | 原子批量 set/delete；先全量验证，再提交 |
+| `reset(expectedRevision)` | 显式清空用户边规则，环境硬限制仍生效 |
+
+结果为 applied/unchanged/pending/conflict/invalid/capacityExceeded，附 revision 及失败原因。校验房间名、相邻关系、批次/存储容量和版本；任一项失败整批不变。同值更新不增加 revision。读写仅在实例 active 且本 tick 存储 ready 时允许；未装配返回 notReady，pending 不排队隐式写入。
+
+setup 使用 `context.memory('roomWeights', { version: 1, layer: 'critical', … })` 申请分区。每 tick 重新 access，通过本 tick ready 视图 query/commit，禁止保存跨 tick 数据引用。先验证新快照，再 commit，成功后同步发布 heap 副本及 routingRevision。applied 表示已交给管理器，不声称底层已耐久写入。
+
+单次规划固定权重快照。任何生效更新都使所有跨房路由和方向缓存延迟失效：未被旧路径使用的边变便宜也可能改变房间选择。已排队的跨房计划在执行前重新比对版本，变化即取消。
+
+pending 或数据损坏时，暂停跨房规划/动作和权重写入；房内移动、观察和同房避让继续。global reset 后确认权重加载成功再允许过房，不能暂时套用默认值放行。只在首次初始化空分区时创建空规则表；无效数据保留诊断，不自动清空覆盖。配置容量按条数和序列化字节双重限制。
+
+## 5. 原生寻路接口与跨房规划
+
+### 5.1 接口选择
+
+| 维度 | PathFinder.search | Room.findPath |
+| --- | --- | --- |
+| 接入形态 | 直接接收起点、目标和 roomCallback，适合完全控制矩阵 | Room 实例方法，提供内置房间成本及 costCallback 等便捷选项 |
+| 返回信息 | 位置序列及完成度、搜索统计 | 方向步骤数组或序列化结果，调用方便但缺少同等完成度信息 |
+| 模块适配 | 可直接使用 ABC 或临时 d 副本，统一房内/跨房和未完成处理 | 需要协调内置规则与自有矩阵，额外确认终点及转换结果 |
+| 适用场景 | 本模块全部正式格子搜索、受预算限制的绕行 | 独立脚本的简单房内移动、调试与基准对照 |
+
+**正式实现只使用 PathFinder.search。** 不按房内/跨房切换两个 API，避免两套规则及缓存语义。Room.findPath 是便捷封装，不能未经测量就认为它更快；直接 search 也不是无条件更快，优势是输入和结果契约更适合本模块。接口差异以 [PathFinder API](https://docs.screeps.com/api/#PathFinder.search) 和 [Room.findPath API](https://docs.screeps.com/api/#Room.findPath) 为依据。
+
+### 5.2 房间路线与方向校验
+
+Game.map.findRoute 的回调读取 from→to 权重，得到房间序列；PathFinder.search 负责格子搜索。不把房间成本重复加到每个格子上。只给 roomCallback 一组房间白名单不足以约束行走方向，因此按所选房间序列逐跳生成：
+
+1. 单房目标只开放当前房间。跨房每跳只开放当前和下一个相邻房间，目标为下一个房间的合法入口集合，range=0；最终房间再搜索业务目标。
+2. 校验每段只有预期方向的一次跨越，无折返或额外房间；验证出口/入口坐标及方向。入口选择失败可在限定预算内换入口重试，不能把一次失败当作整条边不可达。
+3. 合并原生结果时检查位置连续、无重复位置、满足有向政策，形成临时完整路径。边界方向通过引擎适配规则计算，禁止用两房的局部 dx/dy 直接推断。
+4. 完整结果编码进 §6 的方向缓存；未完成结果不写共享方向表，仅可支持本 tick 的已核验下一步或作为 heap 中有界的待续搜索任务。后续 tick 必须重新验证依赖后续算。
+
+预算不足返回 deferred/searchLimited；空路径先判断目标 range 是否已满足，再决定 arrived 或 unresolved。多目标入口逐段选择不保证整体格子最短，跨房偏好与格子距离不作联合最优承诺。长路线分段限额规划，不突破原生搜索上限，不以自写算法回退。
+
+## 6. 以目标为键的压缩方向缓存
+
+### 6.1 结构与编码
+
+采用无起点索引的目标方向表，逻辑结构为：
 
 ```text
-src/modules/goto/
-  createGoto.ts
-  types.ts
-  roomRoute/
-    parseRoomName.ts
-    createRoomGraph.ts
-    findRoomExitRoute.ts
-    roomExitRouteCache.ts
-  costMatrix/
-    createBaseCostMatrix.ts
-    postProcessCostMatrix.ts
-    costMatrixCache.ts
-    terrainCosts.ts
-  flowField/
-    createFlowField.ts
-    flowFieldCache.ts
-    compression.ts
-    reuse.ts
-    reuseIndex.ts
-  movement/
-    goto.ts
-    step.ts
-    positionStore.ts
-    fallback.ts
-  avoidance/
-    registry.ts
-    requestStore.ts
-    resolve.ts
-  debug/
-    visual.ts
-    stats.ts
-```
-
-设计文档位于 `docs/design/modules/goto.md`，不作为源码目录的一部分。
-
-模块工厂采用 `createXxx(context)` 风格：
-
-```ts
-export const createGoto = (context: ModuleContext, config?: GotoConfig) => {
-  return {
-    goto,
-    onTickEnd,
-    registerAvoidance,
-    unregisterAvoidance,
-    setRoomPreference,
-    setRoomBoundaryPreference,
-    updateCostMatrix,
-    getDebugInfo,
-  };
-};
-```
-
-在 `src/app/modules.ts` 中装配：
-
-```ts
-export const goto = createGoto(createContext('Goto'));
-```
-
-## 4. 核心接口
-
-### 4.1 GotoModule
-
-
-```ts
-interface GotoModule {
-  goto(creep: Creep, target: GotoTarget, options?: GotoOptions): GotoResult;
-
-  onTickEnd(): void;
-
-  registerAvoidance(policyName: string, resolver: AvoidanceResolver): void;
-
-  unregisterAvoidance(policyName: string): void;
-
-  setRoomPreference(roomName: string, preference: RoomPreference): void;
-
-  setRoomBoundaryPreference(
-    fromRoom: string,
-    toRoom: string,
-    preference: BoundaryPreference
-  ): void;
-
-  updateCostMatrix(roomName: string, options?: CostMatrixUpdateOptions): void;
-
-  getDebugInfo(): GotoDebugInfo;
-}
-
-interface CostMatrixUpdateOptions {
-  reason?: string;
-  critical?: boolean;
-}
-```
-
-### 4.2 GotoTarget
-
-```ts
-type GotoTarget =
-  | RoomPosition
-  | { pos: RoomPosition }
-  | { roomName: string; x: number; y: number };
-```
-
-目标支持 `RoomPosition`，也支持任何带 `pos` 的 Screeps 对象，例如 creep、structure、source、mineral、constructionSite、flag。
-
-### 4.3 GotoOptions
-
-```ts
-interface GotoOptions {
-  /** 目标范围。到达距离目标该范围内的位置即视为到达。默认为 0。 */
-  range?: number;
-  /** 跨房间搜索的最大房间数量。默认为 16。 */
-  maxRooms?: number;
-  /** 是否允许跨房间寻路。 */
-  allowCrossRoom?: boolean;
-
-  /**
-   * 是否允许用现有流场构建新流场。
-   * false 表示强制基于当前 CostMatrix 完整建场，生成最优 Flow Field。
-   */
-  reuseFlowField?: boolean;
-
-  /**
-   * 是否在 CostMatrix 中考虑 StructureRoad。
-   * true 时道路 cost 低于 plain；false 时道路按普通地形处理。
-   */
-  considerRoads?: boolean;
-
-  /**
-   * 是否在 CostMatrix 中考虑 swamp 地形。
-   * true 时 swamp cost 高于 plain；false 时 swamp 按 plain 处理。
-   */
-  considerSwamps?: boolean;
-
-  /** 是否避开有敌对建筑或控制者的房间。 */
-  avoidHostileRooms?: boolean;
-  /** 是否在寻路时尝试避开敌对 creep。 */
-  avoidHostileCreeps?: boolean;
-  /** 是否避开 Source Keeper 房间。 */
-  avoidKeeperRooms?: boolean;
-  /** 寻路时是否忽略其它 creep。注意这不影响移动时的动态碰撞检查。 */
-  ignoreCreeps?: boolean;
-
-  /** 是否开启房间可视化渲染。 */
-  visualize?: boolean;
-  /** 是否开启调试日志输出。 */
-  debug?: boolean;
+pathCache[goalKey] = {
+  rooms: { [roomName]: Uint8Array(1250) },
+  matrixDeps: { [roomName]: matrixVersion },
+  routingRevision, generation, lastUsedAt, knownRoomState
 }
 ```
 
-`considerRoads` 与 `considerSwamps` 共同决定房间内基础 CostMatrix 的版本。同一个房间存在 4 套基础 CostMatrix：
+`goalKey` 包含 shard、目标 room/x/y、range、profile ID/version、区域配置作用域版本、未知房间模式及影响通行的稳定搜索约束。标量搜索预算不定义一套新的通行图；只缓存已完整验证的结果。目标多集合若后续支持，须先规范化排序。键允许结构化 Map；若使用散列，命中后仍比较完整语义键。
+
+每格用 4 bit：0 表示未探明方向，1–8 表示游戏方向，9–15 保留且读到时视为损坏。每个字节存两个格子的方向，2500 格需 1250 字节。位置序号 `i=x+50*y`，字节索引 `i>>1`，低/高半字节由 `i&1` 决定；写入必须保留另半字节。
+
+先检查当前位置是否处于目标 range，再查询方向；到达点通常也是 0，不能误当作需要重新搜索。无目标条目、依赖过期或当前位置为 0 时启动原生寻路；非 0 时按当前坐标取下一步，无需保存起点和 creep 路径游标。方向数组尺寸不含 Map、依赖、对象及分配器开销，预算不能仅计算 1250 字节。
+
+方向表只承诺路径几何到达目标；knownRoomState 单独记录沿途是否含探索估计。探索使用的临时 ABC 也必须有带 unverified 标记的版本，首次取得结构事实后换版，不能把“原生搜索完整”解释为“全部房间已观察”。
+
+每个房间地图保存的是“原生搜索已发现的部分方向”，不是全房间可达性表；0 也不表示不可达。避让后移动到表内任意位置可自然继续，同一目标多 creep 可共享。
+
+方向表适用于固定图条件。需要主体例外、任意回调或未纳入 goalKey 的任务约束时，禁止复用该公共表，使用不入库的本次原生搜索结果。
+
+### 6.2 合并必须保持无环
+
+不能把新搜索路径沿途的所有方向直接覆盖旧方向：两条不同的正确路径也可能拼出循环。采用只增补未知前缀的规则：
+
+1. 新路径需完整到达目标 range、无重复位置，且依赖有效。
+2. 从起点前进，遇到第一个已有有效方向的位置即停止增补；保留该点及以后原有方向，复用已经连通目标的后缀。
+3. 若没有已有方向，写入整条路径但不写目标终点的出方向。所有新增节点都指向原生路径上的后继，最后连到目标或已验证的旧图，因此不会引入环。
+4. 写入前遍历拟连接后缀，核验连续性、边界、有向政策及终点，并拒绝导致房间序列折返等违反路由约束的拼接。该遍历只是验证已知路径，不搜索邻居。检查或内存预算不足时放弃入库，不留下半成品。
+5. 同一 goal 条目内不局部改写已有非 0 方向；需要换路时作废该条目，再以新结果建立。方向表更新在本次规划内完成后发布，禁止读到半写入状态。
+
+此规则牺牲部分“更新成更短路径”的机会，换取没有逐格成本/父节点的结构。共享后缀可能不同于从该起点重新搜索的最优结果，但必须满足相同政策和通行约束。不得把缓存描述成全局最短路径保证。
+
+### 6.3 跨房方向与依赖
+
+房间间的方向仍存放在出发格，下一房间由标准出口邻接关系确定。每个跨房步骤都必须由适配器验证，包括同 tick 边界传送导致的可观测坐标变化；不需要给每个 creep 保存 RoomLeg 游标。适配器若不能无歧义编码某类过房情形，则拒绝该路径入库，以临时原生步骤处理，不能猜测。
+
+`matrixDeps` 保存该 goal 已写入路径所依赖的全部 ABC 版本，包括连接后缀和搜索采用的其他房间矩阵。任一依赖落后、缺失或未核验，就丢弃整个 goal 条目。这样不会留下“前房方向有效、后房路径已断”的残余指针，也无需逐格维护跨房依赖。
+
+不独立淘汰条目中的某一房间方向表。淘汰粒度为整个 goal；容量不足时可以放弃入库并执行临时搜索结果。反向索引 `room → goal 集合` 仅用于快速标脏，使用前的版本校验仍是最终依据。读取可在本 tick 对同一 goal 复用已核验结果，但相关房间发生更新时要同步撤销该核验标记。
+
+结构改变导致相关 goal 全部失效，精度是“不会继续使用落后版本”，并不表示每条受影响路径都真的必须重算。该保守范围避免引入复杂的逐格依赖图。
+
+## 7. 缓存失效与预算
+
+| 变化 | 行为 |
+| --- | --- |
+| ABC 内容变化 | 增 matrixVersion；关联 goal 整体作废 |
+| 仅采样时间推进 | 只更新 observedAt；不废弃未变化矩阵的路径 |
+| 任意有向权重变化 | 增 routingRevision；跨房 goal/路由作废，包括非沿途边变便宜 |
+| profile 或区域规则替换 | 更换语义版本；相关 AB/ABC/goal 作废 |
+| creep 占位变化 | 只影响本 tick 检查与 d 层，不废弃长期静态方向表 |
+| 目标/range 变化 | 使用新的 goalKey，取消旧请求和配对 |
+| 无视野/重新可见 | 保留不确定性标记；可见后刷新依赖再命中 |
+| 元数据缺失/淘汰/reset | cache miss；新 generation 防止旧句柄复活 |
+
+执行前复核下一步硬通行条件、权重/profile/工作版本、疲劳/MOVE 和预约。当前占位可以是已确认配对的响应者，具体条件见 §8；其他占位不被当作空格。无法核验时等待，不假报有效。
+
+AB 不设有效期，ABC 以内容版本而非固定周期失效；LRU 是空间回收规则。未知房间可额外限制信息年龄，但年龄不证明环境未变。不可达负缓存只绑定明确原因及依赖，预算不足不能长期记录为无路。
+
+至少设置 maxRooms、maxGoals、maxMatrixBytes、maxDirectionBytes、maxDependencyEntries、maxRequests、maxPendingSearches、maxSearchesPerTick、maxOpsPerSearch、maxMergeSteps 和 maxGcItemsPerTick。依赖验证为经过房间数的量级，合并验证为路径长度量级；都必须受预算控制，不能把一次字节查询的 O(1) 当作整个缓存操作的成本。
+
+## 8. 双表阻塞检测与两 tick 避让
+
+### 8.1 移动尝试双表
+
+闭包维护 `attemptsCurrent` 与 `attemptsPrevious`。只有真正执行到原生 creep.move 且返回 OK 时，才向 current 写入记录：
 
 ```text
-roads=true,  swamps=true
-roads=true,  swamps=false
-roads=false, swamps=true
-roads=false, swamps=false
+creepName → { creepId, ownerId, tick, from, expectedNext, goalGeneration, intentId }
 ```
 
-这 4 套 CostMatrix 面向不同角色：
+其中 from 是调用 move 时的位置，不能在本 tick 把它称为“成功移动后的位置”。到下一 tick 才能观察移动结果。保留 creepId 防止死亡后同名新 creep 继承旧记录；保留 expectedNext 用来确认前方究竟是什么阻挡。
 
-- 高频搬运 creep 使用 `considerRoads=true`，强烈偏好道路。
-- 需要直线穿越的战斗 creep 使用 `considerRoads=false`，避免被道路布局牵引。
-- 疲劳敏感 creep 使用 `considerSwamps=true`，规避沼泽。
-- 对路径长度更敏感的 creep 使用 `considerSwamps=false`，将沼泽视为普通地形。
+goto.onTickEnd 丢弃 previous 引用，令 previous=current，再创建空 current。不存在逐项搬运和历史全量扫描。若 tickEnd 因硬中断未完成、框架没运行或记录 tick 不是 `Game.time-1`，下一 begin 清空陈旧记录，不冒充上一 tick 尝试。global reset 两表都为空。
 
-`reuseFlowField=false` 用于强制建立最优场。该选项用于高价值移动、战斗移动、卡住后的重建，以及 debug 对比。
+下一轮只对登记参与移动/hold 的 creep 检查 previous：
 
-### 4.4 GotoResult
+- 位置等于 expectedNext：移动成功，清理阻塞等待。
+- 位置等于 from：上轮已接受移动但没有位移；若 expectedNext 被己方 creep 占据，产生己方阻塞请求。
+- 位置不同于以上两者：外部移动/偏离，按当前坐标重新取方向，不归因于堵塞。
 
+fatigue、无 MOVE、spawning、未 flush、框架拒绝/推迟以及原生错误都不会写 current，因此不会误列为“上 tick 主动移动但没走成”。两表本身证明的是尝试与无位移，不能独自证明是己方堵路，还需检查期望格。提交前已看到己方占位也可直接创建 potentialBlock 请求，省去一次明知有占位的 move；与 confirmedBlock 分开统计。
 
-```ts
-interface GotoResult {
-  code: ScreepsReturnCode;
-  moved: boolean;
-  arrived: boolean;
-  blocked: boolean;
-  requestedAvoidance: boolean;
-  usedCache: boolean;
-  reusedFlowField: boolean;
-  pathType: 'flowField' | 'pathFinder' | 'fallback' | 'none';
-  reason?: string;
-}
-```
-
-上层行为通过 `GotoResult` 判断移动是否完成、是否被阻塞、是否已经请求避让、是否使用了缓存或复用流场。
+### 8.2 同 tick 请求和应答
 
-## 5. 跨房间寻路
+所有消费者 begin 已登记本职状态后，goto 集中规划，因此即使响应者业务插件先于请求者运行，也能用其本 tick 快照即时响应。请求含双方 creepId/owner、位置、期望释放格、目标/工作 generation、创建 tick、优先级和期限；不保存跨 tick 游戏对象。
 
-### 5.1 房间图
+默认使用以下两个决策 tick：
 
+| 时刻 | 请求者 A | 响应者 B | 协调状态 |
+| --- | --- | --- | --- |
+| t 检测/协商 | 检测到 B 阻挡，创建请求，本轮不向 B 原格盲走 | 策略当 tick 应答，并选择拟让出的安全方向 | accept 后形成执行 tick=t+1 的配对计划 |
+| t+1 同步尝试 | 刷新目标/工作快照；有效时向 B 原格提交 move | 刷新工作快照；有效时向约定空位提交 move | 重验双方位置、工作、疲劳、矩阵和预约；本轮一起提交 |
+| t+2 事实观察 | 检查是否进入目标格 | 检查是否离开原格 | 确认完成，或按失败事实重新协商 |
 
-跨房间寻路使用房间作为节点，相邻房间之间的出口作为边：
+协商阶段若 B 的本职计划本来就要离开阻塞格，则优先保留其本职移动，A 等下一轮检查空位，不额外要求 B 停下来配对。需要专门让路时，accept 将双方本轮移动计划设为等待；工作策略必须允许这一等待。
 
-```ts
-interface RoomEdge {
-  from: string;
-  to: string;
-  direction: DirectionConstant;
-  cost: number;
-  passable: boolean;
-}
-```
+t+2 是引擎结果的观察时间，不要求先观察 B 在 t+2 让开后才允许 A 提交。两个 move 在 t+1 的世界结算中尝试完成；accept 只表示策略同意及计划成立，不是已经移动成功。
 
-边成本由以下因素构成：
+配对的 t+1 计划只有在双方再次登记、位置未偏离、目标/工作 generation 相容、响应者重新确认可让路时有效。任一条件改变则取消，不能凭 t 的承诺覆盖本职新状态。t 的候选格不是跨 tick 硬预约，到 t+1 要重新竞争；冲突则等待或重选并重新确认。
 
-- 基础移动成本。
-- 目标房间偏好。
-- 房间边界偏好。
-- 房间类型成本，包括 highway、source keeper、center room、owned room、reserved room、enemy room。
-- Intel 信息，包括敌对建筑、tower、入侵者、封锁出口。
-- 近期 stuck 或移动失败统计。
+### 8.3 提交、单边失败与恢复
 
-### 5.2 A* 搜索
+为每对参与者生成单独的 owner 意图，各自的 subject/channel 锁及目的格锁互不混淆。双方必须完成 flush；commit 回调检查双方已提交、配对未取消和版本相容，否则不调用 move。工作业务可以 cancel 拒绝旧安排。
 
-A* 使用房间坐标的曼哈顿距离作为启发函数：
+Framework 并不提供跨 owner 原子动作组；游戏引擎也不能保证“B 接受就一定腾空”。即使双方已提交，B 的 owner 后续失败、CPU 在 commit 中途耗尽、第三方占位或引擎冲突都可能产生单边执行。协议不伪造原子性，不在调用过 move 后补发相反方向。下一轮以实际位置为准：B 独自让开则 A 正常继续，A 未前进则重新核验，双方未动则退避或改道。
 
-```text
-h(room, targetRoom) = abs(room.x - target.x) + abs(room.y - target.y)
-```
+accept 的方向只允许本 tick 可确认的同房相邻空位；首期不交换位置，不把未确认将离开的第三个 creep 当空格。敌方/PowerCreep 占位不参与本应答协议。窄道无候选可拒绝，必要时由请求者执行原生绕行；不保证所有交通拓扑都可解。
 
-房间名解析使用 Screeps 坐标规则：
+同一双方身份、目标 generation 和释放格去重。响应者每轮最多采纳一个请求，请求按基础优先级、封顶等待加分、创建时间、稳定 ID 排序；响应者的工作硬限制不可被加分突破。重复拒绝冷却、让路后短期不抢回原格、持续无进展后的绕行限制互相振荡。容量不足返回 busy，不无界排队。
 
-```text
-W0N0 -> (-1, -1)
-E0N0 -> (0, -1)
-W0S0 -> (-1, 0)
-E0S0 -> (0, 0)
-```
+## 9. 注入式工作策略
 
-W/E 与 N/S 边界不存在 `-0` 房间。解析与反解析必须使用同一套规则，避免跨越 `W0/E0` 或 `N0/S0` 时出现偏移。
+策略表按 `(owner, role, state)` 直接查找，顺序为显式 policyKey → 精确角色状态 → 角色默认 → owner 默认 → 模块保守默认。显式 key 不存在返回错误，不静默挑选其他职业策略；查找最多固定层数，不扫描谓词、不读取持久化工作状态。
 
-### 5.3 房间偏好
+两个独立注入点：
 
-用户可以通过接口设置房间或边界的通行权重，这些信息将持久化存储在 `Memory` 中。
+| 策略 | 输入 | 输出 |
+| --- | --- | --- |
+| `respond(context, request)` | 本 tick WorkState、局部环境、请求和等待年龄 | accept/reject/defer、reason、附加工作约束 |
+| `chooseDirection(context, candidates)` | 通过硬安全和工作约束过滤的最多 8 个候选 | 候选 ID 或 none |
 
-```ts
-interface RoomPreference {
-  /** 是否可通行。false 时寻路算法将完全避开该房间。 */
-  passable?: boolean;
-  /** 通行成本倍率。默认 1.0。 */
-  cost?: number;
-  /** 是否尽量避开。 */
-  avoid?: boolean;
-  reason?: string;
-}
+先判断愿不愿意，再生成安全候选，最后决定方向。策略不能放宽非己方 rampart 禁行、硬禁区、占位和本职允许范围。方向返回 none 表示本次无法让路。集中规划在 goto 的调用栈中执行策略，但不授权其代调用业务上下文提交动作。
 
-interface BoundaryPreference {
-  /** 该方向是否可通行。 */
-  passable?: boolean;
-  /** 该方向的通行成本权重。 */
-  cost?: number;
-  reason?: string;
-}
-```
+工作状态未刷新则不应答；策略引用缓存绑定 owner/role/state/policyVersion，工作约束另绑定 generation。t+1 执行前重新运行必要的应答/方向验证，不能跨 tick 直接复用 t 的任意回调结果。
 
-房间偏好描述某个房间整体是否可走、是否危险、是否应尽量绕开。
+策略同步、只读、局部且无副作用；禁止自行 move、提交意图、持久化写入、全房扫描或另启搜索。异常、Promise、非法候选都保守拒绝并限频记录。前后测量策略 CPU，超限后降级；同步回调无法强制中途抢占，不能声称任意用户函数都有硬执行上限。
 
-**有向边界偏好**描述从房间 A 到房间 B 的特定出口是否可走。存储在 Memory 中时，以 `${fromRoom}->${toRoom}` 作为 key，实现非对称的通行控制。
+| 工作状态 | 应答与方向原则 |
+| --- | --- |
+| 固定矿位采集 | 无替代工作格则拒绝；能让路时仍保持采集范围 |
+| 运输途中 | 可中断时让路；降低远离目标、沼泽和回归代价 |
+| 升级/维修 | 保持本职 range，避开补给入口 |
+| 紧急撤退 | 不进入更危险区域，不因请求优先级牺牲硬安全条件 |
+| 闲置 | 优先离开通道，但仍服从显式允许范围 |
 
-### 5.4 跨房路由场缓存
+默认策略只接受明确可中断且工作约束齐全的情况；其余拒绝。profile 管空间成本，工作策略管任务是否允许被打断，两者分别版本化。
 
-跨房 A* 仍然搜索完整房间序列，但缓存不保存整条路线，而是保存类似 Flow Field 的房间级路由场。路由场记录“为了抵达某个目标房间，某个房间内的 creep 应该走向哪个出口方向”。
+## 10. 返回结果与诊断
 
-跨房路由场缓存只存在于 heap：
+RequestHandle 初始结果为 queued 或参数错误，规划后为 arrived/planned/waiting/blocked/deferred/policyPending/policyDenied/routeUnresolved，flush 后追加 submitted、intentId。最终移动事实通过下一 tick 双表核验记录；submitted 和 accepted 均不能替代 moved。句柄只保留有限轮次，expired 明确返回，不长期保存每次请求历史。
 
-```ts
-interface CachedRoomExitRoute {
-  roomName: string;
-  targetRoom: string;
-  avoidHostileRooms: boolean;
-  exitDirection: ExitConstant;
-  nextRoom: string;
-  createdAt: number;
-  lastUsed: number;
-  preferenceVersion: number;
-  routeCost: number;
-}
-```
+inspect 输出分层矩阵命中、内容更新/仅观察次数、方向命中/0 格 miss、因矩阵或政策失效的 goal 数、数组与元数据字节、原生搜索及合并验证 CPU、完整/未完成搜索数、confirmed/potential 阻塞、应答与实际让路比例、等待时长及单边失败数。日志限频，不在每 tick 序列化矩阵和整个 pathCache。
 
-缓存 key：
+阶段权限错误、存储 pending、预算不足、策略失败与无路有独立 reason。停用释放 heap/订阅与策略注册，权重分区按 MemoryManager 生命周期保留，不因普通停用清空用户规则。
 
-```text
-targetRoom + avoidHostileRooms + roomName
-```
+## 11. 验证与交付安排
 
-缓存值示例：
+以下均未交付，本阶段只形成设计。
 
-```text
-W22N11:5
-```
+| 阶段 | 验收重点 |
+| --- | --- |
+| 工厂、存储与生命周期 | 工厂无副作用；有向权重 CRUD/原子批次；pending/reset；实例隔离；begin 收集/execute 规划/owner flush/end 轮换 |
+| AB/ABC 与 d | road profile；公共非己方 rampart 禁行；结构拆除局部恢复；同 tick 双版本；未变化观察不失效；区域替换；无视野 |
+| 方向表 | 奇偶 nibble 不互相破坏；1–8 编解码；到达点为 0；无起点共享；不同搜索交叉不成环；跨房边界；依赖过期整 goal 丢弃 |
+| 双表与协作 | API OK 但未移动；fatigue 不入表；名字复用；tickEnd 中断；消费者顺序调换；t 应答/t+1 同时提交；工作改变撤销；第三方抢位与单边失败 |
+| 性能与恢复 | 多单位同目标/随机目标；频繁结构和权重更新；集中失效；低 CPU；global reset；字节上限与有界回收 |
 
-表示当目标房间为当前路由场的 `targetRoom` 时，creep 位于 `W22N11` 应向 `5` 对应的出口方向移动。`nextRoom` 用于记录该出口方向后的目标房间，并支持边界失败统计。
+矩阵测试覆盖 source/mineral/controller 热点规则、road 与区域叠加、施工点及同格多结构。路径测试必须含“未经过的边变便宜”、同 tick 多次改矩阵、后房间失效及合并后缀已经过期。不能只测正常命中。
 
-失效条件：
+过房方向编码和两单位同步让路必须在真实引擎验证；mock 不能证明结算时序。性能基准统计总 CPU P50/P95/P99、heap、实际 move 调用次数、方向表有效格比例，以及缓存建立/合并/失效开销；对照直接原生搜索，不只统计 search 本身。
 
-- 房间偏好变化。
-- 边界偏好变化。
-- Intel 危险等级变化。
-- 路由中的房间或边界产生连续移动失败。
-
-## 6. CostMatrix
-
-### 6.1 CostMatrix 分类
-
-CostMatrix 由以下维度决定：
-
-```text
-roomName
-considerRoads
-considerSwamps
-eventStamp
-```
-
-同一个房间维护 4 套基础 CostMatrix，对应 `considerRoads` 与 `considerSwamps` 的四种组合。
-
-### 6.2 CostMatrix 事件戳
-
-每个房间维护一个 CostMatrix 事件戳：
-
-```ts
-interface RoomCostMatrixStamp {
-  roomName: string;
-  eventStamp: number;
-  updatedAt: number;
-  reason?: string;
-}
-```
-
-当房间内影响通行的静态或半静态信息变化时，`eventStamp` 递增：
-
-- 建筑建成。
-- 建筑消失或被摧毁。
-- constructionSite 创建、完成或删除。
-- rampart public/private 状态变化。
-- 房间控制权变化。
-- source keeper lair、hostile structure 等危险信息变化。
-- 手动调用 `updateCostMatrix(roomName, options)`。
-
-CostMatrix 缓存值记录生成时的 `eventStamp`：
-
-```ts
-interface CachedCostMatrix {
-  matrix: CostMatrix;
-  roomName: string;
-  considerRoads: boolean;
-  considerSwamps: boolean;
-  eventStamp: number;
-  createdAt: number;
-  lastUsed: number;
-}
-```
-
-当缓存中的 `eventStamp` 小于房间当前 `eventStamp` 时，该 CostMatrix 过期并被丢弃。
-
-外部通行环境变化统一通过 `updateCostMatrix` 通知 goto：
-
-```ts
-goto.updateCostMatrix(roomName, {
-  reason: 'structureChanged',
-  critical: true,
-});
-```
+## 12. 风险与待决参数
 
-调用该方法时，模块递增本房间 `eventStamp`，并清理该房间旧版本 CostMatrix。`critical=true` 表示重大更新，例如建筑阻挡、rampart 状态、房间控制权、危险结构等足以改变已有方向场正确性的变化；模块会立即清空本房间 Flow Field 缓存。`critical` 通常由 `goto` 监听事件后自行判断，调用方只需要在手动维护通行状态时显式传入。
-
-### 6.3 基础构建规则
-
-基础 CostMatrix 处理地形和道路：
-
-```text
-wall terrain: 255
-plain: 2
-swamp:
-  considerSwamps=true: 10
-  considerSwamps=false: 2
-road:
-  considerRoads=true: 1
-  considerRoads=false: 按所在地形处理
-```
-
-当前版本不引入额外 `matrixProfile` 维度。不同角色的移动偏好通过 `considerRoads` 与 `considerSwamps` 两个选项表达；后续如需支持 combat、dismantler 等特殊成本模型，再扩展独立 profile 维度。
-
-### 6.4 二次加工
-
-基础 CostMatrix 生成后进入二次加工步骤。二次加工负责写入建筑阻挡、热门结构周围拥堵惩罚和特殊区域成本。
-
-不可通行建筑所在格设置为 `255`：
-
-```text
-StructureSpawn
-StructureExtension
-StructureLink
-StructureStorage
-StructureTower
-StructureObserver
-StructurePowerSpawn
-StructureExtractor
-StructureLab
-StructureTerminal
-StructureNuker
-StructureFactory
-StructureInvaderCore
-非己方或不可通行 StructureRampart
-其它 blocking structure
-```
-
-可通行或场景相关结构按基础规则处理：
-
-```text
-StructureRoad: 由 considerRoads 决定
-StructureContainer: 默认可通行，但 cost 高于 road/plain
-己方可通行 rampart: 默认可通行
-constructionSite: 按结构类型判断
-```
-
-热门结构周围增加拥堵成本。热门结构包括：
-
-```text
-Source
-Mineral
-StructureStorage
-StructureTerminal
-StructureSpawn
-Controller
-常用 link/container
-```
-
-拥堵成本按半径衰减：
-
-```text
-range 1: +8
-range 2: +4
-range 3: +2
-```
-
-该步骤让普通路径倾向于绕开热门结构周围区域，避免 creep 穿过 source、mineral、storage、spawn 等高频作业点附近，降低局部交通拥堵。目标本身位于热门结构附近时，最终目标 range 内的格子不额外惩罚，避免导致无法靠近目标。
-
-### 6.5 CostMatrix 缓存
-
-CostMatrix 缓存只存在 heap 中：
-
-```ts
-type CostMatrixKey =
-  `${string}:roads=${boolean}:swamps=${boolean}:stamp=${number}`;
-```
+- 每 goal/room 固定 1250 字节适合同目标复用；大量短路径或随机目标可能浪费空间，先以 goal/字节上限控制，再以实测决定是否需要稀疏表示。
+- 任一依赖更新整 goal 失效容易理解，但热点房间频繁建造会扩大重算；不以更细粒度索引换取未经证明的收益。
+- 部分原生路径不进入共享方向表，搜索预算偏低时需待续任务才能建立完整跨房缓存；待续任务须严格限额。
+- 同步让路允许请求者进入“计划释放”的格子，无法完全消除一次无效 move；双表负责纠正事实，不保证消除所有引擎冲突。
+- 集中规划依赖业务在 begin 提供完整移动决策。仅在 execute 才能确定的任务，应延期登记，或另外审议框架阶段协议，不隐式改变调用顺序。
+- 默认容量、CPU 预算、合并步数、冷却和重试阈值待基准确定。持久化启用前须验证 MemoryManager 迁移/pending/reset 的数据一致性。
 
-清理规则：
-
-- `eventStamp` 过期立即清理。
-- 长时间未使用的 CostMatrix 按 `lastUsed` 清理。
-- heap 缓存数量超过上限时，优先删除低频房间。
-
-## 7. Flow Field
-
-### 7.1 基本结构
-
-Flow Field 是房间内从任意格走向目标的方向场。它基于某个 CostMatrix 构建，并与该 CostMatrix 的 `eventStamp` 绑定。
-
-```ts
-interface FlowField {
-  roomName: string;
-  targetKey: string;
-  range: number;
-  considerRoads: boolean;
-  considerSwamps: boolean;
-  costMatrixEventStamp: number;
-  createdAt: number;
-  activeAt: number;
-  score: number;
-  retentionScore: number;
-  buildType: 'full' | 'reused' | 'partial';
-  reusedFrom?: string;
-  reusedDepth?: number;
-  patch?: ReusedFlowFieldPatch;
-  data?: Uint8Array;
-}
-```
-
-`data` 使用 `Uint8Array` 存储压缩后的完整方向数据。完整建场直接读取 `data`；复用建场可以不复制完整 `data`，而是通过 `patch` 覆盖局部差异区域，patch 外读取 `reusedFrom` 指向的基础 Flow Field。每个格子只需要保存一个方向值：
-
-```text
-0: unreachable / none
-1-8: Screeps direction
-```
-
-首版使用 `Uint8Array(length = 2500)`，每格一个 byte。压缩层保留 nibble 编码扩展点，后续版本在不改变外部接口的前提下切换为每 byte 存两个格子的方向值。
-
-Flow Field 不写入 `Memory`。global reset 后所有 Flow Field 缓存消失。
-
-### 7.2 生成流程
-
-Flow Field 以目标范围内的所有可接受格为起点，反向扩散生成：
-
-```text
-1. 解析 target + range，得到目标房间内所有可接受终点格。
-2. 读取或创建匹配 options 的 CostMatrix。
-3. 将终点格 distance 设为 0，放入优先队列。
-4. 使用 Dijkstra 在 50x50 网格反向扩散。
-5. 每次更新相邻格最短距离时，记录该格应该移动的 DirectionConstant。
-6. 构建完成后，丢弃 distance field，仅保留 Uint8Array 方向场。
-```
-
-完整建场得到最优 Flow Field，初始质量分数为 `100`。
-
-成本语义：
-
-- 从 `pos` 走向 `next` 的移动代价为 `costMatrix.get(next.x, next.y)`。
-- 8 个方向的方向成本相同，不对斜向移动额外加权。
-- 允许对角移动，只要目标格在 CostMatrix 中可通行。
-- 多目标 range 内的终点格以 CostMatrix 呈现的信息为准，`255` 或不可接受成本的格子不会作为终点。
-
-### 7.3 跨房衔接
-
-跨房移动通过路由场被拆为房间内 segment：
-
-```ts
-interface RouteSegment {
-  roomName: string;
-  target:
-    | { type: 'position'; pos: RoomPosition; range: number }
-    | { type: 'exit'; direction: DirectionConstant; nextRoom: string };
-}
-```
-
-当目标房间不是当前房间时，`goto` 先查询或生成跨房路由场，得到当前房间应该前往的出口方向。随后使用该出口方向查询或生成当前房间内的出口 Flow Field。
-
-中间房间的 Flow Field 目标是下一房间方向上的可通行出口格：
-
-```text
-TOP: y = 0
-BOTTOM: y = 49
-LEFT: x = 0
-RIGHT: x = 49
-```
-
-出口格必须通过 CostMatrix 过滤。不可通行出口不会进入目标集合。
-
-### 7.4 流场复用
-
-参考成本场与残差复用的完整设计（数据布局、`cm` / `cmin` 门限、参考场索引与增量算法）见
-[goto 模块成本场设计](./goto-cost-field.md)。
-
-`GotoOptions.reuseFlowField` 控制是否允许复用现有流场建场。
-
-```text
-reuseFlowField=true:
-  没有精确匹配流场时，选择高质量相近流场进行局部建场。
-
-reuseFlowField=false:
-  必须基于当前 CostMatrix 完整建场。
-  生成结果是 full Flow Field。
-```
-
-#### 7.4.1 复用候选索引
-
-为了避免每次建场时遍历本房间所有 Flow Field，模块维护独立的复用候选索引。只有满足资格条件的 Flow Field 会进入索引：
-
-- `score >= minReusableScore`。
-- 保留性指标未低于清理阈值。
-- `reusedDepth < maxReuseDepth`。
-- 与新目标使用同一个房间、`considerRoads`、`considerSwamps` 和 CostMatrix 版本。
-- 目标类型兼容。普通位置目标只复用普通位置目标场；出口目标按出口方向分组。
-
-低于复用分数阈值的 Flow Field 不进入索引，也不会在查询候选时被扫描。
-
-索引使用目标位置的空间哈希：
-
-```text
-bucketSize = 5 或 10
-bucketX = floor(target.x / bucketSize)
-bucketY = floor(target.y / bucketSize)
-bucketKey = roomName + roadsKey + swampsKey + targetType + bucketX + bucketY
-```
-
-查找候选时，从新目标所在 bucket 开始，按半径扩展查询附近 bucket，并只保留前 `maxReuseCandidates` 个候选。最终候选再按精确评分排序：
-
-```ts
-interface FlowFieldScoreInput {
-  sourceScore: number;
-  targetDistance: number;
-  sourceAge: number;
-  reusedDepth: number;
-}
-```
-
-初始评分公式：
-
-```text
-reuseScore = sourceScore
-  - targetDistance * 4
-  - reusedDepth * 10
-  - agePenalty
-```
-
-当最高评分低于阈值时，不复用，改为完整建场。
-
-```ts
-interface FlowFieldReuseConfig {
-  minReusableScore: number;
-  minReuseScore: number;
-  maxTargetDistance: number;
-  maxReuseCandidates: number;
-  bucketSize: number;
-  maxReuseDepth: number;
-  maxPatchCells: number;
-}
-```
-
-#### 7.4.2 边界收敛式局部复用
-
-复用建场不尝试从旧方向场直接推导完整新方向场，而是使用 **边界收敛式局部复用**。
-
-设旧 Flow Field 为 `T`，旧目标为 `P`；新 Flow Field 为 `T'`，新目标为 `P'`。两者必须使用同一个 CostMatrix `C`。算法从 `P'` 开始反向 Dijkstra，只生成 `T'` 与 `T` 不同的差异区域；当扩散到某个位置后，新方向与旧方向收敛，并且该方向的后继路径已经接入新场可信区域时，将该位置作为边界，边界外继续复用 `T`。
-
-生成流程：
-
-```text
-1. 将 P' 的可接受终点格压入优先队列，distance = 0。
-2. 使用 CostMatrix C 反向 Dijkstra，逐步生成新距离场 D'。
-3. 每次确定某个位置 pos 的 T'[pos] 后，与 T[pos] 比较。
-4. 如果 T'[pos] 与 T[pos] 不同，pos 属于差异区域，继续向外扩散。
-5. 如果 T'[pos] 与 T[pos] 相同，还需要检查 next(pos, T[pos]) 是否已经接入可信区域。
-6. 通过检查后，pos 成为复用边界，不再从 pos 向外扩散。
-7. 扩散直到所有外沿都被复用边界闭合。
-```
-
-可信区域包括：
-
-- 新目标 `P'` 的可接受终点格。
-- 已生成并确认属于差异区域的 `T'` 格。
-- 已确认的复用边界格。
-
-边界判断不能只比较当前格方向是否相同，还必须保证后继路径可接入新场：
-
-```text
-isConverged(pos):
-  T'[pos] == T[pos]
-  and next(pos, T[pos]) is trusted
-```
-
-这样可以避免某个格子的第一步方向虽然相同，但后续进入旧场后仍被带回旧目标 `P`。
-
-复用结果保存为旧场加局部覆盖层：
-
-```ts
-interface Rect {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
-}
-
-interface ReusedFlowFieldPatch {
-  baseFieldId: string;
-  targetKey: string;
-  range: number;
-  bounds: Rect;
-  directions: Uint8Array;
-  trusted: Uint8Array;
-  reusedDepth: number;
-}
-```
-
-读取方向时：
-
-```text
-当前位置在 patch bounds 内且 patch 有方向：读取 patch direction。
-否则：读取 base Flow Field direction。
-```
-
-边界收敛式复用失败时，必须回退完整建场。失败条件包括：
-
-- 新目标与旧目标距离超过 `maxTargetDistance`。
-- 扩散格数超过 `maxPatchCells`。
-- 无法形成可信闭合边界。
-- 扩散触及房间边界或不可达区域后仍无法收敛。
-- patch 质量评分低于 `minReuseScore`。
-
-复用流场不保证全局最优，因此复用结果质量分数低于完整建场。复用深度越高、patch 越大、目标距离越远，质量分数越低，也越容易在周期性保留性评估中被清理。
-
-### 7.5 失效与保留性评估机制
-
-Flow Field 使用两类失效机制：
-
-1. **重大 CostMatrix 更新主动失效**。
-2. **周期性保留性评估失效**。
-
-CostMatrix 更新失效规则：
-
-```text
-updateCostMatrix(roomName, { critical: true })
-  -> increment room costMatrix eventStamp
-  -> delete room costMatrix cache
-  -> delete room flowField cache
-```
-
-`goto` 监听房间内建筑和房间状态事件，并在模块内部判断本次 CostMatrix 更新是否属于重大更新。调用方通常不需要手动判断 `critical`。
-
-模块维护一组会影响通行性的结构类型和状态规则。当这些对象发生变化时，本房间更新视为 `critical=true`。典型情况包括：
-
-- 不可通行建筑建造完成、消失或被摧毁。
-- 非己方或不可通行 rampart 状态变化。
-- 房间控制权变化。
-- hostile structure、invader core、source keeper lair 等危险结构信息变化。
-- 一批道路建设完成时，本批次最后一条道路建成。
-
-道路建设不要求每条道路完成都立即清空 Flow Field。模块可以按房间记录待处理道路建设状态，仅在本批次道路全部完成后触发一次重大更新，降低重建震荡。
-
-`critical=false` 或未传入时，只递增本房间 CostMatrix `eventStamp` 并清理旧 CostMatrix。适用于拥堵统计、偏好成本、软危险成本等不立即破坏方向场可用性的更新。此时既有 Flow Field 可以继续使用，后续由周期性保留性评估决定是否清理。
-
-由于重大更新已经在 `updateCostMatrix` 入口完成 Flow Field 清理，主流程能读取到的 Flow Field 都被视为具备使用条件。主流程不做每 tick 的 Flow Field 与 CostMatrix eventStamp 强制比较。
-
-周期性保留性评估由未来的周期任务管理模块调用。该任务扫描 Flow Field 缓存，根据质量分数、生成时间、活跃时间、复用深度和 patch 大小计算保留性指标。当指标低于配置阈值时清理该缓存。
-
-```ts
-interface FlowFieldRetentionConfig {
-  minRetentionScore: number;
-  agePenaltyPerTick: number;
-  inactivePenaltyPerTick: number;
-  activeBonus: number;
-  reusedDepthPenalty: number;
-  patchSizePenalty: number;
-}
-```
-
-初始评分模型：
-
-```text
-retentionScore =
-  flowField.score
-  + activeBonus(activeAt)
-  - agePenalty(createdAt)
-  - inactivePenalty(activeAt)
-  - reusedDepthPenalty
-  - patchSizePenalty
-```
-
-完整建场的初始质量分数高于复用建场。复用建场由于可能非最优，会带有更高的复用深度和 patch 惩罚，因此更容易在周期任务中被清理。
-
-每次流场被调用后刷新 `activeAt`：
-
-```text
-flowField.activeAt = Game.time
-```
-
-缓存清理优先级：
-
-1. 重大 CostMatrix 更新直接清理的房间流场。
-2. 保留性指标低于阈值的复用流场。
-3. 保留性指标低于阈值的完整流场。
-4. 缓存数量超过上限时，按保留性指标从低到高清理。
-
-## 8. creep 阻塞与避让
-
-### 8.1 动态阻塞
-
-creep 不进入长期 CostMatrix，也不触发 CostMatrix 失效。实际移动前对推荐方向的目标格进行动态检查：
-
-```text
-1. 目标格无 creep：直接移动。
-2. 目标格有 creep：尝试本地绕行。
-3. 本地绕行不可用：创建避让请求或返回 blocked。
-4. 连续 stuck：强制完整建场或 fallback 到 PathFinder。
-```
-
-### 8.2 避让请求
-
-```ts
-interface AvoidanceRequest {
-  id: string;
-  tick: number;
-  requesterName: string;
-  blockerName: string;
-  from: RoomPosition;
-  blockedPos: RoomPosition;
-  desiredDirection: DirectionConstant;
-  priority: number;
-  reason?: string;
-}
-```
-
-避让请求只存在当前 global 的 heap 中，并在 tick 结束时清理过期请求。
-
-### 8.3 避让策略
-
-```ts
-type AvoidanceDecision =
-  | { type: 'accept'; direction?: DirectionConstant }
-  | { type: 'reject'; reason?: string }
-  | { type: 'defer'; reason?: string };
-
-type AvoidanceResolver = (
-  creep: Creep,
-  request: AvoidanceRequest,
-  context: AvoidanceContext
-) => AvoidanceDecision;
-
-interface AvoidanceContext {
-  pendingMoves: ReadonlyMap<string, PendingMove>;
-  requests: readonly AvoidanceRequest[];
-  findSafeDirections(creep: Creep): DirectionConstant[];
-  isReserved(pos: RoomPosition): boolean;
-}
-```
-
-`goto` 提供避让请求、候选方向和安全性判断。首版仍然采用调用时立即 `move` 的模型，不引入两阶段 intent 调度。因此，当两个正在赶路的 creep 同 tick 争抢同一地块时，后调用或被挡住的 creep 可能停留 1 tick；该代价在首版中视为可接受。
-
-避让请求主要用于可选的轻量协作：被阻塞 creep 可以发出请求，挡路 creep 在其后续 tick 或后续行为调用中结合 resolver 决定是否让路。首版不保证同 tick 内完成全局最优避让，也不处理所有互相让路循环。
-
-候选避让方向过滤条件：
-
-- 目标格可通行。
-- 目标格未被其它 creep 预定。
-- 不进入危险区域。
-- 不离开当前房间，除非策略允许。
-- 不明显远离自身目标。
-- 不阻塞更多高优先级 creep。
-
-### 8.4 移动结果检查
-
-每次成功调用 `move` 后记录 PendingMove：
-
-```ts
-interface PendingMove {
-  creepName: string;
-  tick: number;
-  from: PackedPos;
-  expected: PackedPos;
-  direction: DirectionConstant;
-  targetKey?: string;
-}
-```
-
-下一 tick 检查 creep 是否到达 `expected`。未到达时增加 stuck 计数；移动成功时清理或降低 stuck 计数。
-
-stuck 计数触发以下动作：
-
-- 重新读取 Flow Field。
-- 禁止复用流场并强制完整建场。
-- 短期使用 PathFinder fallback。
-- 对相关房间边界或流场记录失败统计。
-
-## 9. goto 主流程
-
-```text
-1. 标准化 target 与 options。
-2. 判断 creep 是否已在 range 内。
-3. 读取 creep 的移动状态和 stuck 计数。
-4. 根据目标房间判断是否需要跨房路由。
-5. 如果目标在当前房间，当前 RouteSegment 为最终目标。
-6. 如果目标不在当前房间，获取或计算跨房路由场，并读取当前房间的出口方向。
-7. 将出口方向转换为当前房间的出口 RouteSegment。
-8. 按 considerRoads + considerSwamps 获取 CostMatrix。
-9. CostMatrix 不存在或版本已更新时重建 CostMatrix。
-10. 获取匹配且保留性有效的 Flow Field。
-11. 如果无匹配 Flow Field：
-    11.1 reuseFlowField=true 时从复用索引查询高质量相近流场。
-    11.2 对候选场尝试边界收敛式局部复用。
-    11.3 reuseFlowField=false 或复用失败时完整建场。
-12. 从 Flow Field 读取当前位置方向。
-13. 检查目标格动态阻塞。
-14. 无阻塞时执行 creep.move(direction)。
-15. 有阻塞时尝试轻量绕行。
-16. 绕行失败时创建 AvoidanceRequest 或返回 blocked。
-17. 记录 PendingMove。
-18. 返回 GotoResult。
-```
-
-## 10. fallback
-
-fallback 用于保证模块在缓存失效、流场构建失败或特殊地形中仍能移动：
-
-1. Flow Field 不可用时，使用 `PathFinder.search` 到当前 segment 目标。
-2. PathFinder 失败时，重新计算跨房路由场。
-3. 仍失败时返回结构化错误，避免同 tick 重复消耗 CPU。
-
-fallback 路径只做短期 heap 缓存，并且不写入 Memory。
-
-## 11. 缓存与持久化管理
-
-### 11.1 缓存范围 (Heap)
-
-模块维护以下 heap 缓存，脚本重载后清空：
-
-- `roomRouteCache`
-- `costMatrixCache`
-- `flowFieldCache`
-- `flowFieldReuseIndex`
-- `pendingMoves`
-- `avoidanceRequests`
-- `blockedStats`
-- `debugStats`
-
-### 11.2 持久化数据 (Memory)
-
-以下数据计划存入插件的持久命名空间，用于跨 global 生命周期保留用户配置：
-
-- `roomPreferences`: 房间通行成本与可见性偏好。
-- `boundaryPreferences`: 房间间有向边的通行偏好。
-
-### 11.3 缓存上限与清理
-
-```ts
-interface CacheLimits {
-  maxRoomExitRoutes: number;
-  maxCostMatrices: number;
-  maxFlowFields: number;
-  maxAvoidanceRequests: number;
-}
-```
-
-清理顺序：
-
-1. 删除保留性指标低于阈值的 Flow Field。
-2. 删除事件戳落后的 CostMatrix。
-3. 删除低分且长时间未活跃的 Flow Field。
-4. 删除最久未使用的跨房路由场。
-5. 删除低频房间的 CostMatrix。
-
-### 11.4 CPU 预算
-
-同一 tick 内限制新建 CostMatrix 和 Flow Field 的数量。超过预算后，模块使用 fallback 或延迟建场。
-
-```ts
-interface BuildBudget {
-  maxCostMatricesPerTick: number;
-  maxFlowFieldsPerTick: number;
-  maxRoomExitRoutesPerTick: number;
-}
-```
-
-## 12. Debug 与可观测性
-
-```ts
-interface GotoDebugInfo {
-  roomExitRoutesBuilt: number;
-  costMatricesBuilt: number;
-  flowFieldsBuilt: number;
-  flowFieldsReused: number;
-  flowFieldsInvalidatedByCostMatrixUpdate: number;
-  flowFieldsEvictedByRetention: number;
-  cacheHits: number;
-  cacheMisses: number;
-  stuckEvents: number;
-  avoidanceRequests: number;
-  cpuUsed: number;
-}
-```
-
-可视化内容：
-
-- 当前 creep 推荐方向。
-- 当前 RouteSegment 目标。
-- 跨房路由场出口方向。
-- Flow Field 方向采样。
-- stuck 状态。
-- 避让请求。
-- CostMatrix 高成本区域。
-
-可视化只在 `visualize=true` 时执行。
-
-## 13. 基础能力依赖
-
-`goto` 通过注入上下文使用基础能力：
-
-- 使用 `ModuleContext.env` 访问 `Game`、`Room`、`getObjectById` 和日志。
-- **持久化入口**：模块作为 Framework 插件运行时，只通过 `context.persistence` 读写房间与边界偏好，不直接访问 `Memory.goto` 或 RawMemory。
-- 使用 `bus.subscribe` 监听建筑相关事件，并由模块内部判断是否调用 `updateCostMatrix(roomName, { critical: true })`；重大通行变化由入口清理本房间 Flow Field。
-- 使用 `profiler.wrap` 包裹 A*、CostMatrix 构建、Flow Field 构建等高 CPU 函数。
-- 使用 `src/utils/priorityQueue.ts` 实现 A* 与 Dijkstra。
-
-`onTickEnd()` 完成以下工作：
-
-- 检查 PendingMove。
-- 清理过期 AvoidanceRequest。
-- 清理保留性指标低于阈值的 Flow Field。
-- 清理事件戳落后的 CostMatrix。
-- 更新 debug 统计。
-
-## 14. 开发计划
-
-首版一次完成完整能力：
-
-1. 定义 `types.ts`。
-2. 实现 `createGoto` 与模块装配。
-3. 实现房间名解析、房间图和跨房 A*。
-4. 实现房间偏好与边界偏好。
-5. 实现 4 套 CostMatrix 构建规则。
-6. 实现 CostMatrix 二次加工。
-7. 实现 CostMatrix heap 缓存、事件戳与 `updateCostMatrix` 更新入口。
-8. 实现完整 Flow Field 构建。
-9. 实现 Flow Field `Uint8Array` 存储。
-10. 实现 Flow Field heap 缓存、质量分数、保留性评分和活跃时间清理。
-11. 实现 `reuseFlowField` 控制、复用候选索引与边界收敛式局部复用建场。
-12. 实现 `goto(creep, target, options)` 主流程。
-13. 实现动态阻塞检查、本地绕行和避让请求。
-14. 实现可选避让策略注册与 resolver 调用。
-15. 实现 PendingMove、stuck 检查和强制重建。
-16. 实现 fallback PathFinder。
-17. 实现 debug 信息与可选 visual。
-18. 编写核心单元测试和模拟场景测试。
-
-首版验收标准：
-
-- creep 能在同房间使用 Flow Field 到达目标。
-- creep 能跨房间到达目标。
-- `considerRoads` 与 `considerSwamps` 能生成 4 套不同 CostMatrix。
-- 不可通行建筑被正确阻挡。
-- Source、Mineral、Storage、Spawn 等热门结构周围路径成本被抬高。
-- `reuseFlowField=false` 时强制完整建场。
-- 复用候选查询不会遍历本房间所有 Flow Field。
-- 目标相近时能通过边界收敛式局部复用生成 patch。
-- 边界收敛失败时能回退完整建场。
-- `updateCostMatrix(..., { critical: true })` 后本房间旧流场失效。
-- Flow Field 保留性指标低于阈值后失效。
-- 活跃流场不会被优先清理。
-- global reset 后没有 Memory 缓存副作用。
-- 被阻塞 creep 能发出避让请求。
-- stuck 后能触发重建或 fallback。
-
-## 15. 关键风险
-
-- 出口 Flow Field 通过跨房路由场统一选择出口方向，但仍需要避免 creep 在疲劳、阻塞或路由场刚更新时在房间边界来回横跳。
-- 热门结构周围加权不能导致目标不可达。
-- `updateCostMatrix` 必须覆盖所有影响通行的变化，重大变化必须由模块内部判断为 `critical=true`。
-- 复用流场可能非最优，必须受 `reuseFlowField`、质量分数、复用深度和 patch 大小约束。
-- 边界收敛式复用必须保证边界后继路径接入可信区域，否则可能把 creep 带回旧目标。
-- 首版不做两阶段移动调度，两个赶路 creep 争抢同一地块时可能有 1 tick 停顿；该代价被视为可接受。
-- 同 tick 大量新目标可能造成建场峰值，需要 build budget 限制。
-- 模块闭包缓存会在 global reset 后冷启动，首批移动需要 fallback 和预算保护。
-
-## 16. 术语
-
-- **Room Exit Route**：跨房路由场中的单房间出口指令，表示为了抵达目标房间，当前房间应走向哪个出口方向。
-- **Route Segment**：当前房间内的局部目标，可能是最终目标，也可能是出口。
-- **CostMatrix**：房间内静态和半静态通行成本。
-- **CostMatrix Event Stamp**：房间通行环境变化时递增的事件戳。
-- **Flow Field**：从任意格到目标的方向场。
-- **Full Flow Field**：基于当前 CostMatrix 完整计算得到的最优方向场。
-- **Reused Flow Field**：基于已有流场局部生成的方向场。
-- **Retention Score**：Flow Field 的保留性指标，由质量分数、生成时间、活跃时间、复用深度和 patch 大小共同决定。
-- **Avoidance Request**：一个 creep 请求另一个 creep 让路的协调消息。
-- **PendingMove**：上 tick 的移动意图记录，用于下 tick 检查移动是否成功。
+## 13. 平台与项目依据
+
+- [Game.map.findRoute](https://docs.screeps.com/api/#Game.map.findRoute)：房间路由的有向成本输入。
+- [PathFinder.search](https://docs.screeps.com/api/#PathFinder.search)、[Room.findPath](https://docs.screeps.com/api/#Room.findPath)：搜索接口及结果契约。
+- [CostMatrix](https://docs.screeps.com/api/#PathFinder.CostMatrix)、[Rampart.isPublic](https://docs.screeps.com/api/#StructureRampart.isPublic)：矩阵和平台通行属性。
+- [Creep.move](https://docs.screeps.com/api/#Creep.move)：动作调用边界；平台返回成功与位置更新分开核验。
+- 项目接入依据为 [Framework 设计](../core/framework.md)、[MemoryManager 设计](../core/memoryManager.md) 与 [公共契约](../contracts.md)。

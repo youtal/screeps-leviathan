@@ -10,8 +10,7 @@
 - [Framework](./core/framework.md)：生命周期、插件事务、故障隔离、CPU 与意图仲裁。
 - [Profiler](./core/profiler.md)：嵌套计时、统计存储与故障隔离。
 - [Runtime](./core/runtime.md)：共享能力和上下文组合。
-- [goto](./modules/goto.md)：跨房路由、CostMatrix、Flow Field 与避让。
-- [goto 成本场](./modules/goto-cost-field.md)：成本场与方向场布局、参考场索引、`cm` / `cmin` 与残差复用。
+- [goto](./modules/goto.md)：原生寻路、AB/ABC 矩阵、有向房间权重、压缩方向缓存与工作状态避让策略。
 - [RoomShortcuts](./modules/roomShortcuts.md)：房间查询缓存、事件更新与租约。
 
 源码和使用文档入口见 [文档总导航](../README.md)。
