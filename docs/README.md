@@ -1,6 +1,6 @@
 # 文档总导航
 
-[项目首页](../README.md) · [开发规范](../AGENTS.md) · [设计索引](./design/README.md) · [使用索引](./usage/README.md) · [测试文档](./testing/README.md) · [更新记录](./changelog/README.md)
+[项目首页](../README.md) · [开发规范](../AGENTS.md) · [设计索引](./design/README.md) · [使用索引](./usage/README.md) · [测试文档](./testing/README.md) · [更新记录](./changelog/README.md) · [审计报告](./audits/README.md)
 
 设计记录设计意图和交付状态；使用说明记录公共能力的调用方法；更新记录保存已完成变更的历史。设计中的 API 示例不表示已可调用，使用时查看对应使用说明。
 
