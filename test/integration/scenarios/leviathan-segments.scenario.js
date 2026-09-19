@@ -14,8 +14,6 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const { spec } = require('screeps-integration-tests');
 const {
   assertRuntimeClean,
@@ -31,23 +29,11 @@ const SEGMENT_A = 0;
 const SEGMENT_B = 1;
 const SEGMENT_CAPACITY_TEST = 2;
 
-/**
- * 从源码读取 SEGMENT_CAPACITY，避免测试与实现各写一份常量后漂移。
- *
- * 场景运行在 Node 侧，可以直接读 TypeScript 源文件；这里只做一次正则提取，解析失败即
- * 让场景失败，避免静默跳过容量断言。
- */
+/** 构建入口从源码常量提取最小元数据，容器只读这一标量，不访问宿主源码。 */
 function readSegmentCapacity() {
-  const source = fs.readFileSync(
-    path.resolve('src/core/memoryManager/types.ts'),
-    'utf8'
-  );
-  const matched = /SEGMENT_CAPACITY\s*=\s*([\d_]+)/.exec(source);
-  assert.ok(
-    matched,
-    '未能在 src/core/memoryManager/types.ts 中找到 SEGMENT_CAPACITY'
-  );
-  return Number(matched[1].replace(/_/g, ''));
+  const { segmentCapacity } = require('../support/contract.json');
+  assert.ok(Number.isSafeInteger(segmentCapacity) && segmentCapacity > 0);
+  return segmentCapacity;
 }
 
 async function run() {

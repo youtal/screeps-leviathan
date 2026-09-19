@@ -1,0 +1,16 @@
+{
+  "name": "leviathan-isolated-integration-runner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Isolated Screeps integration dependencies; install only in the test container.",
+  "dependencies": {
+    "screeps-integration-tests": "3.0.0"
+  },
+  "allowScripts": {
+    "github:laverdet/isolated-vm#cb93efcc1881c826ee98ad34e66955c08713acb2": true,
+    "@screeps/driver@5.3.0": true,
+    "screeps@4.3.0": true,
+    "uglifyjs-webpack-plugin@0.4.6": true,
+    "es5-ext@0.10.64": true
+  }
+}

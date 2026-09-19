@@ -7,7 +7,7 @@ Screeps Leviathan 是一个使用 TypeScript 开发的 Screeps AI 项目。
 ## 开发命令
 
 ```bash
-npm install
+npm ci --ignore-scripts
 npm test
 npm run build
 ```
@@ -19,8 +19,8 @@ npm run test:integration
 npm run test:all
 ```
 
-集成环境需要 Node.js 22.12 以上版本（已验证 Node.js 24），首次安装还需要 Git、C/C++
-构建工具及由 uv 创建的项目内 Python 虚拟环境。完整准备步骤和场景约定见
+开发环境使用 Node.js 24 与 npm 12；集成测试另需 Docker，旧引擎依赖仅在隔离镜像中安装，
+宿主无需 C++/Python 构建工具。完整准备步骤和场景约定见
 [集成测试环境](./docs/testing/integration.md)。
 
 `npm run build` 只构建代码，不需要 `.secret.json`。向验证环境上传代码时使用：

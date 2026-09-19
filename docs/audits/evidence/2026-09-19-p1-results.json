@@ -1,0 +1,1506 @@
+{
+  "date": "2026-09-19",
+  "branch": "fix/audit-p1",
+  "regressionBaseline": "0f5f840",
+  "memoryFixCommit": "1cd7b99900fba862e8f31a7b6553a4fc2eae4b29",
+  "validation": {
+    "baselineNewRegressions": {
+      "failed": 16,
+      "passed": 3
+    },
+    "typecheck": "passed",
+    "jestTests": 163,
+    "buildTests": 4,
+    "bundleTests": 2,
+    "isolationTests": 3,
+    "build": "passed",
+    "integration": {
+      "global-reset": "passed",
+      "runtime": "passed",
+      "segments": "passed"
+    },
+    "hostEngineRemoved": true
+  },
+  "audit": {
+    "root": {
+      "auditReportVersion": 2,
+      "vulnerabilities": {},
+      "metadata": {
+        "vulnerabilities": {
+          "info": 0,
+          "low": 0,
+          "moderate": 0,
+          "high": 0,
+          "critical": 0,
+          "total": 0
+        },
+        "dependencies": {
+          "prod": 4,
+          "dev": 468,
+          "optional": 70,
+          "peer": 0,
+          "peerOptional": 0,
+          "total": 471
+        }
+      }
+    },
+    "isolatedRunner": {
+      "auditReportVersion": 2,
+      "vulnerabilities": {
+        "@cool-andre/screeps-server-mockup": {
+          "name": "@cool-andre/screeps-server-mockup",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            "@screeps/common",
+            "@screeps/driver",
+            "@screeps/engine",
+            "screeps"
+          ],
+          "effects": [
+            "screeps-integration-tests"
+          ],
+          "range": "*",
+          "nodes": [
+            "node_modules/@cool-andre/screeps-server-mockup"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "@screeps/backend": {
+          "name": "@screeps/backend",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            "lodash",
+            "passport",
+            "q-json-response",
+            "sockjs",
+            "steam-webapi"
+          ],
+          "effects": [
+            "screeps"
+          ],
+          "range": "*",
+          "nodes": [
+            "node_modules/@screeps/backend"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "@screeps/common": {
+          "name": "@screeps/common",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            "lodash"
+          ],
+          "effects": [
+            "@cool-andre/screeps-server-mockup",
+            "screeps"
+          ],
+          "range": "*",
+          "nodes": [
+            "node_modules/@screeps/common",
+            "node_modules/screeps/node_modules/@screeps/common"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "@screeps/driver": {
+          "name": "@screeps/driver",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            "lodash",
+            "webpack"
+          ],
+          "effects": [
+            "@cool-andre/screeps-server-mockup",
+            "screeps"
+          ],
+          "range": "*",
+          "nodes": [
+            "node_modules/@screeps/driver"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "@screeps/engine": {
+          "name": "@screeps/engine",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            "lodash"
+          ],
+          "effects": [
+            "@cool-andre/screeps-server-mockup",
+            "screeps"
+          ],
+          "range": "*",
+          "nodes": [
+            "node_modules/@screeps/engine",
+            "node_modules/screeps/node_modules/@screeps/engine"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "@screeps/launcher": {
+          "name": "@screeps/launcher",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            "angular",
+            "jquery.terminal",
+            "lodash"
+          ],
+          "effects": [
+            "screeps"
+          ],
+          "range": "*",
+          "nodes": [
+            "node_modules/@screeps/launcher"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "@screeps/storage": {
+          "name": "@screeps/storage",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            "lodash"
+          ],
+          "effects": [
+            "screeps"
+          ],
+          "range": "*",
+          "nodes": [
+            "node_modules/@screeps/storage"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "angular": {
+          "name": "angular",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1106731,
+              "name": "angular",
+              "dependency": "angular",
+              "title": "Angular (deprecated package) Cross-site Scripting",
+              "url": "https://github.com/advisories/GHSA-prc3-vjfx-vhm9",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-79"
+              ],
+              "cvss": {
+                "score": 6.1,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"
+              },
+              "range": "<=1.8.3"
+            },
+            {
+              "source": 1109545,
+              "name": "angular",
+              "dependency": "angular",
+              "title": "AngularJS improperly sanitizes SVG elements",
+              "url": "https://github.com/advisories/GHSA-j58c-ww9w-pwp5",
+              "severity": "low",
+              "cwe": [
+                "CWE-791"
+              ],
+              "cvss": {
+                "score": 4.8,
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:L"
+              },
+              "range": "<=1.8.3"
+            },
+            {
+              "source": 1109550,
+              "name": "angular",
+              "dependency": "angular",
+              "title": "angular vulnerable to regular expression denial of service (ReDoS)",
+              "url": "https://github.com/advisories/GHSA-m2h2-264f-f486",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-770",
+                "CWE-1333"
+              ],
+              "cvss": {
+                "score": 5.3,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L"
+              },
+              "range": ">=1.7.0"
+            },
+            {
+              "source": 1109557,
+              "name": "angular",
+              "dependency": "angular",
+              "title": "AngularJS allows attackers to bypass common image source restrictions",
+              "url": "https://github.com/advisories/GHSA-m9gf-397r-hwpg",
+              "severity": "low",
+              "cwe": [
+                "CWE-1289"
+              ],
+              "cvss": {
+                "score": 4.8,
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:L"
+              },
+              "range": ">=1.3.0-rc.4 <=1.8.3"
+            },
+            {
+              "source": 1109558,
+              "name": "angular",
+              "dependency": "angular",
+              "title": "AngularJS allows attackers to bypass common image source restrictions",
+              "url": "https://github.com/advisories/GHSA-mqm9-c95h-x2p6",
+              "severity": "low",
+              "cwe": [
+                "CWE-791"
+              ],
+              "cvss": {
+                "score": 4.8,
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:L"
+              },
+              "range": "<=1.8.3"
+            },
+            {
+              "source": 1109559,
+              "name": "angular",
+              "dependency": "angular",
+              "title": "angular vulnerable to super-linear runtime due to backtracking",
+              "url": "https://github.com/advisories/GHSA-4w4v-5hc9-xrr2",
+              "severity": "high",
+              "cwe": [
+                "CWE-1333"
+              ],
+              "cvss": {
+                "score": 7.5,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+              },
+              "range": ">=1.3.0 <=1.8.3"
+            },
+            {
+              "source": 1109560,
+              "name": "angular",
+              "dependency": "angular",
+              "title": "angular vulnerable to regular expression denial of service via the angular.copy() utility",
+              "url": "https://github.com/advisories/GHSA-2vrf-hf26-jrp5",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-1333"
+              ],
+              "cvss": {
+                "score": 5.3,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L"
+              },
+              "range": "<=1.8.3"
+            },
+            {
+              "source": 1109561,
+              "name": "angular",
+              "dependency": "angular",
+              "title": "angular vulnerable to regular expression denial of service via the $resource service",
+              "url": "https://github.com/advisories/GHSA-2qqx-w9hr-q5gx",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-1333"
+              ],
+              "cvss": {
+                "score": 5.3,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L"
+              },
+              "range": "<=1.8.3"
+            },
+            {
+              "source": 1109562,
+              "name": "angular",
+              "dependency": "angular",
+              "title": "angular vulnerable to regular expression denial of service via the <input type=\"url\"> element",
+              "url": "https://github.com/advisories/GHSA-qwqh-hm9m-p5hr",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-1333"
+              ],
+              "cvss": {
+                "score": 5.3,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L"
+              },
+              "range": "<=1.8.3"
+            },
+            {
+              "source": 1123687,
+              "name": "angular",
+              "dependency": "angular",
+              "title": "Angular's deprecated package has a Cross-Site Scripting issue",
+              "url": "https://github.com/advisories/GHSA-7x27-g8rg-x87w",
+              "severity": "high",
+              "cwe": [
+                "CWE-79",
+                "CWE-791"
+              ],
+              "cvss": {
+                "score": 7.6,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:L/A:L"
+              },
+              "range": ">=1.2.0-rc.3 <=1.8.3"
+            }
+          ],
+          "effects": [
+            "@screeps/launcher"
+          ],
+          "range": "*",
+          "nodes": [
+            "node_modules/angular"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "anymatch": {
+          "name": "anymatch",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            "micromatch"
+          ],
+          "effects": [
+            "chokidar"
+          ],
+          "range": "1.2.0 - 2.0.0",
+          "nodes": [
+            "node_modules/watchpack-chokidar2/node_modules/anymatch"
+          ],
+          "fixAvailable": true
+        },
+        "braces": {
+          "name": "braces",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1098094,
+              "name": "braces",
+              "dependency": "braces",
+              "title": "Uncontrolled resource consumption in braces",
+              "url": "https://github.com/advisories/GHSA-grv7-fg5c-xmjg",
+              "severity": "high",
+              "cwe": [
+                "CWE-400",
+                "CWE-1050"
+              ],
+              "cvss": {
+                "score": 7.5,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+              },
+              "range": "<3.0.3"
+            }
+          ],
+          "effects": [
+            "chokidar",
+            "micromatch"
+          ],
+          "range": "<3.0.3",
+          "nodes": [
+            "node_modules/watchpack-chokidar2/node_modules/braces"
+          ],
+          "fixAvailable": true
+        },
+        "browserify-sign": {
+          "name": "browserify-sign",
+          "severity": "low",
+          "isDirect": false,
+          "via": [
+            "elliptic"
+          ],
+          "effects": [
+            "crypto-browserify"
+          ],
+          "range": ">=2.4.0",
+          "nodes": [
+            "node_modules/browserify-sign"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "chokidar": {
+          "name": "chokidar",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            "anymatch",
+            "braces",
+            "readdirp"
+          ],
+          "effects": [
+            "watchpack-chokidar2"
+          ],
+          "range": "1.3.0 - 2.1.8",
+          "nodes": [
+            "node_modules/watchpack-chokidar2/node_modules/chokidar"
+          ],
+          "fixAvailable": true
+        },
+        "create-ecdh": {
+          "name": "create-ecdh",
+          "severity": "low",
+          "isDirect": false,
+          "via": [
+            "elliptic"
+          ],
+          "effects": [
+            "crypto-browserify"
+          ],
+          "range": "*",
+          "nodes": [
+            "node_modules/create-ecdh"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "cross-spawn": {
+          "name": "cross-spawn",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1104663,
+              "name": "cross-spawn",
+              "dependency": "cross-spawn",
+              "title": "Regular Expression Denial of Service (ReDoS) in cross-spawn",
+              "url": "https://github.com/advisories/GHSA-3xgq-45jj-v275",
+              "severity": "high",
+              "cwe": [
+                "CWE-1333"
+              ],
+              "cvss": {
+                "score": 7.5,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+              },
+              "range": "<6.0.6"
+            }
+          ],
+          "effects": [
+            "execa"
+          ],
+          "range": "<6.0.6",
+          "nodes": [
+            "node_modules/os-locale/node_modules/cross-spawn"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "crypto-browserify": {
+          "name": "crypto-browserify",
+          "severity": "low",
+          "isDirect": false,
+          "via": [
+            "browserify-sign",
+            "create-ecdh"
+          ],
+          "effects": [
+            "node-libs-browser"
+          ],
+          "range": ">=3.4.0",
+          "nodes": [
+            "node_modules/crypto-browserify"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "decode-uri-component": {
+          "name": "decode-uri-component",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1147955,
+              "name": "decode-uri-component",
+              "dependency": "decode-uri-component",
+              "title": "decode-uri-component: Denial of service via exponential decoding of malformed percent-encoded input",
+              "url": "https://github.com/advisories/GHSA-vcc3-ghjq-m6fr",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-400",
+                "CWE-405",
+                "CWE-407",
+                "CWE-1176"
+              ],
+              "cvss": {
+                "score": 0,
+                "vectorString": null
+              },
+              "range": "<=0.4.2"
+            }
+          ],
+          "effects": [
+            "source-map-resolve"
+          ],
+          "range": "<=0.4.2",
+          "nodes": [
+            "node_modules/decode-uri-component"
+          ],
+          "fixAvailable": true
+        },
+        "elliptic": {
+          "name": "elliptic",
+          "severity": "low",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1112030,
+              "name": "elliptic",
+              "dependency": "elliptic",
+              "title": "Elliptic Uses a Cryptographic Primitive with a Risky Implementation",
+              "url": "https://github.com/advisories/GHSA-848j-6mx2-7j84",
+              "severity": "low",
+              "cwe": [
+                "CWE-1240"
+              ],
+              "cvss": {
+                "score": 5.6,
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:L"
+              },
+              "range": "<=6.6.1"
+            }
+          ],
+          "effects": [
+            "browserify-sign",
+            "create-ecdh"
+          ],
+          "range": "*",
+          "nodes": [
+            "node_modules/elliptic"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "execa": {
+          "name": "execa",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            "cross-spawn"
+          ],
+          "effects": [
+            "os-locale"
+          ],
+          "range": "0.5.0 - 0.9.0",
+          "nodes": [
+            "node_modules/os-locale/node_modules/execa"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "express": {
+          "name": "express",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            "qs"
+          ],
+          "effects": [],
+          "range": "4.22.2",
+          "nodes": [
+            "node_modules/express"
+          ],
+          "fixAvailable": true
+        },
+        "jquery": {
+          "name": "jquery",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1094143,
+              "name": "jquery",
+              "dependency": "jquery",
+              "title": "Cross-Site Scripting (XSS) in jquery",
+              "url": "https://github.com/advisories/GHSA-rmxg-73gg-4p98",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-79"
+              ],
+              "cvss": {
+                "score": 6.1,
+                "vectorString": "CVSS:3.0/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"
+              },
+              "range": ">=1.12.3 <3.0.0"
+            },
+            {
+              "source": 1100396,
+              "name": "jquery",
+              "dependency": "jquery",
+              "title": "XSS in jQuery as used in Drupal, Backdrop CMS, and other products",
+              "url": "https://github.com/advisories/GHSA-6c3j-c64m-qhgq",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-79",
+                "CWE-1321"
+              ],
+              "cvss": {
+                "score": 6.1,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"
+              },
+              "range": ">=1.1.4 <3.4.0"
+            },
+            {
+              "source": 1109145,
+              "name": "jquery",
+              "dependency": "jquery",
+              "title": "Potential XSS vulnerability in jQuery",
+              "url": "https://github.com/advisories/GHSA-jpcq-cgw6-v4j6",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-79"
+              ],
+              "cvss": {
+                "score": 6.9,
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:L/A:N/E:H"
+              },
+              "range": ">=1.0.3 <3.5.0"
+            },
+            {
+              "source": 1122850,
+              "name": "jquery",
+              "dependency": "jquery",
+              "title": "Potential XSS vulnerability in jQuery",
+              "url": "https://github.com/advisories/GHSA-gxr4-xjj5-5px2",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-79"
+              ],
+              "cvss": {
+                "score": 6.9,
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:C/C:H/I:L/A:N"
+              },
+              "range": ">=1.12.0 <3.5.0"
+            }
+          ],
+          "effects": [
+            "jquery.terminal"
+          ],
+          "range": "<=3.4.1",
+          "nodes": [
+            "node_modules/jquery.terminal/node_modules/jquery"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "jquery.terminal": {
+          "name": "jquery.terminal",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1085755,
+              "name": "jquery.terminal",
+              "dependency": "jquery.terminal",
+              "title": "Reflected Cross-Site Scripting in jquery.terminal",
+              "url": "https://github.com/advisories/GHSA-2hwp-g4g7-mwwj",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-79"
+              ],
+              "cvss": {
+                "score": 0,
+                "vectorString": null
+              },
+              "range": "<1.21.0"
+            },
+            {
+              "source": 1089273,
+              "name": "jquery.terminal",
+              "dependency": "jquery.terminal",
+              "title": "jquery.terminal self XSS on user input",
+              "url": "https://github.com/advisories/GHSA-x9r5-jxvq-4387",
+              "severity": "low",
+              "cwe": [
+                "CWE-79",
+                "CWE-80"
+              ],
+              "cvss": {
+                "score": 3.7,
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:L/UI:R/S:U/C:L/I:L/A:N"
+              },
+              "range": "<2.31.1"
+            },
+            "jquery"
+          ],
+          "effects": [
+            "@screeps/launcher"
+          ],
+          "range": "<=2.31.0",
+          "nodes": [
+            "node_modules/jquery.terminal"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "json5": {
+          "name": "json5",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1096543,
+              "name": "json5",
+              "dependency": "json5",
+              "title": "Prototype Pollution in JSON5 via Parse Method",
+              "url": "https://github.com/advisories/GHSA-9c47-m6qq-7p4h",
+              "severity": "high",
+              "cwe": [
+                "CWE-1321"
+              ],
+              "cvss": {
+                "score": 7.1,
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:L/A:H"
+              },
+              "range": "<1.0.2"
+            }
+          ],
+          "effects": [
+            "webpack"
+          ],
+          "range": "<1.0.2",
+          "nodes": [
+            "node_modules/webpack/node_modules/json5"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "lodash": {
+          "name": "lodash",
+          "severity": "critical",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1106900,
+              "name": "lodash",
+              "dependency": "lodash",
+              "title": "Prototype Pollution in lodash",
+              "url": "https://github.com/advisories/GHSA-fvqr-27wr-82fm",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-471",
+                "CWE-1321"
+              ],
+              "cvss": {
+                "score": 6.5,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:N"
+              },
+              "range": "<4.17.5"
+            },
+            {
+              "source": 1106913,
+              "name": "lodash",
+              "dependency": "lodash",
+              "title": "Command Injection in lodash",
+              "url": "https://github.com/advisories/GHSA-35jh-r3h4-6jhm",
+              "severity": "high",
+              "cwe": [
+                "CWE-77",
+                "CWE-94"
+              ],
+              "cvss": {
+                "score": 7.2,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:H/UI:N/S:U/C:H/I:H/A:H"
+              },
+              "range": "<4.17.21"
+            },
+            {
+              "source": 1106914,
+              "name": "lodash",
+              "dependency": "lodash",
+              "title": "Prototype Pollution in lodash",
+              "url": "https://github.com/advisories/GHSA-4xc9-xhrj-v574",
+              "severity": "high",
+              "cwe": [
+                "CWE-400"
+              ],
+              "cvss": {
+                "score": 0,
+                "vectorString": null
+              },
+              "range": "<4.17.11"
+            },
+            {
+              "source": 1106918,
+              "name": "lodash",
+              "dependency": "lodash",
+              "title": "Prototype Pollution in lodash",
+              "url": "https://github.com/advisories/GHSA-jf85-cpcp-j695",
+              "severity": "critical",
+              "cwe": [
+                "CWE-20",
+                "CWE-1321"
+              ],
+              "cvss": {
+                "score": 9.1,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:H"
+              },
+              "range": "<4.17.12"
+            },
+            {
+              "source": 1106920,
+              "name": "lodash",
+              "dependency": "lodash",
+              "title": "Prototype Pollution in lodash",
+              "url": "https://github.com/advisories/GHSA-p6mc-m468-83gw",
+              "severity": "high",
+              "cwe": [
+                "CWE-770",
+                "CWE-1321"
+              ],
+              "cvss": {
+                "score": 7.4,
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:H/A:H"
+              },
+              "range": ">=3.7.0 <4.17.19"
+            },
+            {
+              "source": 1115810,
+              "name": "lodash",
+              "dependency": "lodash",
+              "title": "lodash vulnerable to Prototype Pollution via array path bypass in `_.unset` and `_.omit`",
+              "url": "https://github.com/advisories/GHSA-f23m-r3pf-42rh",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-1321"
+              ],
+              "cvss": {
+                "score": 6.5,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:L"
+              },
+              "range": "<=4.17.23"
+            }
+          ],
+          "effects": [
+            "@screeps/backend",
+            "@screeps/common",
+            "@screeps/driver",
+            "@screeps/engine",
+            "@screeps/launcher",
+            "@screeps/storage",
+            "q-json-response"
+          ],
+          "range": "<=4.17.23",
+          "nodes": [
+            "node_modules/@screeps/backend/node_modules/lodash",
+            "node_modules/@screeps/common/node_modules/lodash",
+            "node_modules/@screeps/driver/node_modules/lodash",
+            "node_modules/@screeps/engine/node_modules/lodash",
+            "node_modules/@screeps/launcher/node_modules/lodash",
+            "node_modules/@screeps/storage/node_modules/lodash",
+            "node_modules/q-json-response/node_modules/lodash",
+            "node_modules/screeps/node_modules/lodash"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "mem": {
+          "name": "mem",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1085685,
+              "name": "mem",
+              "dependency": "mem",
+              "title": "Denial of Service in mem",
+              "url": "https://github.com/advisories/GHSA-4xcv-9jjx-gfj3",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-400"
+              ],
+              "cvss": {
+                "score": 5.1,
+                "vectorString": "CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N"
+              },
+              "range": "<4.0.0"
+            }
+          ],
+          "effects": [
+            "os-locale"
+          ],
+          "range": "<4.0.0",
+          "nodes": [
+            "node_modules/mem"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "micromatch": {
+          "name": "micromatch",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1098681,
+              "name": "micromatch",
+              "dependency": "micromatch",
+              "title": "Regular Expression Denial of Service (ReDoS) in micromatch",
+              "url": "https://github.com/advisories/GHSA-952p-6rrq-rcjv",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-1333"
+              ],
+              "cvss": {
+                "score": 5.3,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L"
+              },
+              "range": "<4.0.8"
+            },
+            "braces"
+          ],
+          "effects": [
+            "anymatch",
+            "readdirp"
+          ],
+          "range": "<=4.0.7",
+          "nodes": [
+            "node_modules/watchpack-chokidar2/node_modules/micromatch"
+          ],
+          "fixAvailable": true
+        },
+        "node-libs-browser": {
+          "name": "node-libs-browser",
+          "severity": "low",
+          "isDirect": false,
+          "via": [
+            "crypto-browserify"
+          ],
+          "effects": [
+            "webpack"
+          ],
+          "range": "0.4.2 || >=1.0.0",
+          "nodes": [
+            "node_modules/node-libs-browser"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "os-locale": {
+          "name": "os-locale",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            "execa",
+            "mem"
+          ],
+          "effects": [
+            "yargs"
+          ],
+          "range": "2.0.0 - 3.0.0",
+          "nodes": [
+            "node_modules/os-locale"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "passport": {
+          "name": "passport",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1093639,
+              "name": "passport",
+              "dependency": "passport",
+              "title": "Passport vulnerable to session regeneration when a users logs in or out",
+              "url": "https://github.com/advisories/GHSA-v923-w3x8-wh69",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-384"
+              ],
+              "cvss": {
+                "score": 4.8,
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:L"
+              },
+              "range": "<0.6.0"
+            }
+          ],
+          "effects": [
+            "@screeps/backend"
+          ],
+          "range": "<0.6.0",
+          "nodes": [
+            "node_modules/passport"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "q-json-response": {
+          "name": "q-json-response",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            "lodash"
+          ],
+          "effects": [
+            "@screeps/backend"
+          ],
+          "range": ">=0.1.2",
+          "nodes": [
+            "node_modules/q-json-response"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "qs": {
+          "name": "qs",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1087527,
+              "name": "qs",
+              "dependency": "qs",
+              "title": "Prototype Pollution Protection Bypass in qs",
+              "url": "https://github.com/advisories/GHSA-gqgv-6jq5-jjj9",
+              "severity": "high",
+              "cwe": [
+                "CWE-20"
+              ],
+              "cvss": {
+                "score": 7.5,
+                "vectorString": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+              },
+              "range": "<6.0.4"
+            },
+            {
+              "source": 1104115,
+              "name": "qs",
+              "dependency": "qs",
+              "title": "qs vulnerable to Prototype Pollution",
+              "url": "https://github.com/advisories/GHSA-hrpp-h998-j3pp",
+              "severity": "high",
+              "cwe": [
+                "CWE-1321"
+              ],
+              "cvss": {
+                "score": 7.5,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H"
+              },
+              "range": "<6.2.4"
+            },
+            {
+              "source": 1113719,
+              "name": "qs",
+              "dependency": "qs",
+              "title": "qs's arrayLimit bypass in its bracket notation allows DoS via memory exhaustion",
+              "url": "https://github.com/advisories/GHSA-6rw7-vpxm-498p",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-20"
+              ],
+              "cvss": {
+                "score": 3.7,
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L"
+              },
+              "range": "<6.14.1"
+            },
+            {
+              "source": 1158506,
+              "name": "qs",
+              "dependency": "qs",
+              "title": "qs array-limit bypass via bracket-key comma parsing",
+              "url": "https://github.com/advisories/GHSA-x5fp-wj9c-mxmx",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-770"
+              ],
+              "cvss": {
+                "score": 3.7,
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L"
+              },
+              "range": ">=6.14.2 <=6.15.3"
+            },
+            {
+              "source": 1158507,
+              "name": "qs",
+              "dependency": "qs",
+              "title": "qs: Denial of Service via Attacker Controlled isBuffer",
+              "url": "https://github.com/advisories/GHSA-4mjr-xmp4-gh2g",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-248",
+                "CWE-703"
+              ],
+              "cvss": {
+                "score": 5.3,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L"
+              },
+              "range": ">=2.2.5 <6.16.0"
+            }
+          ],
+          "effects": [
+            "express",
+            "steam-webapi"
+          ],
+          "range": "<=6.15.3",
+          "nodes": [
+            "node_modules/express/node_modules/qs",
+            "node_modules/steam-webapi/node_modules/qs"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "readdirp": {
+          "name": "readdirp",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            "micromatch"
+          ],
+          "effects": [
+            "chokidar"
+          ],
+          "range": "2.2.0 - 2.2.1",
+          "nodes": [
+            "node_modules/watchpack-chokidar2/node_modules/readdirp"
+          ],
+          "fixAvailable": true
+        },
+        "screeps": {
+          "name": "screeps",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            "@screeps/backend",
+            "@screeps/common",
+            "@screeps/driver",
+            "@screeps/engine",
+            "@screeps/launcher",
+            "@screeps/storage"
+          ],
+          "effects": [
+            "@cool-andre/screeps-server-mockup"
+          ],
+          "range": ">=0.0.3",
+          "nodes": [
+            "node_modules/screeps"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "screeps-integration-tests": {
+          "name": "screeps-integration-tests",
+          "severity": "moderate",
+          "isDirect": true,
+          "via": [
+            "@cool-andre/screeps-server-mockup"
+          ],
+          "effects": [],
+          "range": ">=3.0.0",
+          "nodes": [
+            "node_modules/screeps-integration-tests"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "sockjs": {
+          "name": "sockjs",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            "uuid"
+          ],
+          "effects": [
+            "@screeps/backend"
+          ],
+          "range": ">=0.3.17",
+          "nodes": [
+            "node_modules/sockjs"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "source-map-resolve": {
+          "name": "source-map-resolve",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            "decode-uri-component"
+          ],
+          "effects": [],
+          "range": ">=0.5.1",
+          "nodes": [
+            "node_modules/source-map-resolve"
+          ],
+          "fixAvailable": true
+        },
+        "steam-webapi": {
+          "name": "steam-webapi",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            "qs"
+          ],
+          "effects": [
+            "@screeps/backend"
+          ],
+          "range": ">=0.6.0",
+          "nodes": [
+            "node_modules/steam-webapi"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "uuid": {
+          "name": "uuid",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1119441,
+              "name": "uuid",
+              "dependency": "uuid",
+              "title": "uuid: Missing buffer bounds check in v3/v5/v6 when buf is provided",
+              "url": "https://github.com/advisories/GHSA-w5hq-g745-h8pq",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-787",
+                "CWE-1285"
+              ],
+              "cvss": {
+                "score": 7.5,
+                "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N"
+              },
+              "range": "<11.1.1"
+            }
+          ],
+          "effects": [
+            "sockjs"
+          ],
+          "range": "<11.1.1",
+          "nodes": [
+            "node_modules/uuid"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "watchpack": {
+          "name": "watchpack",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            "watchpack-chokidar2"
+          ],
+          "effects": [],
+          "range": "1.7.2 - 1.7.5",
+          "nodes": [
+            "node_modules/watchpack"
+          ],
+          "fixAvailable": true
+        },
+        "watchpack-chokidar2": {
+          "name": "watchpack-chokidar2",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            "chokidar"
+          ],
+          "effects": [
+            "watchpack"
+          ],
+          "range": "*",
+          "nodes": [
+            "node_modules/watchpack-chokidar2"
+          ],
+          "fixAvailable": true
+        },
+        "webpack": {
+          "name": "webpack",
+          "severity": "high",
+          "isDirect": false,
+          "via": [
+            "json5",
+            "node-libs-browser",
+            "yargs"
+          ],
+          "effects": [
+            "@screeps/driver"
+          ],
+          "range": "2.0.0-beta - 4.47.0",
+          "nodes": [
+            "node_modules/webpack"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "yargs": {
+          "name": "yargs",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            "os-locale",
+            "yargs-parser"
+          ],
+          "effects": [
+            "webpack"
+          ],
+          "range": "8.0.0-candidate.0 - 12.0.5",
+          "nodes": [
+            "node_modules/webpack/node_modules/yargs"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        },
+        "yargs-parser": {
+          "name": "yargs-parser",
+          "severity": "moderate",
+          "isDirect": false,
+          "via": [
+            {
+              "source": 1088811,
+              "name": "yargs-parser",
+              "dependency": "yargs-parser",
+              "title": "yargs-parser Vulnerable to Prototype Pollution",
+              "url": "https://github.com/advisories/GHSA-p9pc-299p-vxgp",
+              "severity": "moderate",
+              "cwe": [
+                "CWE-915",
+                "CWE-1321"
+              ],
+              "cvss": {
+                "score": 5.3,
+                "vectorString": "CVSS:3.1/AV:L/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:L"
+              },
+              "range": ">=6.0.0 <13.1.2"
+            }
+          ],
+          "effects": [
+            "yargs"
+          ],
+          "range": "6.0.0 - 13.1.1",
+          "nodes": [
+            "node_modules/webpack/node_modules/yargs-parser"
+          ],
+          "fixAvailable": {
+            "name": "screeps-integration-tests",
+            "version": "2.0.0",
+            "isSemVerMajor": true
+          }
+        }
+      },
+      "metadata": {
+        "vulnerabilities": {
+          "info": 0,
+          "low": 5,
+          "moderate": 21,
+          "high": 15,
+          "critical": 1,
+          "total": 42
+        },
+        "dependencies": {
+          "prod": 470,
+          "dev": 0,
+          "optional": 136,
+          "peer": 4,
+          "peerOptional": 0,
+          "total": 609
+        }
+      }
+    }
+  },
+  "limits": [
+    "No production upload or live Memory migration test.",
+    "The isolated runner retains 42 upstream vulnerability nodes; containment is not a dependency patch."
+  ]
+}

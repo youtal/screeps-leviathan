@@ -21,60 +21,52 @@ Screeps 4.3.0、driver 5.3.0、engine 4.3.2、common 2.16.1 与 storage 5.1.3。
 | `npm run test:integration` | 真实 Screeps engine | 构建后执行所有 `*.scenario.js` 场景      |
 | `npm run test:all`         | 以上两层            | 提交前完整本地回归                       |
 
-## 首次安装
+## 安装与隔离边界
 
-需要 Node.js 22.12 或更高版本、Git、C/C++ 构建工具和 uv；本项目以 Node.js 24 验证。官方
-`@screeps/driver` 依赖固定 Git commit 的 `isolated-vm`，并需要 Python 驱动 node-gyp。先在
-仓库根目录创建虚拟环境，再安装依赖：
+宿主使用 Node.js 24、npm 12 和 Docker Engine。日常安装只需要：
 
 ```bash
-UV_CACHE_DIR=/tmp/screeps-leviathan-uv-cache uv venv .venv --python 3.13
-PYTHON="$PWD/.venv/bin/python" npm ci
+npm ci --ignore-scripts
+npm test
+npm run build
 ```
 
-`.venv/` 已加入 `.gitignore`，不得提交。`UV_CACHE_DIR` 把 uv 下载缓存放在临时目录；也可以换成
-开发机可写的其他缓存路径。
+根 package/lockfile 不安装 Screeps 引擎；旧引擎依赖及脚本许可单独放在
+[`test/integration/runner/`](../../test/integration/runner/)，只在 Docker 构建中安装。
+无需在宿主安装 C++ 工具链或 Python 虚拟环境。Node 基础镜像固定 digest，runner 锁文件固定 npm/Git
+依赖；升级时核对 digest、锁文件和安装脚本白名单，不能执行 `audit fix --force` 强换 lodash 主版本。
 
-npm 12 默认拒绝 Git 依赖，项目级 `.npmrc` 因官方 driver 的传递依赖设置
-`allow-git=all`。这项权限只负责获取 Git 包；Git 依赖由 lockfile 中的仓库 URL 与 commit 固定，
-registry 包另由版本和完整性摘要约束。`package.json` 的 `allowScripts` 只批准以下固定安装脚本：
+`build/runIntegration.mjs` 先建立白名单临时构建上下文，只包含 runner 清单、Dockerfile、正式产物、
+场景、共享辅助文件和专用配置；拒绝符号链接。仓库源码、`.git`、根 `.npmrc`、`.secret.json` 和
+宿主 node_modules 不进入镜像。安装脚本执行层尚未复制测试脚本和产物，构建不传 npm/Git 凭据。
 
-- Node 24 兼容版 `isolated-vm` 的原生编译；
-- `@screeps/driver@5.3.0` 的原生扩展；
-- `screeps@4.3.0` 的 runtime bundle 与 snapshot 生成；
-- Screeps 旧构建链所需的 `uglifyjs-webpack-plugin@0.4.6` 与 `es5-ext@0.10.64`。
-
-更新 Screeps 或 lockfile 后，应重新检查 `npm install-scripts ls`，不得批量批准未知脚本。安装成功时
-应存在 `node_modules/@screeps/driver/build/runtime.bundle.js` 和 `runtime.snapshot.bin`；缺失时说明
-Screeps postinstall 没有执行。当前安装会报告 `@parcel/watcher` 与 `unrs-resolver` 的脚本被阻止；
-集成场景不依赖这两个脚本生成的产物，因此无需批准。
+测试容器以 UID/GID 1000 运行，根文件系统只读，丢弃全部 capabilities，禁止提权和外部网络；
+只保留容器自身 loopback，供 storage/runner/processor 通信。容器不挂载宿主目录或 Docker socket，
+不发布端口，不转发宿主环境变量；限制 CPU、内存和进程数。`/tmp`、`/work` 为有界 tmpfs。
+这些控制降低开发机暴露面，不表示旧依赖漏洞已消失，也不构成对任意恶意依赖的绝对隔离证明。
 
 ## 运行与配置
 
 ```bash
-# 构建正式产物并运行全部真实引擎场景
+# 构建正式产物，自动构建隔离镜像并运行所有场景
 npm run test:integration
 
-# 只运行一个场景，名称不含 .scenario.js
-npm run build
-npx screeps-integration-tests \
-  --config screeps-integration.config.cjs \
-  --only leviathan-runtime
+# 只运行一个场景
+npm run test:integration -- --only leviathan-runtime
+
+# 分别扫描日常依赖与隔离引擎依赖
+npm audit
+npm audit --prefix test/integration/runner
 ```
 
-根目录 `screeps-integration.config.cjs` 将场景固定为串行执行，并把私服数据库与性能输出写入
-`test/integration/.cache/` 与 `test/integration/profiles/`，两者均已忽略，且运行结束即回收。
+首次执行会下载基础镜像、安装依赖并编译原生扩展；后续复用 Docker 构建缓存。
+Docker 不可用时明确失败，不退回宿主运行。镜像使用本次进程的临时 tag，测试结束移除 tag；
+构建层缓存保留供后续使用，不清理其他项目镜像。
 
-**引擎日志不在上述目录**：mockup 把 `logdir` 硬编码为 `path.resolve('server', 'logs')`，框架只覆盖了
-`path`（即 `cacheDir`），因此 storage、engine runner 与 processor 的日志固定落在仓库根的
-`server/logs/`。该目录同样已忽略，但它是**所有场景共用**的：提高 `jobs` 会让多个场景的日志互相覆盖，
-排错时必须结合场景时间戳判断。测试会监听本机回环地址的临时端口；受限沙箱需要授予本地监听权限，
-普通终端和 CI 可直接运行。
-
-每个场景由 CLI 放入独立子进程。使用 `withWorld()` 的场景由 harness 在 `finally` 中 dispose；
-手写创建世界的场景仍须自行 `try/finally` 调用 `world.dispose()`。worker 在场景结束后退出，以回收
-mockup 的 storage 单例残留。配置保持 `jobs: 1`，只有确认目标 CI 的端口、CPU 与 storage 隔离稳定后
-才能提高并发。
+根目录 `screeps-integration.config.cjs` 从镜像 `/opt/runner` 读取正式产物和场景，保持 `jobs: 1`。
+数据库、性能报告分别写入容器 `/work/cache`、`/work/profiles`，引擎日志写入 `/work/server/logs`。
+场景通过共享 harness 在失败时把现场附到异常；日志与汇总输出到终端，可由 CI 保存。
+容器退出即删除临时文件，本入口不导出宿主可写目录；无需开放宿主回环监听权限。
 
 ## 场景约定
 
@@ -117,12 +109,12 @@ reset：新 isolate 的探针必须从 1 重新计数（若 heap 被继承会得
 
 ## 已知边界
 
-- Screeps 私服及其构建链包含多个停止维护的传递依赖，`npm audit` 会报告上游遗留漏洞。该依赖树
-  仅用于本地或 CI 测试，不应作为对外服务运行；升级或替换服务端版本时需重新审计；
+- Screeps 私服及其构建链包含多个停止维护的传递依赖，`npm audit --prefix test/integration/runner` 会报告上游遗留漏洞。该依赖树
+  仅用于隔离容器，不得在宿主直接安装或作为对外服务运行；处置及复查见 [P1 整改记录](../audits/2026-09-19-p1-remediation.md)；
 - mockup 的 storage 连接不能在同一 Node 进程内完全释放，隔离 worker 退出是当前清理机制；
 - 框架未提供“保留同一 storage 并只重启玩家 isolate”的 API，global reset 只能按
   `leviathan-global-reset` 的等价方式验证。heap 重建与 Memory 继承是可观测契约，但**主 RawMemory 与
-  Segment 之间的分区搬迁、journal 迁移与恢复仍未覆盖**：这些路径需要声明 persistence 的业务插件，
+  Segment 之间的分区搬迁、journal 迁移与恢复仍未覆盖**：这些路径需要通过 context.memory 申请分区的业务插件，
   当前生产 bundle 只有不声明持久化的 `roomShortcuts`，命名空间只存在于 heap，不会写回 Memory；
 - **Segment 语义与线上不同**（由 `leviathan-segments` 实测）：本环境不强制 `setActiveSegments`
   前置条件，未激活也能直接读写；`RawMemory.get().activeSegments` 恒为 `null`；单页写入约 12 万字符
@@ -132,8 +124,7 @@ reset：新 isolate 的探针必须从 1 重新计数（若 heap 被继承会得
 - npm 包没有 TypeScript 声明，项目使用 JavaScript scenario 与 CLI 隔离这项限制；
 - 完整私服的 backend、上传接口和多进程 launcher 兼容性需要未来独立的端到端环境覆盖。
 
-排错时先看仓库根 `server/logs/` 下的三个引擎日志（`storage.log`、`engine_runner.log`、
-`engine_processor.log`），再确认场景对应的 `test/integration/.cache/` 子目录与 driver runtime bundle
-是否存在。若出现 `listen EPERM`，应开放本机回环监听；若出现
-`Cannot find module '../../build/runtime.bundle.js'`，应重新用项目虚拟环境执行
-`PYTHON="$PWD/.venv/bin/python" npm ci`。
+排错时先看命令输出中的失败场景和附带引擎日志。`EACCES` 应核验 COPY 文件归属与 node 用户权限，
+不能通过 privileged/root 运行绕过。若缺少 driver runtime bundle，应核对 runner 的安装脚本白名单和
+Docker 构建日志，再重建镜像；不要在宿主执行旧引擎安装脚本。新环境首次运行需允许 Docker 构建联网，
+测试运行阶段仍保持 `--network=none`。
