@@ -55,7 +55,7 @@ export const createFramework = (options: FrameworkOptions): Framework => {
   /** setup 尚未登记 initialized 时暂存清理函数，以便部分初始化失败也能逆序释放。 */
   let activeCleanup: (() => void)[] | undefined;
   const profiler = runtime.profiler;
-  /** 每个固定标签只 wrap 一次；Profiler 延迟就绪时清空，之后随实例存活。 */
+  /** 每个固定标签只 wrap 一次并随实例存活，不清空；包装器构造失败时缓存的是直通降级函数。 */
   const wrappers = new Map<string, (callback: () => any) => any>();
   /**
    * 包装器构造失败时降级，不能因观测初始化失败而跳过业务钩子。

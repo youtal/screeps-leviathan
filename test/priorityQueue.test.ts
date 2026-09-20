@@ -79,7 +79,7 @@ describe('PriorityQueue', () => {
     expect(minHeap.pop()).toBeUndefined(); // 清空后pop应返回undefined
   });
 
-  /** 构造函数直接接管传入数组并用 Floyd 建堆整理（O(n)），所以这里验证「未排序数组也有序出队」这条批量初始化路径。 */
+  /** 构造函数拷贝传入数组并用 Floyd 建堆整理（O(n)），所以这里验证「未排序数组也有序出队」这条批量初始化路径。 */
   it('should initialize from array correctly', () => {
     const arr = [4, 2, 7, 1];
     const pq = new PriorityQueue(arr, (a, b) => a < b);
@@ -87,6 +87,16 @@ describe('PriorityQueue', () => {
     expect(pq.pop()).toBe(2);
     expect(pq.pop()).toBe(4);
     expect(pq.pop()).toBe(7);
+  });
+
+  /** F5：队列拥有自己的存储，构造与后续操作都不改写调用方数组。 */
+  it('should not mutate the caller array', () => {
+    const arr = [5, 3, 9, 1];
+    const pq = new PriorityQueue(arr, (a, b) => a < b);
+    pq.push(0);
+    pq.pop();
+    pq.clear();
+    expect(arr).toEqual([5, 3, 9, 1]);
   });
 
   /** 比较器是维持堆序的必要依赖，构造期即抛错可避免把非法配置推迟到首次 push/pop 才暴露。 */

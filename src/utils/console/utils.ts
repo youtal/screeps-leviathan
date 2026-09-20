@@ -28,9 +28,8 @@ interface ReplaceContent {
  * 换取的是无需解析模板语法即可支持任意占位符名。
  *
  * 边界条件（使用时需要留意）：
- * - 键名被直接拼进正则表达式，含正则元字符的键名会改变匹配语义，约定只用标识符式名称；
- * - 替换值通过 String.replace 的字符串形式写入，值中的 `$&`、`` $` ``、`$'`、`$n`
- *   会被当作替换模式解释，需要字面量 `$` 时应先自行转义；
+ * - 键名先做正则转义再拼入表达式，含 `.`、`*` 等元字符的键名按字面量匹配；
+ * - 替换值通过函数形式返回，`$&`、`` $` ``、`$'`、`$n`、`$$` 原样输出，不会被当作替换模式；
  * - 按顺序逐键替换，若某个替换结果中又包含后续待替换的占位符，会被继续替换（级联）；
  * - 模板中未出现在映射里的 `{...}` 原样保留。
  *
@@ -43,7 +42,12 @@ export const replaceHtml = function (
   replaceContent: ReplaceContent = {}
 ): string {
   return Object.keys(replaceContent).reduce((html, nxtKey) => {
-    return html.replace(new RegExp(`{${nxtKey}}`, 'g'), replaceContent[nxtKey]);
+    // 转义键名中的正则元字符（含花括号）；函数形式的替换值绕开 `$` 模式解释。
+    const escaped = nxtKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return html.replace(
+      new RegExp(`\\{${escaped}\\}`, 'g'),
+      () => replaceContent[nxtKey]
+    );
   }, html);
 };
 
