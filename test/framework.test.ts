@@ -811,6 +811,98 @@ describe('ErrorMapper', () => {
 });
 
 /** Framework 与 MemoryManager 的接线：框架按 pluginId 绑定申请入口并在 tick 边界驱动存储。 */
+/** S02：critical 订阅者失败要在发布者的钩子返回前生效，后续业务动作不能再执行。 */
+describe('Framework critical event listener failure', () => {
+  const criticalListener = (trace: string[]) =>
+    plugin('critical', {
+      manifest: { id: 'critical', version: 1, critical: true },
+      setup: (c) => {
+        c.events.subscribe({ scope: 'global' }, 'creep:spawn', 'broken', () => {
+          trace.push('listener');
+          throw new Error('critical listener failed');
+        });
+      },
+    });
+  const worker = (trace: string[]) =>
+    plugin('worker', {
+      onTickExecute: (c) => {
+        c.intents.submit({
+          subjectId: 'w',
+          channel: 'move',
+          execute: () => {
+            trace.push('business');
+            return 0 as ScreepsReturnCode;
+          },
+        });
+      },
+    });
+  const spawn = { creepName: 'probe' };
+
+  it.each(['onTickBegin', 'onTickExecute'] as const)(
+    'skips later business work when the event is published from %s',
+    (hook) => {
+      const trace: string[] = [];
+      const h = harness([
+        criticalListener(trace),
+        plugin('publisher', {
+          [hook]: (c: any) =>
+            c.events.publish({ scope: 'global' }, 'creep:spawn', spawn),
+        }),
+        worker(trace),
+      ]);
+      h.framework.loop();
+      expect(trace).toEqual(['listener']);
+      const status = h.framework.getStatus();
+      expect(status.safeMode).toBe(true);
+      expect(status.failures[0].pluginId).toBe('critical');
+    }
+  );
+
+  it('stops the remaining intents when the event is published during commit', () => {
+    const trace: string[] = [];
+    const h = harness([
+      criticalListener(trace),
+      plugin('publisher', {
+        onTickExecute: (c) => {
+          c.intents.submit({
+            subjectId: 'p',
+            channel: 'move',
+            execute: () => {
+              c.events.publish({ scope: 'global' }, 'creep:spawn', spawn);
+              return 0 as ScreepsReturnCode;
+            },
+          });
+        },
+      }),
+      worker(trace),
+    ]);
+    h.framework.loop();
+    expect(trace).toEqual(['listener']);
+    expect(h.framework.getStatus().safeMode).toBe(true);
+  });
+
+  it('keeps isolating failures of non-critical subscribers', () => {
+    const trace: string[] = [];
+    const h = harness([
+      plugin('flaky', {
+        setup: (c) => {
+          c.events.subscribe({ scope: 'global' }, 'creep:spawn', 'x', () => {
+            throw new Error('non-critical');
+          });
+        },
+      }),
+      plugin('publisher', {
+        onTickBegin: (c) =>
+          c.events.publish({ scope: 'global' }, 'creep:spawn', spawn),
+      }),
+      worker(trace),
+    ]);
+    h.framework.loop();
+    expect(trace).toEqual(['business']);
+    expect(h.framework.getStatus().safeMode).toBe(false);
+  });
+});
+
 describe('Framework memory integration', () => {
   it('exposes raw write failure and recovery without blocking corrective plugin work', () => {
     let raw = '{}';
@@ -820,7 +912,9 @@ describe('Framework memory integration', () => {
       segmentIds: [],
       platform: {
         readRaw: () => raw,
-        writeRaw: (text) => { raw = text; },
+        writeRaw: (text) => {
+          raw = text;
+        },
         readSegments: () => ({}),
         writeSegment: () => undefined,
         activeSegments: () => [],
@@ -830,16 +924,26 @@ describe('Framework memory integration', () => {
     const execute = jest.fn(() => {
       const access = accessor.access();
       expect(access.status).toBe('ready');
-      if (access.status === 'ready') access.commit((data) => { data.blob = blob; });
-    });
-    const h = harness([plugin('writer', {
-      setup(context) {
-        accessor = context.memory('main', {
-          version: 1, layer: 'critical', initialize: () => ({ blob: '' }),
+      if (access.status === 'ready')
+        access.commit((data) => {
+          data.blob = blob;
         });
-      },
-      onTickExecute: execute,
-    })], { memory: manager });
+    });
+    const h = harness(
+      [
+        plugin('writer', {
+          setup(context) {
+            accessor = context.memory('main', {
+              version: 1,
+              layer: 'critical',
+              initialize: () => ({ blob: '' }),
+            });
+          },
+          onTickExecute: execute,
+        }),
+      ],
+      { memory: manager }
+    );
     h.next();
     h.next();
     const failed = h.framework.getStatus();
@@ -856,8 +960,9 @@ describe('Framework memory integration', () => {
     expect(execute).toHaveBeenCalledTimes(3);
     expect(h.framework.getStatus().memory.rawWriteError).toBeNull();
     expect(manager.getStatus().allocations[0].dirty).toBe(false);
-    expect(JSON.parse(raw).memoryManager.rawPartitions.writer.main.payload.blob)
-      .toBe('recovered');
+    expect(
+      JSON.parse(raw).memoryManager.rawPartitions.writer.main.payload.blob
+    ).toBe('recovered');
   });
 
   /** 只服务本组用例的假平台：raw 整串 + 一 tick 延迟可见的 Segment。 */

@@ -206,8 +206,16 @@ export const createFramework = (options: FrameworkOptions): Framework => {
           throw new Error('Subscribe only during setup');
         const key = id + ':' + subscriber;
         base.bus.subscribe(scope, type, key, (data) => {
-          if (available.has(id) && !failed.has(id))
-            invoke(id, currentPhase, () => listener(data));
+          if (available.has(id) && !failed.has(id)) {
+            const result = invoke(id, currentPhase, () => listener(data));
+            // critical 订阅者失败必须立即生效：发布者自己的钩子仍会正常返回，
+            // 若等到 tickEnd 的健康统计才进入安全模式，其后的插件阶段与意图提交
+            // 已经在故障状态下执行了。commit 阶段还要清空可用集合，阻止同批剩余意图。
+            if (!result.ok && plugin.manifest.critical) {
+              safeMode = true;
+              if (currentPhase === 'commit') available.clear();
+            }
+          }
         });
         // 保存对同一底层总线/作用域/类型/键的释放闭包，setup 回滚与停用共用清理路径。
         owner.push(() => base.bus.unsubscribe(scope, type, key));

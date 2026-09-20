@@ -144,7 +144,7 @@ onTickExecute(context) {
 
 Profiler、Logger、MemoryManager、ErrorMapper、Game 访问器及 source map/report 选项在创建 Runtime 时配置，不能通过 `FrameworkOptions` 分散替换。
 
-`critical` 仅给基础服务使用。其失败会阻止剩余业务提交，熔断后需显式 recover。安全模式不会自动执行生存策略。
+`critical` 仅给基础服务使用。其失败会阻止剩余业务提交（包括它作为事件订阅者在他人发布事件时失败），熔断后需显式 recover。安全模式不会自动执行生存策略。
 
 Profiler 的 calls 包含失败调用。健康记录仅在实例 heap 中累计失败与熔断，recover 清除连续失败和熔断。错误映射成本单独归入框架标签。
 
