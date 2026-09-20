@@ -122,4 +122,3 @@ R1–R4 均未修改代码；按 AGENTS.md §3 只记录，实施需另行确认
 - 项目审计第 5 节后续项（A04/A05/A07/A08/A10 等）未在本轮处理，保持开放。
 
 验证：`npx tsc --noEmit`、`npm test`（12 套件 201 项，另有构建、产物、隔离测试）、`env -u DEST npm run build`、`git diff --check`。未重跑 Docker 集成测试，未上传服务器。
-
