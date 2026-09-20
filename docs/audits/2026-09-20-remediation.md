@@ -104,3 +104,22 @@ R1–R4 均未修改代码；按 AGENTS.md §3 只记录，实施需另行确认
 ### 验证
 
 针对性验证：MemoryManager 与 Framework 两套件共 108 项通过（新增 4 项：框架故障与恢复、两种非 ASCII 边界、页观察缓存失效）。最终 `npx tsc --noEmit`、`npm test`（12 套件 188 项，另 9 项构建工具/产物/隔离测试）、`env -u DEST npm run build`、`git diff --check` 均通过。未重跑 Docker 集成测试，未上传服务器。
+
+## 10. 项目审计 S01–S04 整改
+
+基线：[项目审计](./2026-09-20-project-audit.md)。§9 的 R1/R2/R4 落实提交为 `e282b08`。四项缺陷先用审计复现脚本确认全部复现，再逐项修复并转为正式回归；每个回归在撤销对应源码修改后确认失败。
+
+| 编号 | 状态 | 提交 | 关闭依据 |
+| --- | --- | --- | --- |
+| S01 | 已修复 | `8637217` | copy 读取的源 payload、verify/switch 的目标 Segment payload、切回 Raw 时携带的数据必须是键值对象，否则中止搬迁并保留源与诊断。两条复现路径（缺 staged 的 switch journal、目标 payload 被改为 null 的 verify）均不再删除有效源，且跨 reset 后数据仍可读（42 / `{n:0}`） |
+| S02 | 已修复 | `3a9c282` | critical 订阅者失败在回调返回时立即置安全模式（commit 阶段同时清空可用集合）。事件从 begin、execute、commit 发布时后续业务动作均不执行；非 critical 订阅者失败仍被隔离 |
+| S03 | 已修复 | `8637217` | undefined/函数/Symbol/toJSON 返回 undefined 的宿主根字段按原生语义省略，输出可被重新加载且无 fault；循环引用、BigInt 使写入失败，保留最后有效文本并给出 `rawWriteError`。同批修正：无待写内容时清除过期的 `rawWriteError` |
+| S04 | 已修复（示例与测试；未改契约） | `6ebec0a` | 使用说明改为模块级稳定声明并写明禁止在 `setup` 内联；新增真实 MemoryManager + disable/enable + setup 重试组合测试，内联声明的对照版本失败。未放宽重复声明冲突校验 |
+
+说明：
+- S01 只校验形状与身份，没有把目标 payload 与暂存内容做深度相等比较；形状合法但内容被改写的目标无法区分，这属于外部工具改写的更宽范畴，未在本轮扩大。
+- 审计复现脚本 `docs/audits/evidence/2026-09-20-project-reproduction.cjs` 固定的是修复前的缺陷表现，修复后按其头部说明会断言失败，属预期；作为历史证据保留，正式回归已在测试套件中。
+- 项目审计第 5 节后续项（A04/A05/A07/A08/A10 等）未在本轮处理，保持开放。
+
+验证：`npx tsc --noEmit`、`npm test`（12 套件 201 项，另有构建、产物、隔离测试）、`env -u DEST npm run build`、`git diff --check`。未重跑 Docker 集成测试，未上传服务器。
+

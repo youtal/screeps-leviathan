@@ -2,6 +2,8 @@
  * 项目审计复现工具：仅注入内存平台，不访问游戏、凭据或网络，不修改源码。
  * 从仓库根运行：node docs/audits/evidence/2026-09-20-project-reproduction.cjs
  * 断言用于固定审计基线的缺陷表现，不是修复后的合格行为断言；修复后应改变输出并补正式回归。
+ * 状态：S01–S04 已在 fix/audit-2026-09-20 修复，本脚本在修复后的代码上会断言失败，仅作历史证据；
+ * 正式回归见 test/memoryManager.test.ts 与 test/framework.test.ts，整改记录见 ../2026-09-20-remediation.md §10。
  */
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
