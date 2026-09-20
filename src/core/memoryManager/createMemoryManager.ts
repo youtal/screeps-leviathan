@@ -442,6 +442,10 @@ export const createMemoryManager = (
     return { ok: true };
   };
 
+  /** 分区数据是否是键值对象（非 null、非数组）；持久数据进入迁移或装载前的统一判据。 */
+  const isPartitionObject = (value: unknown): boolean =>
+    value !== null && typeof value === 'object' && !Array.isArray(value);
+
   /** 分区数据的运行时形状校验：契约要求 initialize/migrate 返回键值对象。 */
   const asPartitionData = (
     value: unknown,
@@ -449,7 +453,7 @@ export const createMemoryManager = (
   ):
     | { ok: true; data: Record<string, JsonValue> }
     | { ok: false; error: string } =>
-    value !== null && typeof value === 'object' && !Array.isArray(value)
+    isPartitionObject(value)
       ? { ok: true, data: value as Record<string, JsonValue> }
       : { ok: false, error: what + ' must return a key-value object' };
 
@@ -1116,6 +1120,14 @@ export const createMemoryManager = (
             return;
           }
           payload = envelope.payload;
+          if (!isPartitionObject(payload)) {
+            abortMigration(
+              'migration source payload is not a key-value object for ' +
+                identity,
+              journal.moves
+            );
+            return;
+          }
         } else {
           const record = rawRecordOf(item.pluginId, item.localId);
           if (!record) {
@@ -1126,6 +1138,14 @@ export const createMemoryManager = (
             return;
           }
           payload = record.payload;
+          if (!isPartitionObject(payload)) {
+            abortMigration(
+              'migration source payload is not a key-value object for ' +
+                identity,
+              journal.moves
+            );
+            return;
+          }
         }
         journal.staged[identity] = payload;
       }
@@ -1190,15 +1210,30 @@ export const createMemoryManager = (
     // switch 再次核验目标，防止 verify 后重启/页被替换时删除唯一仍有效的 Raw 源。
     if (journal.phase === 'verify' || journal.phase === 'switch') {
       for (const item of journal.moves) {
-        if (item.to !== 'segment') continue;
+        const identity = key(item.pluginId, item.localId);
+        if (item.to === 'raw') {
+          // 切回 Raw 的数据来自 heap 或 journal 暂存；两者都不是键值对象时，
+          // 继续切换会写出缺失/损坏的记录并在 cleanup 删除唯一有效的 Segment 源。
+          const carried =
+            partitions.get(identity)?.data ?? journal.staged[identity];
+          if (!isPartitionObject(carried)) {
+            abortMigration(
+              'migration payload missing or invalid for ' + identity,
+              journal.moves
+            );
+            return;
+          }
+          continue;
+        }
         const text = visible[item.toSegmentId!];
         if (text === undefined) {
           ensureSegmentsActive();
           freezeMoves(journal.moves, 'verification');
           return;
         }
+        const envelope = parseEnvelope(text);
         const mismatch = describeMismatch(
-          parseEnvelope(text),
+          envelope,
           { pluginId: item.pluginId, localId: item.localId },
           journal.generation,
           item.dataVersion
@@ -1206,6 +1241,14 @@ export const createMemoryManager = (
         if (mismatch) {
           abortMigration(
             'migration verification failed: ' + mismatch,
+            journal.moves
+          );
+          return;
+        }
+        // 信封头正确不代表数据可恢复：目标 payload 必须是键值对象，才允许删除 Raw 源。
+        if (!isPartitionObject(envelope!.payload)) {
+          abortMigration(
+            'migration verification failed: target payload is not a key-value object',
             journal.moves
           );
           return;
@@ -1455,7 +1498,13 @@ export const createMemoryManager = (
     const stagedRaw = commitPartitions(tick);
     const external = getHostMemory() ?? null;
     const externalChanged = store!.hasExternalChanges(external);
-    if (!rawDirty && !externalChanged) return;
+    if (!rawDirty && !externalChanged) {
+      // 没有待写内容：此前失败的变化已被撤销（如宿主删掉了无法序列化的字段），
+      // 持久文本与当前状态一致，不能让过期的失败诊断一直挂着。
+      rawWriteError = null;
+      lastLoggedRawWriteError = null;
+      return;
+    }
     try {
       const text = store!.serialize(external);
       // 超过引擎上限的写入必然失败；提前给出带体积的诊断，走同一条重试/告警路径。

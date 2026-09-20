@@ -182,3 +182,8 @@ const status = memory.getStatus();
 - 目标服务器的实际运行验证；主 Memory 的 UTF-16 长度口径已核对官方 driver，修改过限制的私服需要单独核验。
 - 迁移期间的在线修改（当前冻结搬迁分区）与多迁移并行。
 - 独立 heap 监控设施；旧布局导入仅覆盖插件 payload，Profiler 统计与健康表保留在原处不迁移。
+
+## 迁移与序列化的数据完整性
+
+- 搬迁过程中发现源或目标 payload 不是键值对象、切回 Raw 时缺少可携带的数据时，搬迁会中止并保留原有副本，诊断出现在分区 `writeError` 与 `warn` 日志中；不会从缺值生成记录，也不会清空仍有效的旧页。
+- 宿主根字段中无法用 JSON 表示的值（undefined、函数、Symbol）与原生 `JSON.stringify` 一致地被省略；循环引用、BigInt 会使写入失败并出现在 `getStatus().rawWriteError`，主 Memory 保持最后一次有效文本，问题字段被移除后自动恢复。

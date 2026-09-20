@@ -350,6 +350,20 @@ export const createRawStore = (loaded: LoadedRoot): RawStore => {
    */
   const foreignFragments = new Map<string, string>();
 
+  /**
+   * 生成一个非托管根字段的 `"key":value` 片段；不可表示的值返回空串表示省略。
+   *
+   * 手工拼接必须复刻 `JSON.stringify(object)` 对属性的语义：值为 undefined、函数、
+   * Symbol 或 toJSON 返回 undefined 时，`JSON.stringify(value)` 返回 undefined，
+   * 原生序列化会省略该属性；若照搬字符串拼接会写出 `"k":undefined` 这种非法 JSON，
+   * 下一次加载整体失败。循环引用、BigInt 等会直接抛错，由调用方的写入错误路径接住，
+   * 不会覆盖最后一次有效的主 Memory 文本。
+   */
+  const foreignFragmentOf = (key: string, value: unknown): string => {
+    const text: string | undefined = JSON.stringify(value);
+    return text === undefined ? '' : JSON.stringify(key) + ':' + text;
+  };
+
   const foreignKeys = (external: Record<string, unknown> | null): string[] => {
     const keys = new Set<string>();
     for (const key of Object.keys(root))
@@ -380,15 +394,16 @@ export const createRawStore = (loaded: LoadedRoot): RawStore => {
       : Object.keys(root).filter((key) => key !== NAMESPACE_KEY);
     for (const key of keys) {
       if (external) {
-        entries.push(JSON.stringify(key) + ':' + JSON.stringify(external[key]));
+        const fragment = foreignFragmentOf(key, external[key]);
+        if (fragment !== '') entries.push(fragment);
         continue;
       }
       let fragment = foreignFragments.get(key);
       if (fragment === undefined) {
-        fragment = JSON.stringify(key) + ':' + JSON.stringify(root[key]);
+        fragment = foreignFragmentOf(key, root[key]);
         foreignFragments.set(key, fragment);
       }
-      entries.push(fragment);
+      if (fragment !== '') entries.push(fragment);
     }
     const allocations =
       fragments.get('allocations') ?? JSON.stringify(namespace.allocations);
