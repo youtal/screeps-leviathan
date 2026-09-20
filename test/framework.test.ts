@@ -904,6 +904,63 @@ describe('Framework critical event listener failure', () => {
 });
 
 describe('Framework memory integration', () => {
+  /** S04：真实 MemoryManager 下，停用再启用与 setup 重试都复用同一声明，数据延续且不重复初始化。 */
+  it('reapplies a stable memory declaration after disable/enable and a failed setup', () => {
+    let raw = '{}';
+    const manager = createMemoryManager({
+      segmentIds: [],
+      platform: {
+        readRaw: () => raw,
+        writeRaw: (text) => {
+          raw = text;
+        },
+        readSegments: () => ({}),
+        writeSegment: () => undefined,
+        activeSegments: () => [],
+        activateSegments: () => undefined,
+      },
+    });
+    const initialize = jest.fn(() => ({ n: 0 }));
+    const options = { version: 1, layer: 'critical', initialize } as const;
+    let setups = 0;
+    let executions = 0;
+    let accessor: MemoryAccessor<{ n: number }>;
+    const h = harness(
+      [
+        plugin('consumer', {
+          setup(context) {
+            accessor = context.memory('main', options);
+            // 首次 setup 在申请成功后失败：重试必须复用同一声明而不是冲突。
+            if (++setups === 1) throw new Error('setup retry');
+          },
+          onTickExecute() {
+            executions++;
+            const access = accessor.access();
+            if (access.status === 'ready')
+              access.commit((data) => {
+                data.n++;
+              });
+          },
+        }),
+      ],
+      { memory: manager }
+    );
+    for (let i = 0; i < 6; i++) h.next();
+    h.framework.disable('consumer');
+    h.next();
+    h.framework.enable('consumer');
+    for (let i = 0; i < 3; i++) h.next();
+
+    const failures = h.framework.getStatus().failures;
+    expect(
+      failures.some((f) => /conflicting declaration/.test(f.message))
+    ).toBe(false);
+    expect(initialize).toHaveBeenCalledTimes(1);
+    expect(executions).toBeGreaterThan(1);
+    const stored = JSON.parse(raw).memoryManager.rawPartitions.consumer.main;
+    expect(stored.payload.n).toBeGreaterThan(1);
+  });
+
   it('exposes raw write failure and recovery without blocking corrective plugin work', () => {
     let raw = '{}';
     let accessor: MemoryAccessor<{ blob: string }>;

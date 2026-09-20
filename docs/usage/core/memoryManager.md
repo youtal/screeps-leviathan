@@ -23,15 +23,16 @@ interface State {
 
 let state: MemoryAccessor<State> | undefined;
 
+// 声明放在模块级：同一身份的重复申请要求 initialize/migrate 与选项保持同一引用，
+// 框架停用后再启用、或 setup 中途失败后重试都会重新调用 setup。
+const initialize = (): State => ({ lastTick: 0, jobs: [] });
+const stateOptions = { version: 1, layer: 'critical', initialize } as const;
+
 const plugin: LeviathanPlugin = {
   manifest: { id: 'logistics', version: 1 },
   setup(context) {
-    // 申请在 setup 中完成：身份稳定，重复装配返回同一句柄。
-    state = context.memory('main', {
-      version: 1,
-      layer: 'critical',
-      initialize: () => ({ lastTick: 0, jobs: [] }),
-    });
+    // 申请在 setup 中完成：身份稳定，重复装配（含停用后再启用）返回同一句柄。
+    state = context.memory('main', stateOptions);
   },
   onTickExecute(context) {
     const access = state!.access();
@@ -55,6 +56,7 @@ const plugin: LeviathanPlugin = {
 - `context.memory(localId, options)` 由框架按 `pluginId` 绑定 owner；`localId` 默认用 `'main'`，支持一个模块多份分区。
 - 句柄（`MemoryAccessor`）可以跨 tick 保存；`access()` 的 ready 视图与数据引用只对签发它的 tick 有效。跨 tick、分区进入 pending 或数据被重新加载后再调用 `query()/commit()` 会抛协议错误——必须每 tick 重新 `access()` 并重新收窄状态。
 - `query()` 只提供类型级只读，不冻结对象；`commit()` 在回调前标脏，回调抛错不回滚，返回成功也不代表已落盘。
+- **不要在 `setup` 里内联创建 `initialize`/`migrate`**（如 `initialize: () => ...`）：每次激活都是新函数引用，第二次 setup 会因“conflicting declaration”被拒绝。把声明提到模块级或稳定的工厂闭包中。
 - 不需要跨 global 保留的数据不要申请分区：闭包缓存更省 CPU 与容量。
 
 ## 申请配置（MemoryApplicationOptions）
