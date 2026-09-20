@@ -32,6 +32,12 @@ export const LEGACY_NAMESPACE_KEY = 'leviathan';
  */
 export const SEGMENT_CAPACITY = 100_000;
 
+/**
+ * 主 Memory 序列化文本的长度上限（引擎限制 2 MB；这里按字符数近似，宁可略早
+ * 拒绝也不把注定失败的写入交给引擎）。超限时整串写入被拒绝并按 writeError 诊断。
+ */
+export const RAW_MEMORY_LIMIT = 2_097_152;
+
 /** 主 Memory 命名空间的当前 schema 版本；未知版本拒绝覆盖。 */
 export const NAMESPACE_SCHEMA_VERSION = 1;
 

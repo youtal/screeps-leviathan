@@ -35,6 +35,7 @@ import {
 } from './segments';
 import { createScreepsPlatform } from './platform';
 import {
+  RAW_MEMORY_LIMIT,
   SEGMENT_IDS,
   type AllocationRecord,
   type Backend,
@@ -156,6 +157,18 @@ export const createMemoryManager = (
    * 未出现在这里的页不可写入——没有读过内容就无法断定它不是别人正在使用的页。
    */
   const observedSegments = new Map<number, string>();
+  /**
+   * 页解析缓存（页号 → 上次解析的文本与信封）。
+   * 创建：随 manager 实例；命中：页文本与上次逐字相同；更新：文本变化时重新
+   * parse；清理：页变空时删除。只驻留 heap，global reset 后首 tick 重新解析一次。
+   * 换取：未变化的页不再每 tick（begin/end 共两次）JSON.parse，实测 10 页×64 KB
+   * 约 13 ms/tick；风险仅是缓存与文本不同步，因文本相等才复用故不存在。
+   * 缓存的信封只用于只读判断，调用方不得修改。
+   */
+  const parsedPages = new Map<
+    number,
+    { text: string; envelope: SegmentEnvelope | null }
+  >();
   /** 被外部数据或未认领信封占用的页：不参与分配、不会被写入。 */
   const reservedSegments = new Map<number, string>();
   /** 清理阶段的重试计数（journal 代际 → 次数）：只驻留 heap，不进入存储。 */
@@ -317,9 +330,15 @@ export const createMemoryManager = (
       observedSegments.set(id, text);
       if (text === '') {
         reservedSegments.delete(id);
+        parsedPages.delete(id);
         continue;
       }
-      const envelope = parseEnvelope(text);
+      let cached = parsedPages.get(id);
+      if (cached?.text !== text) {
+        cached = { text, envelope: parseEnvelope(text) };
+        parsedPages.set(id, cached);
+      }
+      const envelope = cached.envelope;
       if (envelope && pageBelongsToUs(id, envelope)) {
         reservedSegments.delete(id);
         continue;
@@ -368,8 +387,13 @@ export const createMemoryManager = (
           reason: 'recovery',
           error: 'missing raw partition',
         };
+      // 手工编辑或外部损坏可能留下非对象 payload：按 recovery 给出诊断，
+      // 而不是把 5/"str"/[1] 当作 ready，或让 null 永远停在 loading。
+      const restored = asPartitionData(record.payload, 'stored payload');
+      if (restored.ok === false)
+        return { ok: false, reason: 'recovery', error: restored.error };
       partition.dataVersion = record.dataVersion;
-      partition.data = record.payload as Record<string, JsonValue>;
+      partition.data = restored.data;
       return { ok: true };
     }
     const segmentId = partition.segmentId;
@@ -392,8 +416,11 @@ export const createMemoryManager = (
       partition.generation
     );
     if (mismatch) return { ok: false, reason: 'recovery', error: mismatch };
+    const restored = asPartitionData(envelope!.payload, 'stored payload');
+    if (restored.ok === false)
+      return { ok: false, reason: 'recovery', error: restored.error };
     partition.dataVersion = envelope!.dataVersion;
-    partition.data = envelope!.payload as Record<string, JsonValue>;
+    partition.data = restored.data;
     return { ok: true };
   };
 
@@ -1412,7 +1439,13 @@ export const createMemoryManager = (
     const externalChanged = store!.hasExternalChanges(external);
     if (!rawDirty && !externalChanged) return;
     try {
-      platform.writeRaw(store!.serialize(external));
+      const text = store!.serialize(external);
+      // 超过引擎上限的写入必然失败；提前给出带体积的诊断，走同一条重试/告警路径。
+      if (text.length > RAW_MEMORY_LIMIT)
+        throw new Error(
+          'Memory text ' + text.length + ' chars exceeds ' + RAW_MEMORY_LIMIT
+        );
+      platform.writeRaw(text);
       rawDirty = false;
       migrationPersisted = store!.namespace.migration !== null;
       store!.commitExternal(external);

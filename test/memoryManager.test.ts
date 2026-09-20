@@ -2132,3 +2132,157 @@ describe('audit P1 migration recovery', () => {
     ).toEqual({ n: 11 });
   });
 });
+
+describe('MemoryManager audit remediation 2026-09-20', () => {
+  it('F1: does not re-parse an unchanged segment page on idle ticks', () => {
+    const h = createHarness({ segmentIds: [0] });
+    h.run(() => {
+      h.manager.bind('cache')('main', {
+        version: 1,
+        layer: 'critical',
+        priority: 1,
+        initialize: () => ({ n: 1 }),
+      });
+    });
+    h.settle();
+    const page = h.plat.content()[0];
+    expect(page).toContain('"n":1');
+
+    const parse = jest.spyOn(JSON, 'parse');
+    try {
+      for (let i = 0; i < 5; i++) h.run();
+      // 页文本未变：观察阶段只允许命中缓存，不再对该页执行 JSON.parse。
+      const pageParses = parse.mock.calls.filter(([text]) => text === page);
+      expect(pageParses.length).toBeLessThanOrEqual(1);
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it('F2: serializes preserved root fields once across repeated raw writes', () => {
+    const h = createHarness();
+    const creeps = { a: { id: 1 } };
+    h.plat.setRaw(JSON.stringify({ creeps }));
+    let accessor!: MemoryAccessor<{ n: number }>;
+    h.run(() => {
+      accessor = h.manager.bind('f2')('main', {
+        version: 1,
+        layer: 'critical',
+        initialize: () => ({ n: 0 }),
+      });
+    });
+    h.settle();
+
+    const stringify = jest.spyOn(JSON, 'stringify');
+    try {
+      for (let i = 1; i <= 5; i++)
+        h.run(() => {
+          const access = accessor.access();
+          if (access.status === 'ready')
+            access.commit((memory) => (memory.n = i));
+        });
+      const creepSerializations = stringify.mock.calls.filter(
+        ([value]) => value !== null && typeof value === 'object' && 'a' in value
+      );
+      expect(creepSerializations.length).toBeLessThanOrEqual(1);
+    } finally {
+      stringify.mockRestore();
+    }
+    // 缓存不影响输出：保留字段仍完整写回，分区数据是最新值。
+    const raw = JSON.parse(h.plat.raw());
+    expect(raw.creeps).toEqual(creeps);
+    expect(raw.memoryManager.rawPartitions.f2.main.payload).toEqual({ n: 5 });
+  });
+
+  it.each([
+    ['number', 5],
+    ['string', 'str'],
+    ['array', [1]],
+    ['null', null],
+  ])(
+    'F3: raw payload %s is reported as recovery instead of ready/loading',
+    (_name, payload) => {
+      const h = createHarness();
+      h.plat.setRaw(
+        JSON.stringify({
+          memoryManager: {
+            schemaVersion: 1,
+            generationCounter: 0,
+            allocations: { bad: { main: { backend: 'raw', generation: 0 } } },
+            rawPartitions: { bad: { main: { dataVersion: 1, payload } } },
+            migration: null,
+          },
+        })
+      );
+      let accessor!: MemoryAccessor<{ n: number }>;
+      h.run(() => {
+        accessor = h.manager.bind('bad')('main', {
+          version: 1,
+          layer: 'critical',
+          initialize: () => ({ n: 0 }),
+        });
+      });
+      h.run();
+      const access = accessor.access();
+      expect(access.status).toBe('pending');
+      if (access.status === 'pending') expect(access.reason).toBe('recovery');
+    }
+  );
+
+  it('F3: a segment envelope with a non-object payload is reported as recovery', () => {
+    const h = createHarness({ segmentIds: [0] });
+    h.run(() => {
+      h.manager.bind('seg')('main', {
+        version: 1,
+        layer: 'critical',
+        priority: 1,
+        initialize: () => ({ n: 1 }),
+      });
+    });
+    h.settle();
+    const envelope = JSON.parse(h.plat.content()[0]);
+    envelope.payload = [1];
+    h.plat.content()[0] = JSON.stringify(envelope);
+
+    const second = createMemoryManager({
+      platform: h.plat.platform,
+      segmentIds: [0],
+    });
+    let accessor!: MemoryAccessor<{ n: number }>;
+    for (let tick = 100; tick < 106; tick++) {
+      second.begin(tick);
+      accessor ??= second.bind('seg')('main', {
+        version: 1,
+        layer: 'critical',
+        priority: 1,
+        initialize: () => ({ n: 1 }),
+      });
+      second.end(tick);
+      h.plat.nextTick();
+    }
+    const access = accessor.access();
+    expect(access.status).toBe('pending');
+    if (access.status === 'pending') expect(access.reason).toBe('recovery');
+  });
+
+  it('F3b: refuses to hand an oversized Memory text to the engine', () => {
+    const h = createHarness();
+    const writes = jest.spyOn(h.plat.platform, 'writeRaw');
+    let accessor!: MemoryAccessor<{ blob: string }>;
+    h.run(() => {
+      accessor = h.manager.bind('big')('main', {
+        version: 1,
+        layer: 'critical',
+        initialize: () => ({ blob: '' }),
+      });
+    });
+    const before = writes.mock.calls.length;
+    h.run(() => {
+      const access = accessor.access();
+      if (access.status === 'ready')
+        access.commit((memory) => (memory.blob = 'x'.repeat(2_200_000)));
+    });
+    expect(writes.mock.calls.length).toBe(before);
+    expect(JSON.stringify(h.manager.getStatus())).toContain('exceeds');
+  });
+});

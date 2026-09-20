@@ -78,7 +78,7 @@ const plugin: LeviathanPlugin = {
 | `segment-activating` | 目标页尚未激活（请求后下一 tick 可见） | 下一 tick 重试 |
 | `migration` | 分区正在搬迁，写入被冻结 | 等待迁移完成，继续无关工作 |
 | `verification` | 搬迁副本等待回读校验 | 同上 |
-| `recovery` | 数据损坏、归属不符或版本异常 | 由 `getStatus().fault/writeError` 暴露；页内容恢复一致后会在后续 tick 自动重读自愈，`writeError` 保留最近一次故障供回溯 |
+| `recovery` | 数据损坏、归属不符、版本异常，或已存储 payload 不是键值对象 | 由 `getStatus().fault/writeError` 暴露；页内容恢复一致后会在后续 tick 自动重读自愈，`writeError` 保留最近一次故障供回溯 |
 
 `retryAt` 是建议重试 tick，不保证到期就绪。Framework 不会因为 pending 跳过插件的其它钩子、禁止其 Intent 或计入失败。
 
@@ -88,6 +88,7 @@ const plugin: LeviathanPlugin = {
 - 主 Memory 只重新序列化变化的分区与目录；完全 clean 的 tick 不写 RawMemory；Segment 分区只写自己的页。
 - 写入失败保留 dirty 与 `writeError`，下一 tick 重试；单个 Segment 分区失败不影响其它分区。
 - 单页容量上限约 100 KB（当前按 JSON 字符数计量），超限拒绝写入并保留旧数据，不自动拆页。
+- 主 Memory 序列化文本超过 2 097 152 字符时整串拒绝写入（不交给引擎），相关分区保持 dirty 并在 `writeError` 中给出体积；缩减数据后下一 tick 自动重试。
 
 ## 分配与迁移
 
