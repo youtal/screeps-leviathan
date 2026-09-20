@@ -46,6 +46,7 @@ const harness = (plugins: LeviathanPlugin[] = [], extra: any = {}) => {
   (globalThis as any).RawMemory = { get: read, set: write };
   /** 大多数 Framework 用例不测试持久化：注入显式空端口，保留旧用例的无存储语义。 */
   const unassembledMemory: MemoryHost = {
+    getStatus: () => ({ rawWriteError: null }),
     begin: () => undefined,
     end: () => undefined,
     deferStartupWindow: () => undefined,
@@ -788,6 +789,7 @@ describe('ErrorMapper', () => {
       success: jest.fn(),
       info: jest.fn(),
       report: jest.fn(),
+      isEnabled: jest.fn(() => true),
     }));
     const mapper = createErrorMapper(
       { scope } as unknown as Parameters<typeof createErrorMapper>[0],
@@ -809,7 +811,217 @@ describe('ErrorMapper', () => {
 });
 
 /** Framework 与 MemoryManager 的接线：框架按 pluginId 绑定申请入口并在 tick 边界驱动存储。 */
+/** S02：critical 订阅者失败要在发布者的钩子返回前生效，后续业务动作不能再执行。 */
+describe('Framework critical event listener failure', () => {
+  const criticalListener = (trace: string[]) =>
+    plugin('critical', {
+      manifest: { id: 'critical', version: 1, critical: true },
+      setup: (c) => {
+        c.events.subscribe({ scope: 'global' }, 'creep:spawn', 'broken', () => {
+          trace.push('listener');
+          throw new Error('critical listener failed');
+        });
+      },
+    });
+  const worker = (trace: string[]) =>
+    plugin('worker', {
+      onTickExecute: (c) => {
+        c.intents.submit({
+          subjectId: 'w',
+          channel: 'move',
+          execute: () => {
+            trace.push('business');
+            return 0 as ScreepsReturnCode;
+          },
+        });
+      },
+    });
+  const spawn = { creepName: 'probe' };
+
+  it.each(['onTickBegin', 'onTickExecute'] as const)(
+    'skips later business work when the event is published from %s',
+    (hook) => {
+      const trace: string[] = [];
+      const h = harness([
+        criticalListener(trace),
+        plugin('publisher', {
+          [hook]: (c: any) =>
+            c.events.publish({ scope: 'global' }, 'creep:spawn', spawn),
+        }),
+        worker(trace),
+      ]);
+      h.framework.loop();
+      expect(trace).toEqual(['listener']);
+      const status = h.framework.getStatus();
+      expect(status.safeMode).toBe(true);
+      expect(status.failures[0].pluginId).toBe('critical');
+    }
+  );
+
+  it('stops the remaining intents when the event is published during commit', () => {
+    const trace: string[] = [];
+    const h = harness([
+      criticalListener(trace),
+      plugin('publisher', {
+        onTickExecute: (c) => {
+          c.intents.submit({
+            subjectId: 'p',
+            channel: 'move',
+            execute: () => {
+              c.events.publish({ scope: 'global' }, 'creep:spawn', spawn);
+              return 0 as ScreepsReturnCode;
+            },
+          });
+        },
+      }),
+      worker(trace),
+    ]);
+    h.framework.loop();
+    expect(trace).toEqual(['listener']);
+    expect(h.framework.getStatus().safeMode).toBe(true);
+  });
+
+  it('keeps isolating failures of non-critical subscribers', () => {
+    const trace: string[] = [];
+    const h = harness([
+      plugin('flaky', {
+        setup: (c) => {
+          c.events.subscribe({ scope: 'global' }, 'creep:spawn', 'x', () => {
+            throw new Error('non-critical');
+          });
+        },
+      }),
+      plugin('publisher', {
+        onTickBegin: (c) =>
+          c.events.publish({ scope: 'global' }, 'creep:spawn', spawn),
+      }),
+      worker(trace),
+    ]);
+    h.framework.loop();
+    expect(trace).toEqual(['business']);
+    expect(h.framework.getStatus().safeMode).toBe(false);
+  });
+});
+
 describe('Framework memory integration', () => {
+  /** S04：真实 MemoryManager 下，停用再启用与 setup 重试都复用同一声明，数据延续且不重复初始化。 */
+  it('reapplies a stable memory declaration after disable/enable and a failed setup', () => {
+    let raw = '{}';
+    const manager = createMemoryManager({
+      segmentIds: [],
+      platform: {
+        readRaw: () => raw,
+        writeRaw: (text) => {
+          raw = text;
+        },
+        readSegments: () => ({}),
+        writeSegment: () => undefined,
+        activeSegments: () => [],
+        activateSegments: () => undefined,
+      },
+    });
+    const initialize = jest.fn(() => ({ n: 0 }));
+    const options = { version: 1, layer: 'critical', initialize } as const;
+    let setups = 0;
+    let executions = 0;
+    let accessor: MemoryAccessor<{ n: number }>;
+    const h = harness(
+      [
+        plugin('consumer', {
+          setup(context) {
+            accessor = context.memory('main', options);
+            // 首次 setup 在申请成功后失败：重试必须复用同一声明而不是冲突。
+            if (++setups === 1) throw new Error('setup retry');
+          },
+          onTickExecute() {
+            executions++;
+            const access = accessor.access();
+            if (access.status === 'ready')
+              access.commit((data) => {
+                data.n++;
+              });
+          },
+        }),
+      ],
+      { memory: manager }
+    );
+    for (let i = 0; i < 6; i++) h.next();
+    h.framework.disable('consumer');
+    h.next();
+    h.framework.enable('consumer');
+    for (let i = 0; i < 3; i++) h.next();
+
+    const failures = h.framework.getStatus().failures;
+    expect(
+      failures.some((f) => /conflicting declaration/.test(f.message))
+    ).toBe(false);
+    expect(initialize).toHaveBeenCalledTimes(1);
+    expect(executions).toBeGreaterThan(1);
+    const stored = JSON.parse(raw).memoryManager.rawPartitions.consumer.main;
+    expect(stored.payload.n).toBeGreaterThan(1);
+  });
+
+  it('exposes raw write failure and recovery without blocking corrective plugin work', () => {
+    let raw = '{}';
+    let accessor: MemoryAccessor<{ blob: string }>;
+    let blob = 'x'.repeat(2_200_000);
+    const manager = createMemoryManager({
+      segmentIds: [],
+      platform: {
+        readRaw: () => raw,
+        writeRaw: (text) => {
+          raw = text;
+        },
+        readSegments: () => ({}),
+        writeSegment: () => undefined,
+        activeSegments: () => [],
+        activateSegments: () => undefined,
+      },
+    });
+    const execute = jest.fn(() => {
+      const access = accessor.access();
+      expect(access.status).toBe('ready');
+      if (access.status === 'ready')
+        access.commit((data) => {
+          data.blob = blob;
+        });
+    });
+    const h = harness(
+      [
+        plugin('writer', {
+          setup(context) {
+            accessor = context.memory('main', {
+              version: 1,
+              layer: 'critical',
+              initialize: () => ({ blob: '' }),
+            });
+          },
+          onTickExecute: execute,
+        }),
+      ],
+      { memory: manager }
+    );
+    h.next();
+    h.next();
+    const failed = h.framework.getStatus();
+    expect(failed.memory.rawWriteError).toContain('exceeds');
+    expect(failed.safeMode).toBe(false);
+    expect(failed.failures).toEqual([]);
+    expect(manager.getStatus().allocations[0].dirty).toBe(true);
+    expect(raw).toBe('{}');
+    failed.memory.rawWriteError = null;
+    expect(h.framework.getStatus().memory.rawWriteError).toContain('exceeds');
+
+    blob = 'recovered';
+    h.next();
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(h.framework.getStatus().memory.rawWriteError).toBeNull();
+    expect(manager.getStatus().allocations[0].dirty).toBe(false);
+    expect(
+      JSON.parse(raw).memoryManager.rawPartitions.writer.main.payload.blob
+    ).toBe('recovered');
+  });
+
   /** 只服务本组用例的假平台：raw 整串 + 一 tick 延迟可见的 Segment。 */
   const createPlatform = () => {
     let raw = '{}';
@@ -940,6 +1152,7 @@ describe('Framework memory integration', () => {
         throw new Error('end boom');
       }),
       deferStartupWindow: jest.fn(),
+      getStatus: () => ({ rawWriteError: null }),
       bind: jest.fn(),
     };
     const h = harness([plugin('consumer', { onTickExecute })], {
@@ -959,6 +1172,7 @@ describe('Framework memory integration', () => {
       }),
       end: jest.fn(),
       deferStartupWindow: jest.fn(),
+      getStatus: () => ({ rawWriteError: null }),
       bind: jest.fn(),
     };
     const h2 = harness([plugin('consumer', {})], { memory: beginBoom });

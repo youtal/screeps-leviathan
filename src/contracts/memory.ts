@@ -3,7 +3,7 @@
  *
  * 模块角色：contracts 中的持久存储协议，是业务模块与 MemoryManager 之间的访问约定。
  *
- * 主要功能：声明分区申请、初始化与版本迁移、读写访问，以及宿主 begin/end 生命周期。
+ * 主要功能：声明分区申请、初始化与版本迁移、读写访问、宿主 begin/end 生命周期及最小写入诊断。
  *
  * 实现过程：按 owner 绑定申请函数，以 localId 和选项取得稳定访问器；每 tick 调用 access，
  * 根据 pending/ready 分支决定等待或通过 query、commit 访问数据。
@@ -63,6 +63,8 @@ export type ApplyMemoryAccessor = <M extends object>(
  * 不能返回永久 pending 的访问器；存储未就绪属于等待，用 pending 表达。
  */
 export interface MemoryHost {
+  /** 最小宿主诊断；实现可返回更多字段，Framework 只依赖整串写入故障。 */
+  getStatus(): { rawWriteError: string | null };
   begin(tick: number): void;
   end(tick: number): void;
   /** 本轮未完成全部启动申请时延后封存窗口（例如框架提前进入安全模式）。 */

@@ -25,6 +25,7 @@ const createLog = () => ({
   success: jest.fn(),
   info: jest.fn(),
   report: jest.fn(),
+  isEnabled: jest.fn(() => true),
 });
 
 /**
@@ -225,6 +226,28 @@ describe('RoomShortcuts', () => {
     expect(harness.room.find).toHaveBeenCalledTimes(6);
   });
 
+  /** F4：无视野只按房间告警一次，不使用 error 等级；恢复视野后再次失去时重新告警。 */
+  it('warns once per vision loss without logging errors', () => {
+    const harness = createHarness();
+    harness.setVision(false);
+    for (let i = 0; i < 5; i++) {
+      expect(harness.shortcuts.getSpawn('W1N1')).toEqual([]);
+      expect(harness.shortcuts.getSource('W1N1')).toEqual([]);
+    }
+    const visionWarns = () =>
+      harness.log.warn.mock.calls.filter(([message]: [string]) =>
+        message.includes('no visual on Room W1N1')
+      );
+    expect(visionWarns()).toHaveLength(1);
+    expect(harness.log.error).not.toHaveBeenCalled();
+
+    harness.setVision(true);
+    harness.shortcuts.getSpawn('W1N1');
+    harness.setVision(false);
+    harness.shortcuts.getSpawn('W1N1');
+    expect(visionWarns()).toHaveLength(2);
+  });
+
   /** 缓存命中的 id 仍可能已被销毁（getObjectById 返回 null）：集合里过滤掉，单体查询降级为 undefined。 */
   it('filters stale IDs from collections and returns undefined for a stale single object', () => {
     const harness = createHarness();
@@ -324,6 +347,89 @@ describe('RoomShortcuts', () => {
 
     expect(harness.shortcuts.getSpawn('W1N1')).toEqual([first, built]);
     expect(harness.shortcuts.getSpawn('W2N2')).toEqual([second]);
+  });
+
+  /** A08：structure:built 的增量分支——未初始化跳过、重复投递去重、对象缺失或房间不符时失效。 */
+  describe('structure:built incremental branches', () => {
+    const spawn = (id: string, roomName = 'W1N1') => ({
+      id,
+      structureType: STRUCTURE_SPAWN,
+      pos: { roomName },
+    });
+    const emit = (harness: ReturnType<typeof createHarness>, id: string) =>
+      harness.listeners.get('structure:built')!({
+        roomName: 'W1N1',
+        structureId: id,
+      });
+
+    it('ignores events for rooms that have not been initialized', () => {
+      const harness = createHarness();
+      const built = spawn('spawn-new');
+      harness.addObject(built);
+      emit(harness, built.id);
+      expect(harness.room.find).not.toHaveBeenCalled();
+      harness.setStructures([built]);
+      expect(harness.shortcuts.getSpawn('W1N1')).toEqual([built]);
+    });
+
+    it('skips a duplicate delivery of the same structure', () => {
+      const harness = createHarness();
+      const first = spawn('spawn-1');
+      harness.setStructures([first]);
+      harness.shortcuts.getSpawn('W1N1');
+      emit(harness, first.id);
+      expect(harness.shortcuts.getSpawn('W1N1')).toEqual([first]);
+      expect(harness.log.warn).toHaveBeenCalledWith(
+        expect.stringContaining('already in shortcuts')
+      );
+    });
+
+    it('starts a new category with an empty array before appending', () => {
+      const harness = createHarness();
+      const first = spawn('spawn-1');
+      harness.setStructures([first]);
+      harness.shortcuts.getSpawn('W1N1');
+      const storage = {
+        id: 'storage-1',
+        structureType: STRUCTURE_STORAGE,
+        pos: { roomName: 'W1N1' },
+      };
+      harness.addObject(storage);
+      emit(harness, storage.id);
+      expect(harness.shortcuts.getStorage('W1N1')).toEqual(storage);
+    });
+
+    it('invalidates the room when the built object cannot be found', () => {
+      const harness = createHarness();
+      harness.setStructures([spawn('spawn-1')]);
+      harness.shortcuts.getSpawn('W1N1');
+      const finds = jest.mocked(harness.room.find).mock.calls.length;
+      emit(harness, 'ghost');
+      expect(harness.log.error).toHaveBeenCalledWith(
+        expect.stringContaining('not found')
+      );
+      harness.shortcuts.getSpawn('W1N1');
+      expect(jest.mocked(harness.room.find).mock.calls.length).toBeGreaterThan(
+        finds
+      );
+    });
+
+    it('invalidates the room when the built object belongs to another room', () => {
+      const harness = createHarness();
+      harness.setStructures([spawn('spawn-1')]);
+      harness.shortcuts.getSpawn('W1N1');
+      const finds = jest.mocked(harness.room.find).mock.calls.length;
+      const foreign = spawn('spawn-far', 'W9N9');
+      harness.addObject(foreign);
+      emit(harness, foreign.id);
+      expect(harness.log.warn).toHaveBeenCalledWith(
+        expect.stringContaining('not event room')
+      );
+      harness.shortcuts.getSpawn('W1N1');
+      expect(jest.mocked(harness.room.find).mock.calls.length).toBeGreaterThan(
+        finds
+      );
+    });
   });
 
   /** 租约按 Game.time 判定：边界 tick（5000）仍算有效，超过之后才允许重建，用来固定比较符的边界语义。 */

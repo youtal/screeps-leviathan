@@ -26,6 +26,33 @@ describe('EventBus', () => {
     jest.restoreAllMocks();
   });
 
+  /** F7：info 关闭时通知路径不调用 info（模板字符串也就不会求值）；开启时照常输出。 */
+  it.each([false, true])(
+    'gates per-subscriber info logs on isEnabled=%s',
+    (enabled) => {
+      const info = jest.fn();
+      const logger = {
+        debug: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+        success: jest.fn(),
+        info,
+        report: jest.fn(),
+        isEnabled: jest.fn((level: string) =>
+          level === 'info' ? enabled : true
+        ),
+      };
+      const bus = createCoreBus({ scope: () => logger } as never);
+      bus.subscribe({ scope: 'global' }, 'creep:spawn', 'sub', jest.fn());
+      info.mockClear();
+      bus.publish({ scope: 'global' }, 'creep:spawn', { creepName: 'c' });
+      const notifyLogs = info.mock.calls.filter(([m]) =>
+        String(m).includes('subscriber sub')
+      );
+      expect(notifyLogs.length).toBe(enabled ? 2 : 0);
+    }
+  );
+
   it('should subscribe and publish global events', () => {
     const bus = createBus();
     const mockListener = jest.fn();

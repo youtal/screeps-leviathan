@@ -75,7 +75,7 @@ framework.register({
 | `enable(id)` / `disable(id)` | 排队启停；依赖停用时使用者自动挂起              |
 | `unregister(id)`             | 排队卸载，不存在时忽略，不触碰外部存储         |
 | `recover(id)`                | 在 loop 外清除已安装插件的连续失败与熔断状态    |
-| `getStatus()`                | 最近一次 tick、safeMode 和结构化故障列表        |
+| `getStatus()`                | 最近一次 tick、safeMode、结构化故障列表与 `memory.rawWriteError` |
 
 管理命令以批次校验。重复 id、缺失依赖、依赖环或重复服务会使整批失败；当前 tick 不运行业务，旧注册表保留，可在下一 tick 恢复。移除仍被其他插件 requires 的提供者需在同一批中同时移除使用者。
 
@@ -132,6 +132,8 @@ onTickExecute(context) {
 
 ## 配置与诊断
 
+`framework.getStatus().memory.rawWriteError` 为主 Memory 最近一次整串写入失败原因，成功后为 null。该字段通过 Runtime 的 MemoryHost 读取，仅查询状态时投影，不增加每 tick 轮询。写入失败不计入插件故障，也不强制 safeMode 或存储 pending，插件仍可缩减数据后重试。返回的 memory 对象是独立快照。
+
 | 配置               | 默认值                  | 说明                                           |
 | ------------------ | ----------------------- | ---------------------------------------------- |
 | `runtime`          | 必填                    | 完整 Core Runtime；Framework 不创建其中的能力  |
@@ -142,7 +144,7 @@ onTickExecute(context) {
 
 Profiler、Logger、MemoryManager、ErrorMapper、Game 访问器及 source map/report 选项在创建 Runtime 时配置，不能通过 `FrameworkOptions` 分散替换。
 
-`critical` 仅给基础服务使用。其失败会阻止剩余业务提交，熔断后需显式 recover。安全模式不会自动执行生存策略。
+`critical` 仅给基础服务使用。其失败会阻止剩余业务提交（包括它作为事件订阅者在他人发布事件时失败），熔断后需显式 recover。安全模式不会自动执行生存策略。
 
 Profiler 的 calls 包含失败调用。健康记录仅在实例 heap 中累计失败与熔断，recover 清除连续失败和熔断。错误映射成本单独归入框架标签。
 

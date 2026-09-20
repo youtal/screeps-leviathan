@@ -32,6 +32,14 @@ export const LEGACY_NAMESPACE_KEY = 'leviathan';
  */
 export const SEGMENT_CAPACITY = 100_000;
 
+/**
+ * 主 Memory 序列化文本的长度上限：官方 driver 的 RawMemory.set 使用 string.length
+ * 与 2 * 1024 * 1024 比较，单位是 UTF-16 码元，不是 UTF-8 字节或 Unicode 码点。
+ * 核验来源与边界测试见 docs/audits/2026-09-20-remediation.md §9。
+ * 超限时整串写入被拒绝并按 rawWriteError / writeError 诊断。
+ */
+export const RAW_MEMORY_LIMIT = 2_097_152;
+
 /** 主 Memory 命名空间的当前 schema 版本；未知版本拒绝覆盖。 */
 export const NAMESPACE_SCHEMA_VERSION = 1;
 
@@ -144,6 +152,12 @@ export interface PartitionPending {
 export interface MemoryManagerStatus {
   loaded: boolean;
   fault: string | null;
+  /**
+   * 主 Memory 整串写入的最近一次失败原因（体积超限、引擎抛错等）；写入成功后清空。
+   * 与 fault（存储无法加载，阻断所有申请）不同，它只表示写入暂时失败、下一 tick 会重试，
+   * 且不依赖是否存在待提交的 Raw 分区——宿主根字段或目录变化导致的失败同样会体现。
+   */
+  rawWriteError: string | null;
   tick: number;
   startupWindowOpen: boolean;
   /** 启动窗口是否因申请迟迟不收齐而被强制封存（超过延后上限）。 */

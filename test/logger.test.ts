@@ -71,6 +71,15 @@ describe('createLogging', () => {
     expect(texts(lines)).toEqual(['[S] d', '[S] w']);
   });
 
+  /** F7：isEnabled 与实际输出一致，热路径可据此跳过日志文本拼接。 */
+  it('reports level availability consistently with what it emits', () => {
+    const { factory } = collect();
+    const log = factory.scope('S', { levels: { report: false, debug: true } });
+    expect(log.isEnabled('report')).toBe(false);
+    expect(log.isEnabled('debug')).toBe(true);
+    expect(log.isEnabled('warn')).toBe(true);
+  });
+
   it('formats the scope prefix with the level colour and bold style', () => {
     const { factory, lines } = collect();
 

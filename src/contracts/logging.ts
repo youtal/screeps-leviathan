@@ -3,7 +3,7 @@
  *
  * 模块角色：contracts 中的日志协议，隔开日志使用者、日志工厂与实际输出方式。
  *
- * 主要功能：声明六种日志方法、等级开关、控制台与通知输出接口，以及全局和作用域配置。
+ * 主要功能：声明六种日志方法、等级开关与等级查询、控制台与通知输出接口，以及全局和作用域配置。
  *
  * 实现过程：LoggingOptions 提供创建时的策略，LoggerFactory.scope 根据名称与局部覆盖返回 Logger；
  * 格式化后的文本交给 LogOutput 的 write 或 notify。
@@ -28,6 +28,11 @@ export interface Logger {
   success(content: string): void;
   info(content: string): void;
   report(content: string): void;
+  /**
+   * 该等级当前是否会输出。等级在创建作用域时已经确定、运行期不变，因此热路径可以在
+   * 拼接日志文本之前先查询，关闭时跳过模板字符串求值（JS 会在调用前求值实参）。
+   */
+  isEnabled(level: keyof LogOptions): boolean;
 }
 
 /**

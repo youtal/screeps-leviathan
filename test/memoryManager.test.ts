@@ -2132,3 +2132,413 @@ describe('audit P1 migration recovery', () => {
     ).toEqual({ n: 11 });
   });
 });
+
+describe('MemoryManager audit remediation 2026-09-20', () => {
+  it('R4: refreshes cached page ownership after text changes and clearing', () => {
+    const h = createHarness({ segmentIds: [0] });
+    const foreign = (owner: string) =>
+      JSON.stringify({
+        schemaVersion: 1,
+        owner: { pluginId: owner, localId: 'main' },
+        generation: 1,
+        dataVersion: 1,
+        payload: { blob: 'x'.repeat(64_000) },
+      });
+    h.plat.content()[0] = foreign('first');
+    h.run();
+    h.run();
+    expect(JSON.stringify(h.manager.getStatus().reservedSegments)).toContain(
+      'first/main'
+    );
+    const parse = jest.spyOn(JSON, 'parse');
+    try {
+      h.run();
+      h.run();
+      expect(parse).not.toHaveBeenCalled();
+      h.plat.content()[0] = foreign('second');
+      h.run();
+      expect(parse).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(h.manager.getStatus().reservedSegments)).toContain(
+        'second/main'
+      );
+      h.plat.content()[0] = '';
+      h.run();
+      expect(h.manager.getStatus().reservedSegments).toEqual([]);
+      h.plat.content()[0] = foreign('first');
+      h.run();
+      expect(parse).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify(h.manager.getStatus().reservedSegments)).toContain(
+        'first/main'
+      );
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it.each(['汉', '😀'])(
+    'R2: checks the exact UTF-16 boundary with %s content',
+    (character) => {
+      const host = { blob: '' };
+      const h = createHarness({ segmentIds: [], getHostMemory: () => host });
+      h.run();
+      h.run();
+      const overhead = h.plat.raw().length;
+      const available = 2_097_152 - overhead;
+      host.blob =
+        character.repeat(Math.floor(available / character.length)) +
+        'x'.repeat(available % character.length);
+      const writes = jest.spyOn(h.plat.platform, 'writeRaw');
+      h.run();
+      expect(writes).toHaveBeenCalledTimes(1);
+      expect(h.plat.raw().length).toBe(2_097_152);
+      expect(h.manager.getStatus().rawWriteError).toBeNull();
+      host.blob += 'x';
+      h.run();
+      expect(writes).toHaveBeenCalledTimes(1);
+      expect(h.manager.getStatus().rawWriteError).toContain(
+        '2097153 chars exceeds 2097152'
+      );
+    }
+  );
+
+  it('F1: does not re-parse an unchanged segment page on idle ticks', () => {
+    const h = createHarness({ segmentIds: [0] });
+    h.run(() => {
+      h.manager.bind('cache')('main', {
+        version: 1,
+        layer: 'critical',
+        priority: 1,
+        initialize: () => ({ n: 1 }),
+      });
+    });
+    h.settle();
+    const page = h.plat.content()[0];
+    expect(page).toContain('"n":1');
+
+    const parse = jest.spyOn(JSON, 'parse');
+    try {
+      for (let i = 0; i < 5; i++) h.run();
+      // 页文本未变：观察阶段只允许命中缓存，不再对该页执行 JSON.parse。
+      const pageParses = parse.mock.calls.filter(([text]) => text === page);
+      expect(pageParses.length).toBeLessThanOrEqual(1);
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it('F2: serializes preserved root fields once across repeated raw writes', () => {
+    const h = createHarness();
+    const creeps = { a: { id: 1 } };
+    h.plat.setRaw(JSON.stringify({ creeps }));
+    let accessor!: MemoryAccessor<{ n: number }>;
+    h.run(() => {
+      accessor = h.manager.bind('f2')('main', {
+        version: 1,
+        layer: 'critical',
+        initialize: () => ({ n: 0 }),
+      });
+    });
+    h.settle();
+
+    const stringify = jest.spyOn(JSON, 'stringify');
+    try {
+      for (let i = 1; i <= 5; i++)
+        h.run(() => {
+          const access = accessor.access();
+          if (access.status === 'ready')
+            access.commit((memory) => (memory.n = i));
+        });
+      const creepSerializations = stringify.mock.calls.filter(
+        ([value]) => value !== null && typeof value === 'object' && 'a' in value
+      );
+      expect(creepSerializations.length).toBeLessThanOrEqual(1);
+    } finally {
+      stringify.mockRestore();
+    }
+    // 缓存不影响输出：保留字段仍完整写回，分区数据是最新值。
+    const raw = JSON.parse(h.plat.raw());
+    expect(raw.creeps).toEqual(creeps);
+    expect(raw.memoryManager.rawPartitions.f2.main.payload).toEqual({ n: 5 });
+  });
+
+  it.each([
+    ['number', 5],
+    ['string', 'str'],
+    ['array', [1]],
+    ['null', null],
+  ])(
+    'F3: raw payload %s is reported as recovery instead of ready/loading',
+    (_name, payload) => {
+      const h = createHarness();
+      h.plat.setRaw(
+        JSON.stringify({
+          memoryManager: {
+            schemaVersion: 1,
+            generationCounter: 0,
+            allocations: { bad: { main: { backend: 'raw', generation: 0 } } },
+            rawPartitions: { bad: { main: { dataVersion: 1, payload } } },
+            migration: null,
+          },
+        })
+      );
+      let accessor!: MemoryAccessor<{ n: number }>;
+      h.run(() => {
+        accessor = h.manager.bind('bad')('main', {
+          version: 1,
+          layer: 'critical',
+          initialize: () => ({ n: 0 }),
+        });
+      });
+      h.run();
+      const access = accessor.access();
+      expect(access.status).toBe('pending');
+      if (access.status === 'pending') expect(access.reason).toBe('recovery');
+    }
+  );
+
+  it('F3: a segment envelope with a non-object payload is reported as recovery', () => {
+    const h = createHarness({ segmentIds: [0] });
+    h.run(() => {
+      h.manager.bind('seg')('main', {
+        version: 1,
+        layer: 'critical',
+        priority: 1,
+        initialize: () => ({ n: 1 }),
+      });
+    });
+    h.settle();
+    const envelope = JSON.parse(h.plat.content()[0]);
+    envelope.payload = [1];
+    h.plat.content()[0] = JSON.stringify(envelope);
+
+    const second = createMemoryManager({
+      platform: h.plat.platform,
+      segmentIds: [0],
+    });
+    let accessor!: MemoryAccessor<{ n: number }>;
+    for (let tick = 100; tick < 106; tick++) {
+      second.begin(tick);
+      accessor ??= second.bind('seg')('main', {
+        version: 1,
+        layer: 'critical',
+        priority: 1,
+        initialize: () => ({ n: 1 }),
+      });
+      second.end(tick);
+      h.plat.nextTick();
+    }
+    const access = accessor.access();
+    expect(access.status).toBe('pending');
+    if (access.status === 'pending') expect(access.reason).toBe('recovery');
+  });
+
+  it('F3b: refuses to hand an oversized Memory text to the engine', () => {
+    const h = createHarness();
+    const writes = jest.spyOn(h.plat.platform, 'writeRaw');
+    let accessor!: MemoryAccessor<{ blob: string }>;
+    h.run(() => {
+      accessor = h.manager.bind('big')('main', {
+        version: 1,
+        layer: 'critical',
+        initialize: () => ({ blob: '' }),
+      });
+    });
+    const before = writes.mock.calls.length;
+    h.run(() => {
+      const access = accessor.access();
+      if (access.status === 'ready')
+        access.commit((memory) => (memory.blob = 'x'.repeat(2_200_000)));
+    });
+    expect(writes.mock.calls.length).toBe(before);
+    expect(JSON.stringify(h.manager.getStatus())).toContain('exceeds');
+  });
+
+  /** F3b 复审：失败不依赖待提交分区——只有宿主根字段超限时也必须有管理器级诊断。 */
+  it('F3b: reports an oversized write caused only by host root fields', () => {
+    const sink = collecting();
+    const host: Record<string, unknown> = { creeps: {} };
+    const h = createHarness({
+      logging: sink.logging,
+      getHostMemory: () => host,
+    });
+    const writes = jest.spyOn(h.plat.platform, 'writeRaw');
+    h.run();
+    h.run();
+    expect(h.manager.getStatus().rawWriteError).toBeNull();
+
+    const before = writes.mock.calls.length;
+    host.creeps = { blob: 'x'.repeat(2_200_000) };
+    h.run();
+    h.run();
+
+    expect(writes.mock.calls.length).toBe(before);
+    expect(h.manager.getStatus().rawWriteError).toContain('exceeds');
+    expect(h.manager.getStatus().fault).toBeNull();
+    const warns = sink
+      .text()
+      .split('\n')
+      .filter((line) => line.includes('raw memory write failed'));
+    expect(warns).toHaveLength(1);
+
+    // 缩小后下一 tick 自动重试成功，诊断清空。
+    host.creeps = {};
+    h.run();
+    expect(h.manager.getStatus().rawWriteError).toBeNull();
+    expect(writes.mock.calls.length).toBeGreaterThan(before);
+  });
+
+  /** S01a：switch journal 缺少 staged 项时不得写出缺值 Raw 记录，也不得清空有效 Segment 源。 */
+  it('S01: aborts a switch-to-raw move whose staged payload is missing and keeps the source', () => {
+    const h = createHarness({ segmentIds: [0] });
+    const source = JSON.stringify({
+      schemaVersion: 1,
+      owner: { pluginId: 'owner', localId: 'main' },
+      generation: 1,
+      dataVersion: 1,
+      payload: { n: 42 },
+    });
+    h.plat.content()[0] = source;
+    h.plat.setRaw(
+      JSON.stringify({
+        memoryManager: {
+          schemaVersion: 1,
+          generationCounter: 2,
+          allocations: {
+            owner: {
+              main: { backend: 'segment', segmentId: 0, generation: 1 },
+            },
+          },
+          rawPartitions: {},
+          migration: {
+            generation: 2,
+            phase: 'switch',
+            reason: 'preemption',
+            moves: [
+              {
+                pluginId: 'owner',
+                localId: 'main',
+                dataVersion: 1,
+                from: 'segment',
+                fromSegmentId: 0,
+                fromGeneration: 1,
+                to: 'raw',
+              },
+            ],
+            staged: {},
+          },
+        },
+      })
+    );
+    for (let i = 0; i < 4; i++) h.run();
+    const namespace = namespaceOf(h.plat.raw());
+    expect(h.plat.content()[0]).toBe(source);
+    expect(namespace.migration).toBeNull();
+    expect(namespace.allocations.owner.main.backend).toBe('segment');
+    expect(namespace.rawPartitions.owner).toBeUndefined();
+
+    const second = createMemoryManager({
+      platform: h.plat.platform,
+      segmentIds: [0],
+    });
+    let accessor!: MemoryAccessor<{ n: number }>;
+    for (let tick = 100; tick < 104; tick++) {
+      second.begin(tick);
+      accessor ??= second.bind('owner')('main', {
+        version: 1,
+        layer: 'critical',
+        initialize: () => ({ n: 0 }),
+      });
+      second.end(tick);
+      h.plat.nextTick();
+    }
+    expect(readyData(accessor)).toEqual({ n: 42 });
+  });
+
+  /** S01b：verify 阶段目标信封头完好但 payload 被改坏，不得删除有效 Raw 源。 */
+  it('S01: keeps the valid raw source when the verify target payload is corrupted', () => {
+    const h = createHarness({ segmentIds: [0] });
+    // 同一身份的重复申请要求声明引用稳定，选项必须在循环外创建一次。
+    const options = {
+      version: 1,
+      layer: 'critical' as const,
+      priority: 1,
+      initialize: () => ({ n: 0 }),
+    };
+    for (let i = 0; i < 8; i++) {
+      h.run(() => {
+        h.manager.bind('owner')('main', options);
+      });
+      if (h.manager.getStatus().migration?.phase === 'verify') break;
+    }
+    expect(h.manager.getStatus().migration?.phase).toBe('verify');
+    const corrupted = JSON.parse(h.plat.content()[0]);
+    corrupted.payload = null;
+    h.plat.content()[0] = JSON.stringify(corrupted);
+    for (let i = 0; i < 4; i++) h.run();
+
+    const namespace = namespaceOf(h.plat.raw());
+    expect(namespace.migration).toBeNull();
+    expect(namespace.allocations.owner.main.backend).toBe('raw');
+    expect(namespace.rawPartitions.owner.main.payload).toEqual({ n: 0 });
+  });
+
+  /** S03：不可表示的宿主根字段按原生对象序列化语义省略，输出必须仍是合法 JSON。 */
+  it.each([
+    ['undefined', () => undefined],
+    ['function', () => () => 1],
+    ['symbol', () => Symbol('x')],
+    ['toJSON undefined', () => ({ toJSON: () => undefined })],
+  ])(
+    'S03: omits a host root field holding %s and stays loadable',
+    (_name, make) => {
+      const host: Record<string, unknown> = { optional: make(), rooms: {} };
+      const h = createHarness({ getHostMemory: () => host });
+      const options = {
+        version: 1,
+        layer: 'critical' as const,
+        initialize: () => ({ n: 0 }),
+      };
+      h.run(() => {
+        h.manager.bind('owner')('main', options);
+      });
+      h.run();
+      const parsed = JSON.parse(h.plat.raw());
+      expect(parsed.rooms).toEqual({});
+      expect('optional' in parsed).toBe(false);
+      expect(h.manager.getStatus().rawWriteError).toBeNull();
+
+      const restarted = createMemoryManager({ platform: h.plat.platform });
+      restarted.begin(100);
+      expect(restarted.getStatus().fault).toBeNull();
+    }
+  );
+
+  /** S03：真正无法序列化（循环引用、BigInt）时报告写入失败，并保留最后一次有效文本。 */
+  it.each([
+    [
+      'circular',
+      () => {
+        const c: Record<string, unknown> = {};
+        c.self = c;
+        return c;
+      },
+    ],
+    ['bigint', () => BigInt(1)],
+  ])(
+    'S03: keeps the last valid raw text when a host field is %s',
+    (_name, make) => {
+      const host: Record<string, unknown> = { rooms: {} };
+      const h = createHarness({ getHostMemory: () => host });
+      h.run();
+      h.run();
+      const valid = h.plat.raw();
+      host.bad = make();
+      h.run();
+      expect(h.plat.raw()).toBe(valid);
+      expect(h.manager.getStatus().rawWriteError).not.toBeNull();
+      delete host.bad;
+      h.run();
+      expect(h.manager.getStatus().rawWriteError).toBeNull();
+    }
+  );
+});

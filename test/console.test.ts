@@ -124,3 +124,16 @@ describe('console template segments', () => {
     expect(helpSegments).not.toContain('');
   });
 });
+
+/** F6：替换值按字面量写入，键名按字面量匹配。 */
+describe('replaceHtml literal handling', () => {
+  it('keeps $ replacement patterns in values literally', () => {
+    expect(
+      replaceHtml('<b>{content}</b>', { content: 'cost $& and $1 and $$' })
+    ).toBe('<b>cost $& and $1 and $$</b>');
+  });
+
+  it('matches placeholder keys containing regex metacharacters literally', () => {
+    expect(replaceHtml('{a.b} {aXb}', { 'a.b': 'dot' })).toBe('dot {aXb}');
+  });
+});

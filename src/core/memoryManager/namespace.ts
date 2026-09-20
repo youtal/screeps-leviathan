@@ -339,6 +339,30 @@ export interface RawStore {
 export const createRawStore = (loaded: LoadedRoot): RawStore => {
   const { root, namespace } = loaded;
   const fragments = new Map<string, string>();
+  /**
+   * 非托管根字段的序列化片段缓存（键 → 已序列化的 `"key":value` 文本）。
+   *
+   * 只服务"没有宿主根对象"的路径：此时数据来源是加载时的 root 快照，只有本写入器
+   * 自己的 commitExternal 会改它，所以缓存可精确失效。传入 external 时（宿主
+   * Memory 可能被原地深层修改，引用比较发现不了）绝不读写该缓存，保持"每次现取"
+   * 的正确性。生命周期随写入器；global reset 后随重新加载重建。
+   * 换取：默认配置下不再每次写入对 creeps/rooms 等遗留大字段全量 JSON.stringify。
+   */
+  const foreignFragments = new Map<string, string>();
+
+  /**
+   * 生成一个非托管根字段的 `"key":value` 片段；不可表示的值返回空串表示省略。
+   *
+   * 手工拼接必须复刻 `JSON.stringify(object)` 对属性的语义：值为 undefined、函数、
+   * Symbol 或 toJSON 返回 undefined 时，`JSON.stringify(value)` 返回 undefined，
+   * 原生序列化会省略该属性；若照搬字符串拼接会写出 `"k":undefined` 这种非法 JSON，
+   * 下一次加载整体失败。循环引用、BigInt 等会直接抛错，由调用方的写入错误路径接住，
+   * 不会覆盖最后一次有效的主 Memory 文本。
+   */
+  const foreignFragmentOf = (key: string, value: unknown): string => {
+    const text: string | undefined = JSON.stringify(value);
+    return text === undefined ? '' : JSON.stringify(key) + ':' + text;
+  };
 
   const foreignKeys = (external: Record<string, unknown> | null): string[] => {
     const keys = new Set<string>();
@@ -369,8 +393,17 @@ export const createRawStore = (loaded: LoadedRoot): RawStore => {
       ? Object.keys(external).filter((key) => key !== NAMESPACE_KEY)
       : Object.keys(root).filter((key) => key !== NAMESPACE_KEY);
     for (const key of keys) {
-      const value = external ? external[key] : root[key];
-      entries.push(JSON.stringify(key) + ':' + JSON.stringify(value));
+      if (external) {
+        const fragment = foreignFragmentOf(key, external[key]);
+        if (fragment !== '') entries.push(fragment);
+        continue;
+      }
+      let fragment = foreignFragments.get(key);
+      if (fragment === undefined) {
+        fragment = foreignFragmentOf(key, root[key]);
+        foreignFragments.set(key, fragment);
+      }
+      if (fragment !== '') entries.push(fragment);
     }
     const allocations =
       fragments.get('allocations') ?? JSON.stringify(namespace.allocations);
@@ -407,6 +440,8 @@ export const createRawStore = (loaded: LoadedRoot): RawStore => {
 
   const commitExternal = (external: Record<string, unknown> | null): void => {
     if (!external || external === root) return;
+    // root 即将被宿主数据覆盖：快照片段全部作废（后续无 external 时会重新生成）。
+    foreignFragments.clear();
     for (const key of foreignKeys(external)) {
       if (key in external) root[key] = external[key];
       else delete root[key];

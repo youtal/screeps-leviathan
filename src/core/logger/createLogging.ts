@@ -23,7 +23,7 @@ import { DEFAULT_LOG_CONFIG } from '@/setting';
 import { Color, dyeText } from '@/utils/console';
 
 /** 六个等级的方法名；同时作为等级键、颜色表键和作用域覆盖的键。 */
-type Level = keyof Logger;
+type Level = keyof LogOptions;
 
 /**
  * 等级到前缀颜色的固定映射：语义色（蓝=调试、橙=警告、红=错误、绿=成功、
@@ -161,6 +161,8 @@ export const createLogging = (options: LoggingOptions = {}): LoggerFactory => {
         success: (content) => emit('success', content, levels.success),
         info: (content) => emit('info', content, levels.info),
         report: (content) => emit('report', content, levels.report),
+        // levels 在作用域创建时定型，直接读取即可，无额外分配。
+        isEnabled: (level) => levels[level],
       };
     },
   };

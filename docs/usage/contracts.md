@@ -23,6 +23,8 @@ Framework 的装配入口要求完整 `CoreRuntime`。应用应由 `createRuntim
 
 `MemoryAccessor`、`MemoryAccess`、`ApplyMemoryAccessor`、`MemoryApplicationOptions` 与宿主生命周期端口 `MemoryHost` 均已发布；存储实现见 [MemoryManager 使用说明](./core/memoryManager.md)，装配方式与 pending 语义在该文档中给出。
 
+MemoryHost 实现及测试替身必须提供 `getStatus(): { rawWriteError: string | null }`；无失败时返回 null，实现可额外返回自己的诊断字段。Framework 只将此最小字段投影到 `FrameworkStatus.memory.rawWriteError`，不依赖 MemoryManager 的具体类型。
+
 每 tick 调用 `access()` 并检查 `status`。指定 priority 的模块必须处理 pending：仅跳过依赖 Memory 的行为，其他活动继续。`retryAt` 是建议重试 tick，不是就绪保证。稳定 Accessor 可以跨 tick 保存，ready 句柄和数据引用不能跨 tick 使用。
 
 申请配置为 `version`、`initialize`、`layer`，以及可选的 `priority`、`migrate`、`checkpointInterval`。`migrate` 接收 unknown 旧数据，须自行校验；TypeScript 泛型不能验证历史 JSON。checkpoint 间隔只适用于 checkpoint 层，约定为正整数，默认 100 tick。

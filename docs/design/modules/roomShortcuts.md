@@ -12,6 +12,7 @@ RoomShortcuts 为有视野的房间建立建筑、Source 和 Mineral 的 ID 缓�
 - `structure:built` 用于把新建筑加入对应类型缓存。
 - `structure:destroyed` 同时携带来源房间、原建筑 ID 和 Ruin ID。订阅者读取 Ruin，校验房间和原建筑 ID 后局部删除缓存；无法读取 Ruin 或校验失败时废弃对应房间缓存。
 - getter 发现房间当前没有视野时废弃缓存。恢复视野后的首次查询会重新初始化。
+- 无视野告警按房间限频：房间每次失去视野后的第一次 getter 调用记录一条 `warn`，其后的重复调用静默返回空值；房间再次有视野时清除标记，下一次失去视野重新告警。无视野不使用 `error` 等级。
 - 每次完整初始化记录当前 tick。缓存租约默认持续 5000 tick；到期后的首次 getter 会重新扫描该房间并开始新租约。可通过 `cacheLeaseTicks` 调整。
 - `forceReInit` 用于诊断和测试。启用后每次 getter 都重新扫描房间，不应作为生产环境默认值。
 

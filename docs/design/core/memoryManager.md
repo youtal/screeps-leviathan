@@ -1,6 +1,6 @@
 # MemoryManager 设计方案
 
-交付状态：访问与申请契约、主 Memory 目录与片段写入、Raw/Segment 双后端、启动窗口分配、journal 迁移与恢复、诊断快照均已交付；字节级容量口径、在线修改与独立 heap 监控未交付。首版实现约定见文末 §11。
+交付状态：访问与申请契约、主 Memory 目录与片段写入、Raw/Segment 双后端、启动窗口分配、journal 迁移与恢复、诊断快照、主 Memory UTF-16 容量口径均已交付；目标服务器容量实测、在线修改与独立 heap 监控未交付。首版实现约定见文末 §11。
 
 MemoryManager 定位为独立的 `core/memoryManager` 模块，由 Runtime 统一组装并由 Framework 驱动，遵循 [Core 架构原则](./README.md)。接口约定由 `src/contracts/memory.ts` 发布，使用状态见 [使用说明](../../usage/core/memoryManager.md)。
 
@@ -178,7 +178,7 @@ Segment 中的数据版本与 payload 一起写入，避免每次升级还要求
 
 每页 100 KB 包含信封开销，不能将 10 页容量自动合并给一个模块。目标页超限应拒绝写入并保留旧数据；不在运行期自动拆页或改变分配。迁入前不满足容量时，报告规划不可执行，具体人工降级规则需在实施时明确。
 
-容量计量口径属于待决设计事项：须验证目标 Screeps 运行时对主 Memory 和 Segment 使用的字符串长度/字节限制；不能未经核实固定 `TextEncoder` 计量或假定其全局可用。
+主 Memory 容量按 string.length 的 UTF-16 码元计量，上限 2 097 152，与官方 driver 的 RawMemory.set 规则一致，不使用 TextEncoder 或 UTF-8 字节长度。目标服务器（尤其修改过引擎的私服）的运行验证仍需单独完成；Segment 维持 100 000 码元的保守容量策略。
 
 首次使用 `0..9` 前须检查既有内容，不能把其他工具的数据当作可覆盖空槽。只有本模块已经认领或明确初始化授权的页可写；配置冲突应明确报告。
 
@@ -222,11 +222,16 @@ Segment 中的数据版本与 payload 一起写入，避免每次升级还要求
 
 - **平台端口**：RawMemory 与 Segment 的读写、激活请求通过可注入端口抽象，默认实现直连 Screeps API；可见页以 `RawMemory.segments` 的键为准，请求激活的页到下一 tick 生效。
 - **页所有权**：MemoryManager 排他占用固定页，激活请求提交精确集合而不并入外部活动页（避免超过单 tick 10 页上限）；只有"观察过内容且为空"的页可以分配，目录或 journal 引用的页视为自有，其余非空页（外部工具数据、无目录归属的历史信封）登记为保留页并给出诊断，绝不写入——没有读过内容的页不参与分配。
-- **目录与片段**：主 Memory 的 `memoryManager` 命名空间保存 schemaVersion、generationCounter、allocations、rawPartitions 与 migration，加载时逐项深度校验（含拒绝原型相关键、容器使用 null 原型），非法记录直接进入故障状态；非托管根字段不缓存片段，写入时从宿主 Memory 现取现序列化，并用键集合/引用比较决定是否需要写回，因此 clean tick 不产生 RawMemory 写入，宿主的替换、新增与删除都会如实传播。
+- **目录与片段**：主 Memory 的 `memoryManager` 命名空间保存 schemaVersion、generationCounter、allocations、rawPartitions 与 migration，加载时逐项深度校验（含拒绝原型相关键、容器使用 null 原型），非法记录直接进入故障状态；非托管根字段有两条序列化路径：提供宿主根对象时不缓存，写入时现取现序列化（宿主可原地深层修改，引用比较无法发现），并用键集合/引用比较决定是否需要写回，因此 clean tick 不产生 RawMemory 写入，宿主的替换、新增与删除都会如实传播；没有宿主根对象时数据只来自加载快照，其序列化片段按键缓存，仅在 `commitExternal` 覆盖快照时整体作废。
+- **Segment 页解析缓存**：观察阶段按页缓存“页文本 → 信封头”，文本逐字相同则复用，页变空时清除；只保留 schemaVersion、owner、generation、dataVersion，不保留解析出的 payload 对象图。缓存只驻留 heap，global reset 后重建；归属仍在每次观察时根据目录和 journal 重新判断。
+- **payload 形状校验**：分区恢复时，Raw 记录与 Segment 信封的 payload 必须是键值对象；否则分区进入 `pending('recovery')` 并写入诊断，不会呈现为 ready 或停留在 loading。
+- **主 Memory 体积保护**：序列化文本长度超过 `RAW_MEMORY_LIMIT`（2 097 152 个 UTF-16 码元，以 string.length 计量）时不调用引擎写入，按写入失败路径保留 dirty 与带体积的 `writeError`，同一原因只告警一次；失败同时记入管理器级状态 `rawWriteError`（不依赖是否有待提交分区，写入成功后清空）。MemoryHost 发布最小诊断供 Framework 状态投影，不引入同级实现依赖。整串写入只能整体拒绝；已有 heap 数据的分区保持可读写，允许插件缩减数据并在下一 tick 重试，不因写失败触发安全模式。
 - **提交**：critical 当 tick 提交、checkpoint 从首次 dirty 起算（默认 100 tick）；Raw 分区只重新序列化变化分区，Segment 分区只写自己的信封；写入失败保留 dirty 与诊断。Raw 分区的 dirty 在整串写入成功之后才清除。
 - **访问时效**：`access()` 返回的 ready 句柄绑定签发 tick 与当时的数据引用，跨 tick、分区进入 pending 或数据被重新加载后再调用会抛协议错误，避免旧句柄绕过迁移冻结。
 - **装载与脏数据优先级**：heap 是稳态事实源——分区有未提交修改时，重试装载只清 pending、绝不用存储旧值覆盖内存；页短暂不可见只推迟提交。没有数据或处于损坏诊断的分区不参与搬迁，并在 `allocationSkipped` 中说明落选原因；`switch` 之后若数据仍未装载，分区显式回到 `loading` 而不是留下"无 pending 也无数据"。
 - **版本判定**：只有"完全没有历史记录"才是首次安装；任何已存储数据（含旧布局导入的版本 0，表示未知旧版本）都必须经 `migrate` 升级，缺少 migrate 一律拒绝写入并给出诊断。`initialize`/`migrate` 的返回值必须是键值对象，运行时校验。
+- **迁移 payload 完整性**：copy 读取的源 payload、verify/switch 核验的目标 Segment payload、切回 Raw 时携带的 heap/journal 暂存数据都必须是键值对象；否则中止搬迁并保留源副本与诊断，不从缺值制造新记录。信封头正确不足以证明数据可恢复，删除任何源副本之前必须确认目标副本可恢复。
+- **非托管根字段序列化**：值为 undefined、函数、Symbol 或 `toJSON` 返回 undefined 的宿主根字段按原生对象序列化语义省略；循环引用、BigInt 等无法序列化的值使整串写入失败，保留最后一次有效文本并通过 `rawWriteError` 报告，字段恢复或被移除后自动清空。
 - **页回收**：腾退页的清空带可见性判断与错误边界，失败只记录诊断，不阻断目录切换（数据已在主 Memory 留有副本）。
 - **分配**：启动申请窗口在首个 tick 收尾封存；框架在安全模式、插件 CPU 未准入或 setup 失败时调用 `deferStartupWindow`，最多延后 `maxStartupDeferrals`（默认 10）个 tick，超限强制封存并记录诊断。priority 降序取前 10 名，同分按稳定身份排序；落选者与窗口后的新申请使用主 Memory；腾退中的页可在本批队列内复用。
 - **迁移**：串行执行 copy（暂存 + 写目标信封）→ verify（下一 tick 回读校验 owner/generation/dataVersion）→ switch（切换目录，分区恢复可用）→ cleanup（目录成功落盘后清空腾退页与暂存，写失败时停在 cleanup 重试）；代际取自持久单调计数器；数据取自存储与已冻结的内存副本，模块本轮未申请也能完成恢复；目标页非空且不属于本模块时中止搬迁。
@@ -238,7 +243,7 @@ Segment 中的数据版本与 payload 一起写入，避免每次升级还要求
 
 首版未交付或待决：
 
-- 容量按字节的精确计量与目标运行时实测口径（当前按 JSON 字符数近似，超限拒绝写入）。
+- 目标服务器容量实测；主 Memory 的 UTF-16 长度口径已交付，超限拒绝写入。
 - 迁移期间的在线修改（当前冻结搬迁分区）与多迁移并行。
 - 独立 heap 监控设施；旧布局导入不含 Profiler 统计与插件健康表，它们保留在原命名空间。
 - 同一 global 只应装配一个 MemoryManager；多实例会在同一命名空间上互相覆盖。

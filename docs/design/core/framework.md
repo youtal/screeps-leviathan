@@ -83,6 +83,7 @@ onTickExecute（plan） → arbitrate → commit
 插件协议设计：
 
 - manifest：`id/version/requires/optional/provides/priority/critical`。
+- 事件订阅者失败：订阅回调由所属插件的错误边界隔离；订阅者为 critical 插件时，失败在回调返回时立即进入安全模式（在 commit 阶段同时清空可用集合以阻止同批剩余意图），而不是等到 tickEnd 健康统计，使发布者之后的阶段与意图提交不再在故障状态下执行。非 critical 订阅者失败只标记该插件，不影响发布者与其他插件。
 - 生命周期：`setup/onTickBegin/onTickExecute/onTickEnd`。
 - 清理注册：在 setup 调用 `context.onDispose(cleanup)`。
 
@@ -181,6 +182,8 @@ Profiler 的起始取样失败时直接执行原函数。结束时先恢复调�
 普通插件失败隔离于该插件；关键插件失败阻止后续业务提交。注册表或 Kernel 故障进入安全模式，尝试完成已经进入阶段的清理。safeMode 表示最近一次 loop 状态，每次新 loop 会重新判断。
 
 安全模式只提供诊断与可执行的收尾；首版没有内建最低生存策略。
+
+FrameworkStatus 的 `memory.rawWriteError` 通过 MemoryHost.getStatus 投影最近一次主 Memory 写入错误，查询时生成独立快照；不读取存储实现或逐 tick 分配诊断对象。存储写入失败与插件执行故障分开，不增加失败计数或触发安全模式，允许插件通过正常 commit 缩减数据自救。此诊断协议已交付。
 
 ## 9. CPU 与性能观测
 

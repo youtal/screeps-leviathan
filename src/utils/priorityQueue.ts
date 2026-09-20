@@ -118,11 +118,12 @@ export class PriorityQueue<T> {
       throw new Error('Comparator must be a function');
     }
     /**
-     * 直接复用调用方数组：不复制、不预分配，heapify 原地整理，这是刻意的零拷贝取舍。
-     * 代价是队列与调用方共享同一数组，push/pop/clear 都会反映到原数组上，
-     * 因此数组移交后调用方不应再并行读写它；`arr || []` 兜住运行时传入 null/undefined 的情况。
+     * 拷贝调用方数组后再原地 heapify：队列拥有自己的存储，调用方的数组不会被重排，
+     * 后续 push/pop/clear 也不会反映到它上面。代价是构造时一次 O(n) 浅拷贝，
+     * 相对 O(n) 的建堆没有量级变化；元素本身不做深拷贝。
+     * `arr ? ... : []` 兜住运行时传入 null/undefined 的情况。
      */
-    this.heap = arr || [];
+    this.heap = arr ? arr.slice() : [];
     this.comparator = comparator;
     this.heapify();
   }

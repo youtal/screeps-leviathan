@@ -35,6 +35,7 @@ import {
 } from './segments';
 import { createScreepsPlatform } from './platform';
 import {
+  RAW_MEMORY_LIMIT,
   SEGMENT_IDS,
   type AllocationRecord,
   type Backend,
@@ -137,6 +138,10 @@ export const createMemoryManager = (
   let store: RawStore | null = null;
   let loaded = false;
   let fault: string | null = null;
+  /** 主 Memory 整串写入的最近一次失败原因；写入成功清空。只驻留 heap，reset 后为 null。 */
+  let rawWriteError: string | null = null;
+  /** rawWriteError 已经告警过的文本，同一原因只记一次 warn。 */
+  let lastLoggedRawWriteError: string | null = null;
   let currentTick = -1;
   let startupWindowOpen = true;
   let startupWindowForced = false;
@@ -156,6 +161,19 @@ export const createMemoryManager = (
    * 未出现在这里的页不可写入——没有读过内容就无法断定它不是别人正在使用的页。
    */
   const observedSegments = new Map<number, string>();
+  /**
+   * 页解析缓存（页号 → 上次解析的文本与信封头）。
+   * 创建：随 manager 实例；命中：页文本与上次逐字相同；更新：文本变化时重新
+   * parse；清理：页变空时删除。只驻留 heap，global reset 后首 tick 重新解析一次。
+   * 换取：未变化的页不再每 tick（begin/end 共两次）JSON.parse，实测 10 页×64 KB
+   * 约 13 ms/tick。只保留归属判断需要的信封头，不保留解析出的 payload 对象，
+   * 避免与分区 heap 数据重复驻留；文本仍用于精确判断变化。每次观察重新核对目录与
+   * journal，不能把归属判断结果一起缓存，因为目录可能在文本不变时发生切换。
+   */
+  const parsedPages = new Map<
+    number,
+    { text: string; envelope: Omit<SegmentEnvelope, 'payload'> | null }
+  >();
   /** 被外部数据或未认领信封占用的页：不参与分配、不会被写入。 */
   const reservedSegments = new Map<number, string>();
   /** 清理阶段的重试计数（journal 代际 → 次数）：只驻留 heap，不进入存储。 */
@@ -289,7 +307,10 @@ export const createMemoryManager = (
   };
 
   /** 页内容是否属于本管理器的既有分配或进行中的迁移。 */
-  const pageBelongsToUs = (id: number, envelope: SegmentEnvelope): boolean => {
+  const pageBelongsToUs = (
+    id: number,
+    envelope: Pick<SegmentEnvelope, 'owner'>
+  ): boolean => {
     const allocation = allocationOf(
       envelope.owner.pluginId,
       envelope.owner.localId
@@ -317,9 +338,25 @@ export const createMemoryManager = (
       observedSegments.set(id, text);
       if (text === '') {
         reservedSegments.delete(id);
+        parsedPages.delete(id);
         continue;
       }
-      const envelope = parseEnvelope(text);
+      let cached = parsedPages.get(id);
+      if (cached?.text !== text) {
+        const parsed = parseEnvelope(text);
+        // 显式投影而非类型断言：Omit 只约束类型，不能移除运行时的 payload 引用。
+        const envelope = parsed
+          ? {
+              schemaVersion: parsed.schemaVersion,
+              owner: parsed.owner,
+              generation: parsed.generation,
+              dataVersion: parsed.dataVersion,
+            }
+          : null;
+        cached = { text, envelope };
+        parsedPages.set(id, cached);
+      }
+      const envelope = cached.envelope;
       if (envelope && pageBelongsToUs(id, envelope)) {
         reservedSegments.delete(id);
         continue;
@@ -368,8 +405,13 @@ export const createMemoryManager = (
           reason: 'recovery',
           error: 'missing raw partition',
         };
+      // 手工编辑或外部损坏可能留下非对象 payload：按 recovery 给出诊断，
+      // 而不是把 5/"str"/[1] 当作 ready，或让 null 永远停在 loading。
+      const restored = asPartitionData(record.payload, 'stored payload');
+      if (restored.ok === false)
+        return { ok: false, reason: 'recovery', error: restored.error };
       partition.dataVersion = record.dataVersion;
-      partition.data = record.payload as Record<string, JsonValue>;
+      partition.data = restored.data;
       return { ok: true };
     }
     const segmentId = partition.segmentId;
@@ -392,10 +434,17 @@ export const createMemoryManager = (
       partition.generation
     );
     if (mismatch) return { ok: false, reason: 'recovery', error: mismatch };
+    const restored = asPartitionData(envelope!.payload, 'stored payload');
+    if (restored.ok === false)
+      return { ok: false, reason: 'recovery', error: restored.error };
     partition.dataVersion = envelope!.dataVersion;
-    partition.data = envelope!.payload as Record<string, JsonValue>;
+    partition.data = restored.data;
     return { ok: true };
   };
+
+  /** 分区数据是否是键值对象（非 null、非数组）；持久数据进入迁移或装载前的统一判据。 */
+  const isPartitionObject = (value: unknown): boolean =>
+    value !== null && typeof value === 'object' && !Array.isArray(value);
 
   /** 分区数据的运行时形状校验：契约要求 initialize/migrate 返回键值对象。 */
   const asPartitionData = (
@@ -404,7 +453,7 @@ export const createMemoryManager = (
   ):
     | { ok: true; data: Record<string, JsonValue> }
     | { ok: false; error: string } =>
-    value !== null && typeof value === 'object' && !Array.isArray(value)
+    isPartitionObject(value)
       ? { ok: true, data: value as Record<string, JsonValue> }
       : { ok: false, error: what + ' must return a key-value object' };
 
@@ -1071,6 +1120,14 @@ export const createMemoryManager = (
             return;
           }
           payload = envelope.payload;
+          if (!isPartitionObject(payload)) {
+            abortMigration(
+              'migration source payload is not a key-value object for ' +
+                identity,
+              journal.moves
+            );
+            return;
+          }
         } else {
           const record = rawRecordOf(item.pluginId, item.localId);
           if (!record) {
@@ -1081,6 +1138,14 @@ export const createMemoryManager = (
             return;
           }
           payload = record.payload;
+          if (!isPartitionObject(payload)) {
+            abortMigration(
+              'migration source payload is not a key-value object for ' +
+                identity,
+              journal.moves
+            );
+            return;
+          }
         }
         journal.staged[identity] = payload;
       }
@@ -1145,15 +1210,30 @@ export const createMemoryManager = (
     // switch 再次核验目标，防止 verify 后重启/页被替换时删除唯一仍有效的 Raw 源。
     if (journal.phase === 'verify' || journal.phase === 'switch') {
       for (const item of journal.moves) {
-        if (item.to !== 'segment') continue;
+        const identity = key(item.pluginId, item.localId);
+        if (item.to === 'raw') {
+          // 切回 Raw 的数据来自 heap 或 journal 暂存；两者都不是键值对象时，
+          // 继续切换会写出缺失/损坏的记录并在 cleanup 删除唯一有效的 Segment 源。
+          const carried =
+            partitions.get(identity)?.data ?? journal.staged[identity];
+          if (!isPartitionObject(carried)) {
+            abortMigration(
+              'migration payload missing or invalid for ' + identity,
+              journal.moves
+            );
+            return;
+          }
+          continue;
+        }
         const text = visible[item.toSegmentId!];
         if (text === undefined) {
           ensureSegmentsActive();
           freezeMoves(journal.moves, 'verification');
           return;
         }
+        const envelope = parseEnvelope(text);
         const mismatch = describeMismatch(
-          parseEnvelope(text),
+          envelope,
           { pluginId: item.pluginId, localId: item.localId },
           journal.generation,
           item.dataVersion
@@ -1161,6 +1241,14 @@ export const createMemoryManager = (
         if (mismatch) {
           abortMigration(
             'migration verification failed: ' + mismatch,
+            journal.moves
+          );
+          return;
+        }
+        // 信封头正确不代表数据可恢复：目标 payload 必须是键值对象，才允许删除 Raw 源。
+        if (!isPartitionObject(envelope!.payload)) {
+          abortMigration(
+            'migration verification failed: target payload is not a key-value object',
             journal.moves
           );
           return;
@@ -1410,10 +1498,24 @@ export const createMemoryManager = (
     const stagedRaw = commitPartitions(tick);
     const external = getHostMemory() ?? null;
     const externalChanged = store!.hasExternalChanges(external);
-    if (!rawDirty && !externalChanged) return;
+    if (!rawDirty && !externalChanged) {
+      // 没有待写内容：此前失败的变化已被撤销（如宿主删掉了无法序列化的字段），
+      // 持久文本与当前状态一致，不能让过期的失败诊断一直挂着。
+      rawWriteError = null;
+      lastLoggedRawWriteError = null;
+      return;
+    }
     try {
-      platform.writeRaw(store!.serialize(external));
+      const text = store!.serialize(external);
+      // 超过引擎上限的写入必然失败；提前给出带体积的诊断，走同一条重试/告警路径。
+      if (text.length > RAW_MEMORY_LIMIT)
+        throw new Error(
+          'Memory text ' + text.length + ' chars exceeds ' + RAW_MEMORY_LIMIT
+        );
+      platform.writeRaw(text);
       rawDirty = false;
+      rawWriteError = null;
+      lastLoggedRawWriteError = null;
       migrationPersisted = store!.namespace.migration !== null;
       store!.commitExternal(external);
       for (const partition of stagedRaw) {
@@ -1426,6 +1528,13 @@ export const createMemoryManager = (
     } catch (error) {
       // 主 Memory 写入失败：保留 rawDirty 与分区 dirty，记录诊断并在下一 tick 重试。
       const message = error instanceof Error ? error.message : String(error);
+      // 管理器级诊断：失败可能来自宿主根字段或目录变化，此时 stagedRaw 为空，
+      // 只靠分区级记录会让失败静默。
+      rawWriteError = message;
+      if (lastLoggedRawWriteError !== message) {
+        lastLoggedRawWriteError = message;
+        log.warn('raw memory write failed: ' + message);
+      }
       for (const partition of stagedRaw) {
         partition.writeError = message;
         if (partition.lastLoggedError !== message) {
@@ -1454,6 +1563,7 @@ export const createMemoryManager = (
   const getStatus = (): MemoryManagerStatus => ({
     loaded,
     fault,
+    rawWriteError,
     tick: currentTick,
     startupWindowOpen,
     startupWindowForced,
