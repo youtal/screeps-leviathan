@@ -104,7 +104,7 @@ const plugin: LeviathanPlugin = {
 
 ```ts
 const status = memory.getStatus();
-// status.loaded / fault / tick
+// status.loaded / fault / rawWriteError / tick
 // status.startupWindowOpen / startupWindowForced / startupDeferrals
 // status.allocations[]: owner、backend、segmentId、pending、dirty、writeError（最近一次故障，可能已恢复）
 // status.migration: { generation, phase, reason, moves } | null
@@ -113,6 +113,8 @@ const status = memory.getStatus();
 // status.allocationSkipped[]: 分配规划中因数据未装载或损坏而落选的候选及原因
 // status.preservedRootKeys: 未被本模块认领的 Memory 根字段
 ```
+
+`rawWriteError` 非空表示主 Memory 整串写入最近一次失败（体积超限或引擎抛错），与是否存在待提交分区无关；下一 tick 自动重试，成功后清空，不阻断申请。
 
 `fault` 非空表示存储无法解析（未知 schema、非法容器形状）：此时所有申请返回 `pending('recovery')`，管理器拒绝写入，原始数据保持不变。
 

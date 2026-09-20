@@ -2285,4 +2285,38 @@ describe('MemoryManager audit remediation 2026-09-20', () => {
     expect(writes.mock.calls.length).toBe(before);
     expect(JSON.stringify(h.manager.getStatus())).toContain('exceeds');
   });
+
+  /** F3b 复审：失败不依赖待提交分区——只有宿主根字段超限时也必须有管理器级诊断。 */
+  it('F3b: reports an oversized write caused only by host root fields', () => {
+    const sink = collecting();
+    const host: Record<string, unknown> = { creeps: {} };
+    const h = createHarness({
+      logging: sink.logging,
+      getHostMemory: () => host,
+    });
+    const writes = jest.spyOn(h.plat.platform, 'writeRaw');
+    h.run();
+    h.run();
+    expect(h.manager.getStatus().rawWriteError).toBeNull();
+
+    const before = writes.mock.calls.length;
+    host.creeps = { blob: 'x'.repeat(2_200_000) };
+    h.run();
+    h.run();
+
+    expect(writes.mock.calls.length).toBe(before);
+    expect(h.manager.getStatus().rawWriteError).toContain('exceeds');
+    expect(h.manager.getStatus().fault).toBeNull();
+    const warns = sink
+      .text()
+      .split('\n')
+      .filter((line) => line.includes('raw memory write failed'));
+    expect(warns).toHaveLength(1);
+
+    // 缩小后下一 tick 自动重试成功，诊断清空。
+    host.creeps = {};
+    h.run();
+    expect(h.manager.getStatus().rawWriteError).toBeNull();
+    expect(writes.mock.calls.length).toBeGreaterThan(before);
+  });
 });

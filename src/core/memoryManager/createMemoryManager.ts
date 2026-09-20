@@ -138,6 +138,10 @@ export const createMemoryManager = (
   let store: RawStore | null = null;
   let loaded = false;
   let fault: string | null = null;
+  /** 主 Memory 整串写入的最近一次失败原因；写入成功清空。只驻留 heap，reset 后为 null。 */
+  let rawWriteError: string | null = null;
+  /** rawWriteError 已经告警过的文本，同一原因只记一次 warn。 */
+  let lastLoggedRawWriteError: string | null = null;
   let currentTick = -1;
   let startupWindowOpen = true;
   let startupWindowForced = false;
@@ -1447,6 +1451,8 @@ export const createMemoryManager = (
         );
       platform.writeRaw(text);
       rawDirty = false;
+      rawWriteError = null;
+      lastLoggedRawWriteError = null;
       migrationPersisted = store!.namespace.migration !== null;
       store!.commitExternal(external);
       for (const partition of stagedRaw) {
@@ -1459,6 +1465,13 @@ export const createMemoryManager = (
     } catch (error) {
       // 主 Memory 写入失败：保留 rawDirty 与分区 dirty，记录诊断并在下一 tick 重试。
       const message = error instanceof Error ? error.message : String(error);
+      // 管理器级诊断：失败可能来自宿主根字段或目录变化，此时 stagedRaw 为空，
+      // 只靠分区级记录会让失败静默。
+      rawWriteError = message;
+      if (lastLoggedRawWriteError !== message) {
+        lastLoggedRawWriteError = message;
+        log.warn('raw memory write failed: ' + message);
+      }
       for (const partition of stagedRaw) {
         partition.writeError = message;
         if (partition.lastLoggedError !== message) {
@@ -1487,6 +1500,7 @@ export const createMemoryManager = (
   const getStatus = (): MemoryManagerStatus => ({
     loaded,
     fault,
+    rawWriteError,
     tick: currentTick,
     startupWindowOpen,
     startupWindowForced,

@@ -150,6 +150,12 @@ export interface PartitionPending {
 export interface MemoryManagerStatus {
   loaded: boolean;
   fault: string | null;
+  /**
+   * 主 Memory 整串写入的最近一次失败原因（体积超限、引擎抛错等）；写入成功后清空。
+   * 与 fault（存储无法加载，阻断所有申请）不同，它只表示写入暂时失败、下一 tick 会重试，
+   * 且不依赖是否存在待提交的 Raw 分区——宿主根字段或目录变化导致的失败同样会体现。
+   */
+  rawWriteError: string | null;
   tick: number;
   startupWindowOpen: boolean;
   /** 启动窗口是否因申请迟迟不收齐而被强制封存（超过延后上限）。 */

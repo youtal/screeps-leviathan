@@ -225,7 +225,7 @@ Segment 中的数据版本与 payload 一起写入，避免每次升级还要求
 - **目录与片段**：主 Memory 的 `memoryManager` 命名空间保存 schemaVersion、generationCounter、allocations、rawPartitions 与 migration，加载时逐项深度校验（含拒绝原型相关键、容器使用 null 原型），非法记录直接进入故障状态；非托管根字段有两条序列化路径：提供宿主根对象时不缓存，写入时现取现序列化（宿主可原地深层修改，引用比较无法发现），并用键集合/引用比较决定是否需要写回，因此 clean tick 不产生 RawMemory 写入，宿主的替换、新增与删除都会如实传播；没有宿主根对象时数据只来自加载快照，其序列化片段按键缓存，仅在 `commitExternal` 覆盖快照时整体作废。
 - **Segment 页解析缓存**：观察阶段按页缓存“页文本 → 解析后的信封”，文本逐字相同则复用，页变空时清除；缓存只驻留 heap，global reset 后首个观察 tick 重建，缓存的信封只读。
 - **payload 形状校验**：分区恢复时，Raw 记录与 Segment 信封的 payload 必须是键值对象；否则分区进入 `pending('recovery')` 并写入诊断，不会呈现为 ready 或停留在 loading。
-- **主 Memory 体积保护**：序列化文本长度超过 `RAW_MEMORY_LIMIT`（2 097 152 字符，按字符数近似引擎 2 MB 限制）时不调用引擎写入，按写入失败路径保留 dirty 与带体积的 `writeError`，同一原因只告警一次。整串写入无法部分成功，因此只能整体拒绝；释放数据后下一 tick 自动重试。
+- **主 Memory 体积保护**：序列化文本长度超过 `RAW_MEMORY_LIMIT`（2 097 152 字符，按字符数近似引擎 2 MB 限制）时不调用引擎写入，按写入失败路径保留 dirty 与带体积的 `writeError`，同一原因只告警一次；失败同时记入管理器级状态 `rawWriteError`（不依赖是否有待提交分区，写入成功后清空），使宿主根字段或目录变化导致的失败也可见。整串写入无法部分成功，因此只能整体拒绝；释放数据后下一 tick 自动重试。
 - **提交**：critical 当 tick 提交、checkpoint 从首次 dirty 起算（默认 100 tick）；Raw 分区只重新序列化变化分区，Segment 分区只写自己的信封；写入失败保留 dirty 与诊断。Raw 分区的 dirty 在整串写入成功之后才清除。
 - **访问时效**：`access()` 返回的 ready 句柄绑定签发 tick 与当时的数据引用，跨 tick、分区进入 pending 或数据被重新加载后再调用会抛协议错误，避免旧句柄绕过迁移冻结。
 - **装载与脏数据优先级**：heap 是稳态事实源——分区有未提交修改时，重试装载只清 pending、绝不用存储旧值覆盖内存；页短暂不可见只推迟提交。没有数据或处于损坏诊断的分区不参与搬迁，并在 `allocationSkipped` 中说明落选原因；`switch` 之后若数据仍未装载，分区显式回到 `loading` 而不是留下"无 pending 也无数据"。
