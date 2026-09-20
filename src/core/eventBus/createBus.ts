@@ -247,13 +247,20 @@ export const createBus = (logging: LoggerFactory): Bus => {
     if (!snapshot) return 0;
 
     const label = scopeLabel(scope);
+    /**
+     * info 等级在作用域创建时定型；关闭时逐订阅者的两条日志连模板字符串都不求值。
+     * 每次通知只查询一次，回调内的日志等级不会中途变化。
+     */
+    const infoEnabled = log.isEnabled('info');
     snapshot.forEach(([subscriber, listener]) => {
-      log.info(`notifying subscriber ${subscriber} for event ${eventType}`);
+      if (infoEnabled)
+        log.info(`notifying subscriber ${subscriber} for event ${eventType}`);
       try {
         listener(data);
-        log.info(
-          `subscriber ${subscriber} notified for event ${eventType} in ${label}`
-        );
+        if (infoEnabled)
+          log.info(
+            `subscriber ${subscriber} notified for event ${eventType} in ${label}`
+          );
       } catch (e) {
         log.error(
           `error in subscriber ${subscriber} for event ${eventType}: ${e}`

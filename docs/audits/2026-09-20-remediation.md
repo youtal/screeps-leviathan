@@ -15,8 +15,8 @@
 | F4 | 已修复（限频） | `a6b0e3b` | 无视野按房间只 `warn` 一次，5 次循环调用仅 1 条日志且无 `error`；`structure:built` 5 个分支补测，语句覆盖 64%→75% |
 | F5 | 已修复 | fix(utils) 提交 | 构造时浅拷贝；构造、push、pop、clear 后调用方数组保持不变（修复前用例失败） |
 | F6 | 已修复 | fix(utils) 提交 | 替换值改函数形式、键名正则转义；`$&`/`$1`/`$$` 原样输出，`a.b` 不再匹配 `aXb`（修复前用例失败） |
-| F7 | **未修复，待决策** | — | Logger 契约没有等级查询或惰性日志接口；要消除拼接成本必须扩展 `src/contracts/logging.ts` 并改动所有实现，属于公共契约变更；审计实测约 0.3 µs/次，当前可忽略，需用户确认是否扩展契约 |
-| F8 | 部分修复 | fix(utils) 提交 | 已更正 `createFramework.ts` 的 wrappers 注释；`.vscode/settings.json` 取消跟踪会影响协作者编辑器配置，未擅自处理，待决策；`MAX_GROUP_EVENTBUS_TTL` 审计已判定不计缺陷 |
+| F7 | 已修复（经批准扩展契约） | fix(logger) 提交 | `Logger.isEnabled(level)`；info 关闭时 EventBus 通知路径不调用 info，开启时仍输出 2 条/订阅者；`isEnabled` 与实际输出一致有测试 |
+| F8 | 已修复（经批准） | fix(utils) 提交、fix(logger) 提交 | wrappers 注释已更正；`.vscode/settings.json` 已 `git rm --cached`（本地文件保留）；`MAX_GROUP_EVENTBUS_TTL` 审计已判定不计缺陷 |
 
 ## 2. F1–F3b 实现说明
 
@@ -35,6 +35,10 @@
 - F6 的转义同时覆盖键名中的 `{`、`}`。
 - 未新增的文档：utils 模块的设计与使用说明缺失属 A07，按 AGENTS.md 只报告，未借整改批量补写。
 
-## 5. 验证
+## 5. F7、F8 收尾
 
-在分支末端执行：`npx tsc --noEmit`、`npm test`（12 套件 180 项）、`npm run build`（无 `.secret.json`）、`git diff --check` 均通过。每个修复的回归用例都在撤销对应源码修改后确认失败。
+用户批准扩展 Logger 契约与取消 `.vscode/settings.json` 跟踪。`isEnabled` 是新增的必需方法，仓库内的 Logger 替身（profiler、framework、roomShortcuts 测试）已补齐。仅在 EventBus 的逐订阅者通知路径使用；订阅、退订等低频日志保持原样，避免扩大改动面。
+
+## 6. 验证
+
+在分支末端执行：`npx tsc --noEmit`、`npm test`（12 套件 183 项）、`npm run build`（无 `.secret.json`）、`git diff --check` 均通过。每个修复的回归用例都在撤销对应源码修改后确认失败。

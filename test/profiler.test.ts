@@ -27,6 +27,7 @@ const createMockLog = () => ({
   success: jest.fn(),
   info: jest.fn(),
   report: jest.fn(),
+  isEnabled: jest.fn(() => true),
 });
 
 /**

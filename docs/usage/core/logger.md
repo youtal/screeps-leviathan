@@ -62,6 +62,8 @@ logging.scope('Script').report('done');
 
 `undefined` 表示跟随上层开关，显式 `false` 只关闭该等级。关闭的等级不会产生任何格式化与输出开销。
 
+调用方自己拼接日志文本时（如模板字符串），文本在调用 `log.xxx()` 之前就已求值。热路径可先用 `log.isEnabled('info')` 判断再拼接；结果与该等级是否实际输出一致，在作用域创建后不会变化。测试中自建 `Logger` 替身时需要提供 `isEnabled`。
+
 ```ts
 const log = logging.scope('Defense', { levels: { info: true, report: false } });
 log.info('wave incoming');   // 输出：[Defense] wave incoming（info 着色）

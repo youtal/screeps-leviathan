@@ -788,6 +788,7 @@ describe('ErrorMapper', () => {
       success: jest.fn(),
       info: jest.fn(),
       report: jest.fn(),
+      isEnabled: jest.fn(() => true),
     }));
     const mapper = createErrorMapper(
       { scope } as unknown as Parameters<typeof createErrorMapper>[0],
