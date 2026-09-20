@@ -182,6 +182,8 @@ Profiler 的起始取样失败时直接执行原函数。结束时先恢复调�
 
 安全模式只提供诊断与可执行的收尾；首版没有内建最低生存策略。
 
+FrameworkStatus 的 `memory.rawWriteError` 通过 MemoryHost.getStatus 投影最近一次主 Memory 写入错误，查询时生成独立快照；不读取存储实现或逐 tick 分配诊断对象。存储写入失败与插件执行故障分开，不增加失败计数或触发安全模式，允许插件通过正常 commit 缩减数据自救。此诊断协议已交付。
+
 ## 9. CPU 与性能观测
 
 默认 `reserveCpu = 5`、`minBucket = 1000`：

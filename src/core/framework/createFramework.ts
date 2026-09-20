@@ -544,6 +544,8 @@ export const createFramework = (options: FrameworkOptions): Framework => {
     getStatus: () => ({
       safeMode,
       tick: lastTick,
+      // 只通过 MemoryHost 契约投影诊断；失败不禁止插件缩减脏数据，也不触发安全模式。
+      memory: { rawWriteError: runtime.memory.getStatus().rawWriteError },
       failures: failures.map((f) => ({ ...f })),
     }),
   };

@@ -21,7 +21,7 @@
 | `intent.ts` | GameIntent、IntentReceipt、CpuBudget |
 | `plugin.ts` | 清单、生命周期、上下文、框架配置与管理接口 |
 | `runtime.ts` | CoreRuntime、模块上下文与派生工厂 |
-| `memory.ts` | JSON、深只读、申请配置、稳定 Accessor、局部就绪联合与宿主生命周期端口 MemoryHost |
+| `memory.ts` | JSON、深只读、申请配置、稳定 Accessor、局部就绪联合与宿主生命周期端口 MemoryHost（含 getStatus 最小写入诊断） |
 
 Profiler 统计记录和存储容器、EventBus 监听器索引、Framework 健康表、Goto 缓存及偏好 schema 归各自模块。构造参数包含内部数据结构时保留在模块内，不强制发布所有工厂参数。
 

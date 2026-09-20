@@ -162,16 +162,17 @@ export const createMemoryManager = (
    */
   const observedSegments = new Map<number, string>();
   /**
-   * 页解析缓存（页号 → 上次解析的文本与信封）。
+   * 页解析缓存（页号 → 上次解析的文本与信封头）。
    * 创建：随 manager 实例；命中：页文本与上次逐字相同；更新：文本变化时重新
    * parse；清理：页变空时删除。只驻留 heap，global reset 后首 tick 重新解析一次。
    * 换取：未变化的页不再每 tick（begin/end 共两次）JSON.parse，实测 10 页×64 KB
-   * 约 13 ms/tick；风险仅是缓存与文本不同步，因文本相等才复用故不存在。
-   * 缓存的信封只用于只读判断，调用方不得修改。
+   * 约 13 ms/tick。只保留归属判断需要的信封头，不保留解析出的 payload 对象，
+   * 避免与分区 heap 数据重复驻留；文本仍用于精确判断变化。每次观察重新核对目录与
+   * journal，不能把归属判断结果一起缓存，因为目录可能在文本不变时发生切换。
    */
   const parsedPages = new Map<
     number,
-    { text: string; envelope: SegmentEnvelope | null }
+    { text: string; envelope: Omit<SegmentEnvelope, 'payload'> | null }
   >();
   /** 被外部数据或未认领信封占用的页：不参与分配、不会被写入。 */
   const reservedSegments = new Map<number, string>();
@@ -306,7 +307,10 @@ export const createMemoryManager = (
   };
 
   /** 页内容是否属于本管理器的既有分配或进行中的迁移。 */
-  const pageBelongsToUs = (id: number, envelope: SegmentEnvelope): boolean => {
+  const pageBelongsToUs = (
+    id: number,
+    envelope: Pick<SegmentEnvelope, 'owner'>
+  ): boolean => {
     const allocation = allocationOf(
       envelope.owner.pluginId,
       envelope.owner.localId
@@ -339,7 +343,17 @@ export const createMemoryManager = (
       }
       let cached = parsedPages.get(id);
       if (cached?.text !== text) {
-        cached = { text, envelope: parseEnvelope(text) };
+        const parsed = parseEnvelope(text);
+        // 显式投影而非类型断言：Omit 只约束类型，不能移除运行时的 payload 引用。
+        const envelope = parsed
+          ? {
+              schemaVersion: parsed.schemaVersion,
+              owner: parsed.owner,
+              generation: parsed.generation,
+              dataVersion: parsed.dataVersion,
+            }
+          : null;
+        cached = { text, envelope };
         parsedPages.set(id, cached);
       }
       const envelope = cached.envelope;

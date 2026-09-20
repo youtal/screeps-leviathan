@@ -2134,6 +2134,57 @@ describe('audit P1 migration recovery', () => {
 });
 
 describe('MemoryManager audit remediation 2026-09-20', () => {
+  it('R4: refreshes cached page ownership after text changes and clearing', () => {
+    const h = createHarness({ segmentIds: [0] });
+    const foreign = (owner: string) => JSON.stringify({
+      schemaVersion: 1, owner: { pluginId: owner, localId: 'main' },
+      generation: 1, dataVersion: 1, payload: { blob: 'x'.repeat(64_000) },
+    });
+    h.plat.content()[0] = foreign('first');
+    h.run();
+    h.run();
+    expect(JSON.stringify(h.manager.getStatus().reservedSegments)).toContain('first/main');
+    const parse = jest.spyOn(JSON, 'parse');
+    try {
+      h.run();
+      h.run();
+      expect(parse).not.toHaveBeenCalled();
+      h.plat.content()[0] = foreign('second');
+      h.run();
+      expect(parse).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(h.manager.getStatus().reservedSegments)).toContain('second/main');
+      h.plat.content()[0] = '';
+      h.run();
+      expect(h.manager.getStatus().reservedSegments).toEqual([]);
+      h.plat.content()[0] = foreign('first');
+      h.run();
+      expect(parse).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify(h.manager.getStatus().reservedSegments)).toContain('first/main');
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it.each(['汉', '😀'])('R2: checks the exact UTF-16 boundary with %s content', (character) => {
+    const host = { blob: '' };
+    const h = createHarness({ segmentIds: [], getHostMemory: () => host });
+    h.run();
+    h.run();
+    const overhead = h.plat.raw().length;
+    const available = 2_097_152 - overhead;
+    host.blob = character.repeat(Math.floor(available / character.length))
+      + 'x'.repeat(available % character.length);
+    const writes = jest.spyOn(h.plat.platform, 'writeRaw');
+    h.run();
+    expect(writes).toHaveBeenCalledTimes(1);
+    expect(h.plat.raw().length).toBe(2_097_152);
+    expect(h.manager.getStatus().rawWriteError).toBeNull();
+    host.blob += 'x';
+    h.run();
+    expect(writes).toHaveBeenCalledTimes(1);
+    expect(h.manager.getStatus().rawWriteError).toContain('2097153 chars exceeds 2097152');
+  });
+
   it('F1: does not re-parse an unchanged segment page on idle ticks', () => {
     const h = createHarness({ segmentIds: [0] });
     h.run(() => {

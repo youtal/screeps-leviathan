@@ -1,0 +1,129 @@
+{
+  "auditDate": "2026-09-20",
+  "baseline": {
+    "head": "c36e2b95ab9b47d2ee8d844623365aa32d9203aa",
+    "node": "v24.20.0",
+    "npm": "12.0.2",
+    "trackedAuditInputCount": 96,
+    "aggregateSHA256": "1b820c1cff62220de598e31dd58d362eeffc9a165928bb9fc2edd22f4cf724b9",
+    "hashRule": "sorted git ls-files src build test and rootConfigs; UTF-8 path + NUL + file bytes + NUL",
+    "rootConfigs": [
+      "package.json",
+      "package-lock.json",
+      "tsconfig.json",
+      "jest.config.js",
+      "rollup.config.mjs",
+      "screeps-integration.config.cjs",
+      ".npmrc"
+    ],
+    "changedCodeFiles": [
+      "src/contracts/memory.ts",
+      "src/contracts/plugin.ts",
+      "src/core/framework/createFramework.ts",
+      "src/core/memoryManager/createMemoryManager.ts",
+      "src/core/memoryManager/types.ts",
+      "test/framework.test.ts",
+      "test/frameworkBundle.test.mjs",
+      "test/memoryManager.test.ts"
+    ]
+  },
+  "verification": {
+    "typescript": {
+      "command": "npx tsc --noEmit",
+      "exitCode": 0
+    },
+    "tests": {
+      "command": "npm test",
+      "jestSuites": 12,
+      "jestTests": 188,
+      "buildAndBundleAndIsolationTests": 9,
+      "exitCode": 0
+    },
+    "build": {
+      "command": "env -u DEST npm run build",
+      "exitCode": 0,
+      "uploaded": false
+    },
+    "diffCheck": {
+      "command": "git diff --check",
+      "exitCode": 0
+    },
+    "integration": {
+      "command": "env -u DEST npm run test:integration",
+      "exitCode": 0,
+      "scenarios": [
+        "leviathan-global-reset",
+        "leviathan-runtime",
+        "leviathan-segments"
+      ],
+      "passed": 3,
+      "failed": 0,
+      "scope": "local Docker isolated runner, not official live server"
+    },
+    "strict": {
+      "command": "npx tsc --noEmit --strict",
+      "exitCode": 2,
+      "errors": 5,
+      "sourceErrors": 1
+    },
+    "rootAudit": {
+      "command": "npm audit --json",
+      "total": 0
+    },
+    "runnerAudit": {
+      "command": "npm audit --prefix test/integration/runner --package-lock-only --json",
+      "total": 42,
+      "low": 5,
+      "moderate": 21,
+      "high": 15,
+      "critical": 1
+    }
+  },
+  "reproduction": {
+    "node": "v24.20.0",
+    "results": {
+      "S01_missing_staged": {
+        "sourcePageCleared": true,
+        "rawRecord": {
+          "dataVersion": 1
+        },
+        "afterReset": "pending:recovery"
+      },
+      "S01_corrupt_target": {
+        "validRawSourceDeleted": true,
+        "targetPayload": null,
+        "afterReset": "pending:recovery"
+      },
+      "S02": {
+        "trace": [
+          "critical listener failed",
+          "business action committed"
+        ],
+        "finalSafeMode": true,
+        "failures": [
+          {
+            "pluginId": "critical",
+            "phase": "tickBegin"
+          }
+        ]
+      },
+      "S03": {
+        "nativeJSON": "{\"rooms\":{}}",
+        "emittedInvalidToken": "\"optional\":undefined",
+        "writeReportedSuccessful": true,
+        "resetHasGlobalFault": true
+      },
+      "S04": {
+        "executions": 1,
+        "reenableFailure": "Error: MemoryManager: conflicting declaration for consumer/main",
+        "phase": "setup"
+      }
+    }
+  },
+  "limitations": [
+    "Baseline includes uncommitted R1/R2/R4 changes; not identical to HEAD",
+    "Fault injection uses fake MemoryPlatform and synchronous fake Game; no live deployment",
+    "No new long-duration CPU or heap benchmarks",
+    "Reproduction assertions describe current defects, not acceptable post-fix behavior"
+  ]
+}

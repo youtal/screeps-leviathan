@@ -46,6 +46,7 @@ const harness = (plugins: LeviathanPlugin[] = [], extra: any = {}) => {
   (globalThis as any).RawMemory = { get: read, set: write };
   /** 大多数 Framework 用例不测试持久化：注入显式空端口，保留旧用例的无存储语义。 */
   const unassembledMemory: MemoryHost = {
+    getStatus: () => ({ rawWriteError: null }),
     begin: () => undefined,
     end: () => undefined,
     deferStartupWindow: () => undefined,
@@ -811,6 +812,54 @@ describe('ErrorMapper', () => {
 
 /** Framework 与 MemoryManager 的接线：框架按 pluginId 绑定申请入口并在 tick 边界驱动存储。 */
 describe('Framework memory integration', () => {
+  it('exposes raw write failure and recovery without blocking corrective plugin work', () => {
+    let raw = '{}';
+    let accessor: MemoryAccessor<{ blob: string }>;
+    let blob = 'x'.repeat(2_200_000);
+    const manager = createMemoryManager({
+      segmentIds: [],
+      platform: {
+        readRaw: () => raw,
+        writeRaw: (text) => { raw = text; },
+        readSegments: () => ({}),
+        writeSegment: () => undefined,
+        activeSegments: () => [],
+        activateSegments: () => undefined,
+      },
+    });
+    const execute = jest.fn(() => {
+      const access = accessor.access();
+      expect(access.status).toBe('ready');
+      if (access.status === 'ready') access.commit((data) => { data.blob = blob; });
+    });
+    const h = harness([plugin('writer', {
+      setup(context) {
+        accessor = context.memory('main', {
+          version: 1, layer: 'critical', initialize: () => ({ blob: '' }),
+        });
+      },
+      onTickExecute: execute,
+    })], { memory: manager });
+    h.next();
+    h.next();
+    const failed = h.framework.getStatus();
+    expect(failed.memory.rawWriteError).toContain('exceeds');
+    expect(failed.safeMode).toBe(false);
+    expect(failed.failures).toEqual([]);
+    expect(manager.getStatus().allocations[0].dirty).toBe(true);
+    expect(raw).toBe('{}');
+    failed.memory.rawWriteError = null;
+    expect(h.framework.getStatus().memory.rawWriteError).toContain('exceeds');
+
+    blob = 'recovered';
+    h.next();
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(h.framework.getStatus().memory.rawWriteError).toBeNull();
+    expect(manager.getStatus().allocations[0].dirty).toBe(false);
+    expect(JSON.parse(raw).memoryManager.rawPartitions.writer.main.payload.blob)
+      .toBe('recovered');
+  });
+
   /** 只服务本组用例的假平台：raw 整串 + 一 tick 延迟可见的 Segment。 */
   const createPlatform = () => {
     let raw = '{}';
@@ -941,6 +990,7 @@ describe('Framework memory integration', () => {
         throw new Error('end boom');
       }),
       deferStartupWindow: jest.fn(),
+      getStatus: () => ({ rawWriteError: null }),
       bind: jest.fn(),
     };
     const h = harness([plugin('consumer', { onTickExecute })], {
@@ -960,6 +1010,7 @@ describe('Framework memory integration', () => {
       }),
       end: jest.fn(),
       deferStartupWindow: jest.fn(),
+      getStatus: () => ({ rawWriteError: null }),
       bind: jest.fn(),
     };
     const h2 = harness([plugin('consumer', {})], { memory: beginBoom });

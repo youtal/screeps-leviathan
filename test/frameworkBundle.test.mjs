@@ -156,6 +156,7 @@ test('real generated stack maps to TypeScript using uploaded main.js.map module'
     `
     const noMemory = {
       begin() {}, end() {}, deferStartupWindow() {},
+      getStatus() { return {rawWriteError: null}; },
       bind() { return () => { throw new Error('MemoryManager is not assembled'); }; }
     };
     const core = exports.createRuntime({}, { memory: noMemory });

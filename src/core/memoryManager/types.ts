@@ -33,8 +33,10 @@ export const LEGACY_NAMESPACE_KEY = 'leviathan';
 export const SEGMENT_CAPACITY = 100_000;
 
 /**
- * 主 Memory 序列化文本的长度上限（引擎限制 2 MB；这里按字符数近似，宁可略早
- * 拒绝也不把注定失败的写入交给引擎）。超限时整串写入被拒绝并按 writeError 诊断。
+ * 主 Memory 序列化文本的长度上限：官方 driver 的 RawMemory.set 使用 string.length
+ * 与 2 * 1024 * 1024 比较，单位是 UTF-16 码元，不是 UTF-8 字节或 Unicode 码点。
+ * 核验来源与边界测试见 docs/audits/2026-09-20-remediation.md §9。
+ * 超限时整串写入被拒绝并按 rawWriteError / writeError 诊断。
  */
 export const RAW_MEMORY_LIMIT = 2_097_152;
 

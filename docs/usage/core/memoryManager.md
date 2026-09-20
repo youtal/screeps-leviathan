@@ -82,6 +82,16 @@ const plugin: LeviathanPlugin = {
 
 `retryAt` 是建议重试 tick，不保证到期就绪。Framework 不会因为 pending 跳过插件的其它钩子、禁止其 Intent 或计入失败。
 
+### recovery 处置流程
+
+1. 从管理器 `getStatus()` 区分全局 `fault` 与 `allocations[]` 中具体分区的 `pending/writeError`，记录 pluginId、localId、后端和 Segment 页号。payload 不是键值对象时，`initialize` 不会覆盖历史，`migrate` 也不会绕过装载校验。
+2. 在任何人工存储修复前暂停游戏中的脚本执行，备份完整主 Memory 与相关 Segment（包括目录和 migration journal）。使用游戏存储管理工具或经审核的维护工具处理，禁止在业务模块中增加 Memory/RawMemory 旁路。
+3. 从备份恢复合法 payload，保留与目录一致的 owner、generation、dataVersion。若存在迁移 journal，必须按同一备份恢复源、目标和 journal 的一致状态，不得只删除 journal 或随意清空源页。无可验证备份时保留现场，不能用空对象宣称数据已经恢复。
+4. 主 Memory 在实例加载时形成快照：人工修复 Raw 数据或全局 fault 后，重新创建运行实例（global reset）再恢复执行。Segment 的无数据 recovery 分区会在页可见且内容修复后自动重读；版本/迁移回调问题应修正声明或代码并重建实例，不能假定所有 recovery 都会自行解除。
+5. 重新申请原身份，确认 ready、业务数据正确且后续提交成功。分区 `writeError` 可能保留最近一次故障，应结合 pending、dirty 与写入结果判断。
+
+没有通用的在线重置接口。放弃历史数据并重新初始化属于有损运维操作，必须单独确定丢弃范围和恢复方案；不要通过换 pluginId/localId 留下孤立分区来绕过恢复。
+
 ## 提交与失败
 
 - `critical` 分区在每个 tick 收尾提交；`checkpoint` 分区从首次 dirty 起算，后续修改不延后期限。
@@ -89,6 +99,12 @@ const plugin: LeviathanPlugin = {
 - 写入失败保留 dirty 与 `writeError`，下一 tick 重试；单个 Segment 分区失败不影响其它分区。
 - 单页容量上限约 100 KB（当前按 JSON 字符数计量），超限拒绝写入并保留旧数据，不自动拆页。
 - 主 Memory 序列化文本超过 2 097 152 字符时整串拒绝写入（不交给引擎），相关分区保持 dirty 并在 `writeError` 中给出体积；缩减数据后下一 tick 自动重试。
+
+主 Memory 的计量单位是 JavaScript `string.length`（UTF-16 码元）：普通汉字占 1、`😀` 占 2；不是 UTF-8 字节数。官方 driver 的 `RawMemory.set` 使用相同判断，来源与核验边界见[复审处置 R2](../../audits/2026-09-20-remediation.md#9-复审新增项评估与处置)。
+
+整串失败会阻止本次所有 Raw 更新持久化，包括 critical 分区；`critical` 表示提交时机，不保证引擎写入成功。依赖目录落盘的迁移 cleanup 会等待成功。故障期间 heap 的修改在 global reset 后可能丢失，应停止无界增长、通过 ready 分区的 `commit` 缩减可丢弃数据；宿主根字段由其所属工具缩减。默认模式保留的是根字段快照，人工修改存储须先暂停执行并在恢复前重建实例。
+
+写入失败不把已有 heap 数据的分区强制转成 pending，否则插件无法通过 commit 缩减数据自救；继续处理无关业务，并用 Framework 状态或管理器状态监测恢复。
 
 ## 分配与迁移
 
@@ -115,6 +131,8 @@ const status = memory.getStatus();
 ```
 
 `rawWriteError` 非空表示主 Memory 整串写入最近一次失败（体积超限或引擎抛错），与是否存在待提交分区无关；下一 tick 自动重试，成功后清空，不阻断申请。
+
+应用也可通过 `framework.getStatus().memory.rawWriteError` 读取同一诊断，无需引用 MemoryManager 实现。此状态独立于 safeMode 和插件故障计数，读取的是调用时的最近一次写入结果。
 
 `fault` 非空表示存储无法解析（未知 schema、非法容器形状）：此时所有申请返回 `pending('recovery')`，管理器拒绝写入，原始数据保持不变。
 
@@ -161,6 +179,6 @@ const status = memory.getStatus();
 ## 未交付
 
 - 同一 global 只应装配一个 MemoryManager：多个实例各自持有 heap 快照，会在同一命名空间上互相覆盖。
-- 容量按字节的精确计量与目标运行时实测口径。
+- 目标服务器的实际运行验证；主 Memory 的 UTF-16 长度口径已核对官方 driver，修改过限制的私服需要单独核验。
 - 迁移期间的在线修改（当前冻结搬迁分区）与多迁移并行。
 - 独立 heap 监控设施；旧布局导入仅覆盖插件 payload，Profiler 统计与健康表保留在原处不迁移。
