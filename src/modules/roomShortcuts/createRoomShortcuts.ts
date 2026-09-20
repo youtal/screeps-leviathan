@@ -51,6 +51,13 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
   const initedRooms: { [roomName: string]: boolean } = {};
   const initializedAt: { [roomName: string]: number } = {};
   const shortcutsCache: ShortcutsCache = {};
+  /**
+   * 已就“失去视野”告警过的房间。首次无视野调用记录一条 warn，之后同一房间的
+   * 重复调用静默返回空值，直到该房间再次有视野时清除标记，下一次失去视野会重新告警。
+   * 生命周期与上面三个容器相同：只在当前 global 内有效，reset 后最多多告警一次。
+   * 目的：循环里查询多个无视野房间时不刷屏，也不反复触发 error 通知策略。
+   */
+  const visionWarned: { [roomName: string]: boolean } = {};
 
   const invalidate = (roomName: string): void => {
     /**
@@ -277,7 +284,7 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
    * 多对象查询以空数组表示无结果，使调用方无需额外判断 null。
    *
    * 空结果契约（与 docs/design/modules/roomShortcuts.md 一致）：房间不存在该类别建筑不是错误，
-   * 只有“无视野”“初始化失败”等异常路径才记录错误日志，其余空结果静默返回。
+   * “初始化失败”等异常路径记录错误日志；“无视野”按房间只记录一次警告，其余空结果静默返回。
    * 泛型 K 让返回值随传入键收窄；isSingle 只影响返回形态，不改变缓存内容。
    */
   const createGetter = <K extends ALL_CACHED_KEY>(
@@ -287,12 +294,16 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
   ): CachedObject<K> | CachedObject<K>[] | undefined => {
     /** 无视野时缓存无法验证：立即失效，并按查询形态返回空值。 */
     if (!getRoom(roomName)) {
-      log.error(
-        `no visual on Room ${roomName}, structure shortcuts unavailable.`
-      );
+      if (!visionWarned[roomName]) {
+        visionWarned[roomName] = true;
+        log.warn(
+          `no visual on Room ${roomName}, structure shortcuts unavailable.`
+        );
+      }
       invalidate(roomName);
       return isSingle ? undefined : [];
     }
+    delete visionWarned[roomName];
     /**
      * 租约判断：以完整初始化时刻为起点，差值与 normalizedCacheLeaseTicks 比较。
      * forceReInit 时短路为 false，让下面的分支统一走“强制刷新”路径。
