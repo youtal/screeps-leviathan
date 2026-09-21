@@ -1,6 +1,6 @@
 # Leviathan Framework 设计
 
-交付状态：Framework 协议、Runtime 消费、MemoryHost 生命周期驱动与插件事务已交付。
+交付状态：部分交付。Framework 协议、Runtime 消费与插件事务已交付；Memory 同步装载错误契约接入未交付。
 
 ## 1. 模块定位
 
@@ -40,7 +40,7 @@ Kernel 与生命周期合并在工厂实现中，避免重复维护两套执行�
 
 1. 将本轮管理命令应用到候选注册表。
 2. 校验重复 id、缺失依赖、依赖环和服务冲突；全部成功才替换注册表。
-3. 创建默认 Profiler，令其访问实例内的 heap 统计容器。
+3. 驱动 Runtime 的 MemoryHost.begin 同步装载存储；Profiler 消费 Runtime 提供的实例。
 4. 按依赖顺序执行所有获准插件的 `setup`，随后才执行任何 `onTickBegin`。
 
 这保证高层订阅者能在底层插件的 begin 事件发布前完成订阅。CPU 不足的插件推迟初始化。
@@ -145,13 +145,13 @@ pluginId 由 Context 注入，插件不能伪造其他提交者。提交时复�
 | failed   | 执行函数抛异常                                     |
 | deferred | 胜出但 CPU 不足，未调用 API                        |
 
-每轮回执只在 heap 保留至下一 tick，不写入 RawMemory，也不累计无限历史。global reset 后插件直接依据 Game 世界事实恢复；确实需要跨 reset 保留的关键事务由业务通过独立 MemoryManager 的 critical 策略提交。
+每轮回执只在 heap 保留至下一 tick，不写入 RawMemory，也不累计无限历史。global reset 后插件直接依据 Game 世界事实恢复；确实需要跨 reset 保留的关键事务由业务通过 MemoryManager 分区保存，在本 tick end 统一提交；提交完成前仍可能因硬终止丢失。
 
 ## 7. 存储边界
 
-Framework 不承担 RawMemory 解析、Memory 挂载、Segment 分配、数据迁移或写回。实例内健康表和默认 Profiler 统计在 global reset 后清空。
+Framework 不承担 RawMemory 解析、Memory 挂载、分区格式转换或写回。实例内健康表和默认 Profiler 统计在 global reset 后清空。
 
-持久化由 [MemoryManager](./memoryManager.md) 独立管理；Framework 通过 Runtime 中的 MemoryHost 端口在 tick 边界驱动 begin/end，并在安全模式、CPU 未准入或插件 setup 失败时延后封存申请窗口。Runtime 统一装配遵循 [Core 架构](./README.md)。
+持久化由 [MemoryManager](./memoryManager.md) 独立管理；Framework 在插件 setup/钩子之前调用 Runtime 中的 MemoryHost.begin，在所有已进入阶段的插件收尾后调用 end。分区申请同步成功或抛错，不设申请窗口或等待句柄。若上个 tick 因硬终止或遗漏收尾未完成，Framework 在真实的新 tick 顶层恢复自身阶段与临时重入锁，并继续调用 MemoryHost.begin，由存储宿主恢复遗留阶段并继续处理保留的脏集合；不能因旧 tick 的运行标记永久拒绝后续 loop。loop 必须使用带真实 tick 归属的重入锁，不能仅依赖 running 布尔值和 finally 复位；同 tick 同步重入仍拒绝。交付时须在真实引擎验证 CPU 硬终止是否保留 heap 及下一 tick 的恢复行为。begin 装载异常进入宿主错误边界和安全模式；插件申请异常进入所属插件的错误边界；end 写入失败保留可用访问器和重试资格。Runtime 统一装配遵循 [Core 架构](./README.md)。
 
 ## 8. ErrorMapper、Profiler 与故障隔离
 
@@ -183,7 +183,7 @@ Profiler 的起始取样失败时直接执行原函数。结束时先恢复调�
 
 安全模式只提供诊断与可执行的收尾；首版没有内建最低生存策略。
 
-FrameworkStatus 的 `memory.rawWriteError` 通过 MemoryHost.getStatus 投影最近一次主 Memory 写入错误，查询时生成独立快照；不读取存储实现或逐 tick 分配诊断对象。存储写入失败与插件执行故障分开，不增加失败计数或触发安全模式，允许插件通过正常 commit 缩减数据自救。此诊断协议已交付。
+FrameworkStatus 的 memory 诊断通过 MemoryHost.getStatus 投影 loadError 与 rawWriteError，查询时生成独立快照；不读取存储实现或逐 tick 分配诊断对象。装载失败按宿主故障处理；存储写入失败与插件执行故障分开，不增加失败计数或触发安全模式，允许插件通过正常 commit 缩减数据自救。装载诊断扩展未交付。
 
 ## 9. CPU 与性能观测
 

@@ -1,5 +1,7 @@
 # MemoryManager 使用说明
 
+本文描述已交付接口。模块独立分区缓存、无 pending 的长期访问器与深路径 API 见 [目标设计](../../design/core/memoryManager.md)，尚未交付；不要将目标方法作为已可调用接口。
+
 `createMemoryManager` 提供持久化存储：模块按稳定身份申请分区，通过 `MemoryAccessor` 每 tick 判断就绪状态并读写自己的数据。Runtime 负责组装，Framework 在 tick 边界驱动 `begin/end`；模块不接触 RawMemory 与 Segment。
 
 ```ts

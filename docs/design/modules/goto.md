@@ -42,7 +42,7 @@ goto 负责移动规划、CostMatrix 复用、方向缓存、己方 creep 阻塞
 | `getResult(handle)` | 返回排队、规划、应答或提交结果的只读快照 | tick/generation 过期返回 expired，不暴露可变计划 |
 | `cancel(context, creepId, generation)` | 撤销本人本轮计划和配对；幂等 | commit 前有效；已调用原生 move 后不能承诺撤回 |
 | `release(context, creepId)` | 解除本人长期 owner 绑定，并取消相关请求 | 不清除公共方向缓存 |
-| `weights` | 有向权重的 get/list/set/delete/update/reset，详见 §4 | 持久化唯一入口；未就绪返回 pending |
+| `weights` | 有向权重的 get/list/set/delete/update/reset，详见 §4 | 持久化唯一入口；分区申请失败报告 storageError |
 | `configureProfile(profile)` | 创建或显式替换 profile；替换必须递增 version | setup 或 tick 边界生效，清除依赖该版本的 heap 缓存 |
 | `setRoomAreas(room, profileId, areas)` | 替换该房间/profile 的厌恶区域，返回区域 revision | 仅 heap；修改在下一 tick 边界生效，不使用时间过期 |
 | `registerPolicies(context, definitions)` | 登记 owner 的策略，返回 dispose 句柄 | owner setup；替换版本须递增，停用清理 |
@@ -124,13 +124,13 @@ AB 不设 TTL，但允许按内存上限淘汰；“无有效期”不等于永�
 | `update(changes, expectedRevision?)` | 原子批量 set/delete；先全量验证，再提交 |
 | `reset(expectedRevision)` | 显式清空用户边规则，环境硬限制仍生效 |
 
-结果为 applied/unchanged/pending/conflict/invalid/capacityExceeded，附 revision 及失败原因。校验房间名、相邻关系、批次/存储容量和版本；任一项失败整批不变。同值更新不增加 revision。读写仅在实例 active 且本 tick 存储 ready 时允许；未装配返回 notReady，pending 不排队隐式写入。
+结果为 applied/unchanged/storageError/conflict/invalid/capacityExceeded，附 revision 及失败原因。校验房间名、相邻关系、批次/存储容量和版本；任一项失败整批不变。同值更新不增加 revision。读写仅在实例 active 且已成功取得分区访问器时允许；未装配返回 notReady，分区申请失败不排队隐式写入。
 
-setup 使用 `context.memory('roomWeights', { version: 1, layer: 'critical', … })` 申请分区。每 tick 重新 access，通过本 tick ready 视图 query/commit，禁止保存跨 tick 数据引用。先验证新快照，再 commit，成功后同步发布 heap 副本及 routingRevision。applied 表示已交给管理器，不声称底层已耐久写入。
+setup 使用 `context.memory('roomWeights', { version: 1, … })` 同步申请分区，并保存长期有效的访问器，通过 query/commit 读写；完整契约见 [MemoryManager 设计](../core/memoryManager.md)。先验证新快照，再 commit，成功后同步发布 heap 副本及 routingRevision。applied 表示已交给管理器，不声称底层已耐久写入。
 
 单次规划固定权重快照。任何生效更新都使所有跨房路由和方向缓存延迟失效：未被旧路径使用的边变便宜也可能改变房间选择。已排队的跨房计划在执行前重新比对版本，变化即取消。
 
-pending 或数据损坏时，暂停跨房规划/动作和权重写入；房内移动、观察和同房避让继续。global reset 后确认权重加载成功再允许过房，不能暂时套用默认值放行。只在首次初始化空分区时创建空规则表；无效数据保留诊断，不自动清空覆盖。配置容量按条数和序列化字节双重限制。
+分区申请异常由模块捕获并记录 storageError，暂停跨房规划/动作和权重写入；房内移动、观察和同房避让继续。该降级只处理分区申请故障；主存储 begin 装载异常由 Framework 的宿主错误边界处理。global reset 后确认权重加载成功再允许过房，不能暂时套用默认值放行。只在首次初始化空分区时创建空规则表；无效数据保留诊断，不自动清空覆盖。配置容量按条数和序列化字节双重限制。
 
 ## 5. 原生寻路接口与跨房规划
 
@@ -306,7 +306,7 @@ RequestHandle 初始结果为 queued 或参数错误，规划后为 arrived/plan
 
 inspect 输出分层矩阵命中、内容更新/仅观察次数、方向命中/0 格 miss、因矩阵或政策失效的 goal 数、数组与元数据字节、原生搜索及合并验证 CPU、完整/未完成搜索数、confirmed/potential 阻塞、应答与实际让路比例、等待时长及单边失败数。日志限频，不在每 tick 序列化矩阵和整个 pathCache。
 
-阶段权限错误、存储 pending、预算不足、策略失败与无路有独立 reason。停用释放 heap/订阅与策略注册，权重分区按 MemoryManager 生命周期保留，不因普通停用清空用户规则。
+阶段权限错误、存储申请故障、预算不足、策略失败与无路有独立 reason。停用释放 heap/订阅与策略注册，权重分区按 MemoryManager 生命周期保留，不因普通停用清空用户规则。
 
 ## 11. 验证与交付安排
 
@@ -314,7 +314,7 @@ inspect 输出分层矩阵命中、内容更新/仅观察次数、方向命中/0
 
 | 阶段 | 验收重点 |
 | --- | --- |
-| 工厂、存储与生命周期 | 工厂无副作用；有向权重 CRUD/原子批次；pending/reset；实例隔离；begin 收集/execute 规划/owner flush/end 轮换 |
+| 工厂、存储与生命周期 | 工厂无副作用；有向权重 CRUD/原子批次；同步申请失败/reset；实例隔离；begin 收集/execute 规划/owner flush/end 轮换 |
 | AB/ABC 与 d | road profile；公共非己方 rampart 禁行；结构拆除局部恢复；同 tick 双版本；未变化观察不失效；区域替换；无视野 |
 | 方向表 | 奇偶 nibble 不互相破坏；1–8 编解码；到达点为 0；无起点共享；不同搜索交叉不成环；跨房边界；依赖过期整 goal 丢弃 |
 | 双表与协作 | API OK 但未移动；fatigue 不入表；名字复用；tickEnd 中断；消费者顺序调换；t 应答/t+1 同时提交；工作改变撤销；第三方抢位与单边失败 |
@@ -331,7 +331,7 @@ inspect 输出分层矩阵命中、内容更新/仅观察次数、方向命中/0
 - 部分原生路径不进入共享方向表，搜索预算偏低时需待续任务才能建立完整跨房缓存；待续任务须严格限额。
 - 同步让路允许请求者进入“计划释放”的格子，无法完全消除一次无效 move；双表负责纠正事实，不保证消除所有引擎冲突。
 - 集中规划依赖业务在 begin 提供完整移动决策。仅在 execute 才能确定的任务，应延期登记，或另外审议框架阶段协议，不隐式改变调用顺序。
-- 默认容量、CPU 预算、合并步数、冷却和重试阈值待基准确定。持久化启用前须验证 MemoryManager 迁移/pending/reset 的数据一致性。
+- 默认容量、CPU 预算、合并步数、冷却和重试阈值待基准确定。持久化启用前须验证 MemoryManager 业务版本迁移、同步申请失败与 reset 的数据一致性。
 
 ## 13. 平台与项目依据
 

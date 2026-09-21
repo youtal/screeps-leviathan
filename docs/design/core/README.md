@@ -1,6 +1,6 @@
 # Core 架构设计及开发原则
 
-交付状态：统一内核装配、单向依赖边界与事务性插件注册已交付。
+交付状态：部分交付。统一内核装配、单向依赖边界与事务性插件注册已交付；Memory 同步分区申请及长期访问契约接入未交付。
 
 本设计定义 Core 的架构与开发原则。模块设计入口：[Framework](./framework.md)、[Runtime](./runtime.md)、[Profiler](./profiler.md)、[ErrorMapper](./errorMapper.md)、[MemoryManager](./memoryManager.md)。
 
@@ -45,7 +45,7 @@ Runtime 不导入 Framework 实现；内核模块通过端口和回调接入，�
 | EventBus | 事件发布订阅及资源清理；不决定游戏业务行为 |
 | Profiler | 调用计时、统计及报告；观测失败不能反向阻塞被观测能力 |
 | ErrorMapper | 堆栈还原与错误规范化；映射失败保留原始诊断 |
-| MemoryManager | Accessor、RawMemory/Segment 分配、迁移恢复和持久化提交 |
+| MemoryManager | 模块独立分区、长期 Accessor、深路径读写、分区 JSON 缓存与主存储提交 |
 
 `MemoryAccessor` 是 MemoryManager 对模块提供的句柄，而非额外内核实例。Logging 由 Runtime 统一组装，为普通模块、EventBus、Profiler、ErrorMapper 和 MemoryManager 注入作用域日志能力。
 
@@ -62,9 +62,7 @@ PluginRegistry、生命周期执行器、CPU 准入、IntentBroker 属于 Framew
 
 如 App 需要固定普通插件，可将其作为强制装配的应用组成部分，但它仍是普通插件，不取得内核能力身份。哪些业务插件必须固定装配由 App 决定，不将 RoomShortcuts 或 Goto 自动列为内核。
 
-实例化阶段校验不等于存储已经就绪。RawMemory 读取、Segment 加载与数据迁移由 tick 生命周期推进。强制装配也不能绕过引擎硬 CPU 终止。
-
-初始插件的 Memory 申请集合，与插件是否允许卸载分开判断：在受保证的启动申请窗口内申请的模块参与本 global 的分配；窗口关闭后的新申请使用 RawMemory。仅按“普通插件”标签排除其首 tick 申请，不符合高优先级业务模块使用 Segment 的目标。
+实例化阶段只装配能力；主存储由首次 begin 同步装载，分区在申请时同步完成初始化或业务数据版本迁移。申请必须在成功的 begin 之后，允许后续 tick 申请，不设集中分配窗口。强制装配不能绕过引擎硬 CPU 终止。
 
 ## 4. 身份及能力作用域
 
@@ -99,18 +97,18 @@ Runtime 开始本 tick：Memory 加载/恢复、必要观测准备
 → Framework 执行插件初始化与各生命周期、Intent 仲裁
 → 所有普通插件收尾
 → Runtime 完成观测收尾
-→ MemoryManager 关闭启动申请窗口（仅一次）、推进迁移、提交
+→ MemoryManager 编码全部脏分区、复用 clean 片段、拼接并提交主存储
 ```
 
 不要求 EventBus 或 Profiler 为统一接口虚构无意义钩子。Memory 收尾不依赖普通插件排序，不受普通插件启停控制。持久化提交本身的耗时统计若发生在本次 flush 之后，应留待后续提交，不能为保存自身统计递归 flush。
 
-Profiler 尚未取得持久化状态时，可以跳过依赖该状态的采样或暂存 heap 样本；若选择暂存，必须定义恢复后的合并和去重规则，不能直接覆盖历史统计。
+Profiler 若接入持久化，须在存储 begin 成功后同步申请分区；申请失败不得覆盖历史统计。默认 heap 统计的生命周期由 Profiler 自身定义。
 
-## 6. Memory 局部就绪契约
+## 6. Memory 同步访问契约
 
-采用 [MemoryManager 设计](./memoryManager.md) 中的 `MemoryAccess<M>` 判别联合。`pending` 只暂停依赖该 Accessor 的读取、决策和修改。模块可以继续独立的 Game 查询、计算、事件和 Intent，Framework 不因此跳过整个插件或触发熔断。
+采用 [MemoryManager 设计](./memoryManager.md) 的模块独立分区与长期访问器。申请成功即可直接 query/get/commit/remove，句柄跨 tick 有效；申请失败抛出可定位的错误，不返回 pending。深路径用于开发体验，序列化和片段缓存的粒度固定为分区。
 
-指定存储优先级的模块必须处理 pending，并在后续 tick 重试。不可使用缓存的旧访问句柄绕过等待。该要求必须写进未来模块开发规范及 Memory 使用说明；不能把初始化申请放在可能永远不执行的业务分支里，却期望参加首 tick 排名。
+模块只通过显式修改 API 标脏，不通过 query/get 返回的引用旁路修改。无待提交变化时收尾进行 O(1) 判断；有修改时编码全部脏分区，其他对象不遍历。所有分区在本 tick end 统一提交；写入失败保留 heap 修改、脏状态与已提交片段，下一 tick 按最新工作数据重试。单分区编码失败阻断整体提交，模块停用不清除其脏状态；真实的新 tick 顶层须恢复中断遗留阶段，具体恢复协议见 MemoryManager 设计。
 
 ## 7. 性能、故障与开发原则
 
@@ -118,8 +116,8 @@ Profiler 尚未取得持久化状态时，可以跳过依赖该状态的采样�
 - **Memory 访问边界（强制）**：`core/memoryManager` 是唯一允许接触 Memory/RawMemory/Segment 的模块；其它模块只能通过 `context.memory` 申请分区。越界访问属于阻断问题，由 `test/memoryBoundary.test.ts` 自动扫描 `src/` 拦截。
 - 优先小函数、明确输入输出及端口注入；允许闭包缓存和受控原地更新，注明创建、失效、清理和 reset 行为。
 - 按 tick 调用平台访问器，不长期保存 Game 对象。限制统计标签、错误缓存和未释放订阅的常驻规模。
-- 区分等待、配置错误、数据损坏和插件执行失败；等待不计失败，损坏不能无限伪装成 pending。
-- 内核失败按能力降级：日志保留最小输出、映射退回原堆栈、观测可暂停；存储异常保护原始数据，不自动停止所有不依赖 Memory 的活动。
+- 区分配置错误、装载损坏、分区申请失败、写入失败和插件执行失败；存储故障不能伪装成等待状态。
+- 内核失败按能力降级：日志保留最小输出、映射退回原堆栈、观测可暂停；存储装载故障保护原始数据并进入宿主错误边界；写入失败保留访问器可用，不自动阻止业务缩减数据后重试。
 - 构造阶段尽量只组装与校验，存储副作用在明确的生命周期执行；测试可以替换平台和输出端口。
 - 修改公共契约时同步设计与使用文档，源码遵循根 AGENTS.md 注释要求；完成代码改动后按仓库要求验证，不自动部署。
 
@@ -141,7 +139,7 @@ Logger 是内核能力，由 Runtime 组装唯一工厂；内核模块与普通�
 
 1. **注入而不自建**：模块在自身工厂中要求调用方提供 `LoggerFactory`；模块内部不得导入 Logger 具体实现、使用默认单例或调用 `createLogging()`。独立测试也在测试装配边界显式创建并注入 Logger。
 2. **作用域固定且每实例派生一次**：以模块名作为作用域（`MemoryManager`、`EventBus`、`Profiler`、`ErrorMapper`），在工厂创建时 `scope()` 一次并复用；禁止每次故障重新派生。
-3. **只在状态迁移与故障上输出**：每 tick 都会发生的路径（提交、心跳、pending 往返）只允许 `debug`；状态迁移用 `info`（默认关闭）；可自愈异常用 `warn`；不可自愈的数据问题用 `error`。不得在热路径输出 `info` 及以上等级。
+3. **只在状态迁移与故障上输出**：每 tick 都会发生的路径（提交、心跳）只允许 `debug`；状态迁移用 `info`（默认关闭）；可自愈异常用 `warn`；不可自愈的数据问题用 `error`。不得在热路径输出 `info` 及以上等级。
 4. **一次事件一次**：同一故障、同一分区、同一原因只记录首次或原因变化的那一次，恢复后重置去重状态，避免逐 tick 刷屏。
 5. **日志不是唯一诊断**：结构化状态（`getStatus()` 等）是权威出口，日志是补充；日志失败不得改变业务流程，也不得把 logger 或日志文本写入持久数据。
 6. **邮件策略跟随装配**：内核能力不自行开启 `notify`，是否发送邮件由 App 的装配策略决定。

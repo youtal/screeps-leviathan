@@ -1,6 +1,6 @@
 # Runtime 设计
 
-交付状态：完整 Core Runtime、单向装配、模块上下文派生及 Framework 注入已交付；Profiler 的 MemoryAccessor 持久化接入未交付。
+交付状态：完整 Core Runtime、单向装配、模块上下文派生及 Framework 注入已交付；Profiler 的 MemoryAccessor 持久化接入、Memory 同步分区契约装配未交付。
 
 ## 定位
 
@@ -43,7 +43,7 @@ ProfilerStorage 将统计访问器与可选标脏动作放在同一对象中。�
 
 `createContext(moduleName, options)` 为普通模块派生 `ModuleContext`。所有上下文共享 Runtime 的 EventBus、Profiler 与 MemoryManager，并以模块名绑定 Memory owner；每次调用创建独立 Env 和日志作用域。Game 访问器在调用时取得当 tick 对象，不缓存跨 tick 引用。
 
-Logger、总线订阅、Profiler 统计、ErrorMapper 缓存和派生工厂都驻留 heap，随 global reset 重建。MemoryManager 的持久化数据按自身目录与 journal 恢复。默认 Profiler 数据驻留 heap；持久化统计必须经 MemoryManager 契约接入，不能建立存储旁路。
+Logger、总线订阅、Profiler 统计、ErrorMapper 缓存和派生工厂都驻留 heap，随 global reset 重建。MemoryManager 在首次 begin 同步装载命名空间并建立分区片段，申请时完成业务版本迁移；访问器在本 global 内长期有效。默认 Profiler 数据驻留 heap；持久化统计必须经 MemoryManager 契约接入，不能建立存储旁路。
 
 ## 故障与性能边界
 
