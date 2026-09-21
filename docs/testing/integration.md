@@ -92,15 +92,23 @@ heap 探针、`assertRuntimeClean()` 统一错误口径、`withWorld()` 保证 d
 | 场景                     | 覆盖内容                                                                                                   |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------- |
 | `leviathan-runtime`      | 正式 bundle 装载、连续 tick、生产 loop 计数、可见房间、CPU API、游戏内 sourcemap、空 Memory                |
-| `leviathan-global-reset` | 旧 `leviathan` 布局与无关根字段原样保留、跨 global 的 Memory 继承与 heap 重建、未知 schemaVersion 拒绝覆盖 |
-| `leviathan-segments`     | Segment 激活后跨 tick 读写、按页隔离、单页承载 `SEGMENT_CAPACITY` 的往返完整性                             |
+| `leviathan-global-reset` | 旧 `leviathan` 布局导入与原样保留、无关根字段保留、跨 global 的 Memory 继承与 heap 重建、未知 schemaVersion 拒绝覆盖并进入安全模式 |
+| `leviathan-memory`       | 探针插件的长期访问器与 schemaVersion 2 写出、UTF-16 容量上限、完整提交 CPU、CPU 硬终止后的 heap 保留与恢复、global reset 恢复 |
 
-三个场景都在内存里的 main 模块末尾追加 heap 计数器，不改写 `dist/`，也不会进入部署产物。
+`leviathan-runtime` 与 `leviathan-global-reset` 在内存里的正式 main 模块末尾追加 heap 计数器，不改写 `dist/`，也不会进入部署产物。
+`leviathan-memory` 使用构建入口 `bundleCore()` 额外编译的 `src/core/index.ts` CJS 产物（只写入临时构建上下文的
+`support/leviathan-core.js`）装配探针 bot：一个申请 state、bulk 两个分区的插件，控制台只写探针的 heap 命令变量，
+由下一 tick 的 loop 消费，场景不直接改写 Memory。构建上下文另写入 `support/contract.json`（`RAW_MEMORY_LIMIT` 标量）。
 `leviathan-global-reset` 用「世界 A 运行 → Memory 快照 → 世界 B 以快照启动」等价表达一次 global
 reset：新 isolate 的探针必须从 1 重新计数（若 heap 被继承会得到阶段 1 的累计值），Memory 则必须
 原样继承。它同时验证 `src/core/memoryManager/namespace.ts` 的两条持久化契约——旧布局只读保留、
-未知 `schemaVersion` 报告诊断且不写入任何存储；后者期望日志中出现
+未知 `schemaVersion` 报告诊断、进入安全模式且不写入任何存储；后者期望日志中出现
 `storage load failed: Unsupported MemoryManager schema`，属于**预期内**诊断，不算运行错误。
+
+`leviathan-memory` 的实测记录（screeps 4.3 私服，主文本约 209 万码元）：clean tick 的 loop 约 0.06 CPU，
+仅小分区变化（大分区复用片段、整串拼接与写入）约 1.5–2.0 CPU，大分区重新编码约 6–10 CPU；在插件回调内
+死循环触发 CPU 硬终止后 **heap 保留**（模块只初始化一次、loop 计数连续），后续 tick 的 Framework 与
+MemoryManager 自动恢复，终止前回调已做的修改随后提交。
 
 **错误口径**：框架自带的 `report.errors` 只按硬编码模式分类（`TypeError:`、`is not defined` 等），
 普通 `throw new Error('...')` 不会进入其中，只留在 `report.logs`。因此场景应使用
@@ -112,15 +120,11 @@ reset：新 isolate 的探针必须从 1 重新计数（若 heap 被继承会得
 - Screeps 私服及其构建链包含多个停止维护的传递依赖，`npm audit --prefix test/integration/runner` 会报告上游遗留漏洞。该依赖树
   仅用于隔离容器，不得在宿主直接安装或作为对外服务运行；处置及复查见 [P1 整改记录](../audits/2026-09-19-p1-remediation.md)；
 - mockup 的 storage 连接不能在同一 Node 进程内完全释放，隔离 worker 退出是当前清理机制；
-- 框架未提供“保留同一 storage 并只重启玩家 isolate”的 API，global reset 只能按
-  `leviathan-global-reset` 的等价方式验证。heap 重建与 Memory 继承是可观测契约，但**主 RawMemory 与
-  Segment 之间的分区搬迁、journal 迁移与恢复仍未覆盖**：这些路径需要通过 context.memory 申请分区的业务插件，
-  当前生产 bundle 只有不声明持久化的 `roomShortcuts`，命名空间只存在于 heap，不会写回 Memory；
-- **Segment 语义与线上不同**（由 `leviathan-segments` 实测）：本环境不强制 `setActiveSegments`
-  前置条件，未激活也能直接读写；`RawMemory.get().activeSegments` 恒为 `null`；单页写入约 12 万字符
-  会让 isolate 崩溃而不是抛出可捕获错误。因此“超限拒绝写入并保留旧数据”的失败路径与 MemoryManager
-  的 `pending`/激活延迟分支**无法在本环境验证**，必须在真实服务器复核；单页 100 KB 口径目前只验证了
-  `SEGMENT_CAPACITY` 这个合法上界可以完整往返；
+- 框架未提供“保留同一 storage 并只重启玩家 isolate”的 API，global reset 只能按「快照 → 新世界」的等价方式验证；
+- 内联 Memory 快照中的任何嵌套**字符串**值都会被 `screeps-integration-tests` 当作 fixture 名解析（库的行为），
+  以快照启动新世界的场景必须保证快照不含字符串值；
+- CPU 硬终止后 heap 保留是本私服 driver 的实测行为，官方服务器可能在硬终止后重建 isolate，两种情形都由
+  MemoryManager 与 Framework 的恢复协议覆盖；
 - npm 包没有 TypeScript 声明，项目使用 JavaScript scenario 与 CLI 隔离这项限制；
 - 完整私服的 backend、上传接口和多进程 launcher 兼容性需要未来独立的端到端环境覆盖。
 

@@ -70,12 +70,12 @@ framework.register({
 
 | 实例方法                     | 用途                                            |
 | ---------------------------- | ----------------------------------------------- |
-| `loop()`                     | 运行当前 tick；同一 tick 重复调用忽略，重入拒绝 |
+| `loop()`                     | 运行当前 tick；同一 tick 重复调用忽略，同一 tick 内重入拒绝 |
 | `register(plugin)`           | 排队安装插件，下一次 loop 应用                  |
 | `enable(id)` / `disable(id)` | 排队启停；依赖停用时使用者自动挂起              |
 | `unregister(id)`             | 排队卸载，不存在时忽略，不触碰外部存储         |
 | `recover(id)`                | 在 loop 外清除已安装插件的连续失败与熔断状态    |
-| `getStatus()`                | 最近一次 tick、safeMode、结构化故障列表与 `memory.rawWriteError` |
+| `getStatus()`                | 最近一次 tick、safeMode、结构化故障列表与 `memory.loadError/rawWriteError` |
 
 管理命令以批次校验。重复 id、缺失依赖、依赖环或重复服务会使整批失败；当前 tick 不运行业务，旧注册表保留，可在下一 tick 恢复。移除仍被其他插件 requires 的提供者需在同一批中同时移除使用者。
 
@@ -100,7 +100,9 @@ Framework 不读取或写入 RawMemory，也不挂载全局 Memory。它只驱�
 
 健康记录和默认 Profiler 累计值只存在于实例 heap，global reset 后丢失。业务自己的闭包可保存跨 tick 缓存，但不能依赖它跨 reset 恢复。
 
-Memory 的申请、pending 处理与提交规则见 [MemoryManager 使用说明](./memoryManager.md)。
+每个 tick 先调用 MemoryHost `begin`（首次同步装载存储），插件 setup 与钩子中通过 `context.memory` 同步申请分区；所有插件收尾后调用 `end` 统一提交。装载失败时本 tick 进入安全模式、不执行插件阶段；申请失败抛错并进入插件自身的错误边界。申请、深路径与提交规则见 [MemoryManager 使用说明](./memoryManager.md)。
+
+重入保护带真实 tick 归属：引擎 CPU 硬终止会跳过 `finally`，若 heap 保留，遗留的运行标记只在同一 tick 内有效，下一个 tick 的 `loop()` 自动恢复，不会被永久判为重入。
 
 ## 意图提交和核验
 
@@ -132,7 +134,7 @@ onTickExecute(context) {
 
 ## 配置与诊断
 
-`framework.getStatus().memory.rawWriteError` 为主 Memory 最近一次整串写入失败原因，成功后为 null。该字段通过 Runtime 的 MemoryHost 读取，仅查询状态时投影，不增加每 tick 轮询。写入失败不计入插件故障，也不强制 safeMode 或存储 pending，插件仍可缩减数据后重试。返回的 memory 对象是独立快照。
+`framework.getStatus().memory.loadError` 为存储装载故障（此时每个 tick 都处于 safeMode）；`memory.rawWriteError` 为主 Memory 最近一次整串提交失败原因（形如 `capacity: …`、`validate owner/localId: …`），成功后为 null。两者通过 Runtime 的 MemoryHost 读取，仅查询状态时投影，不增加每 tick 轮询。写入失败不计入插件故障，也不强制 safeMode，插件仍可修正或缩减数据后重试。返回的 memory 对象是独立快照。
 
 | 配置               | 默认值                  | 说明                                           |
 | ------------------ | ----------------------- | ---------------------------------------------- |

@@ -1,6 +1,6 @@
 # Runtime 设计
 
-交付状态：完整 Core Runtime、单向装配、模块上下文派生及 Framework 注入已交付；Profiler 的 MemoryAccessor 持久化接入、Memory 同步分区契约装配未交付。
+交付状态：完整 Core Runtime、单向装配、模块上下文派生、Framework 注入及 Memory 同步分区契约装配已交付；Profiler 的 MemoryAccessor 持久化接入未交付。
 
 ## 定位
 

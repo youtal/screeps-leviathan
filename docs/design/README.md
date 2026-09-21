@@ -6,7 +6,7 @@
 - [Logger](./core/logger.md)：等级与作用域、输出端口、邮件策略与装配边界。
 - [ErrorMapper](./core/errorMapper.md)：同步错误边界、堆栈映射与诊断降级。
 - [Core 架构及开发原则](./core/README.md)：内核分类、统一装配、注册及开发边界。
-- [MemoryManager](./core/memoryManager.md)：模块独立分区、分区 JSON 缓存、长期访问器、深路径读写与同步故障协议（未交付）。
+- [MemoryManager](./core/memoryManager.md)：模块独立分区、分区 JSON 缓存、长期访问器、深路径读写与同步故障协议。
 - [Framework](./core/framework.md)：生命周期、插件事务、故障隔离、CPU 与意图仲裁。
 - [Profiler](./core/profiler.md)：嵌套计时、统计存储与故障隔离。
 - [Runtime](./core/runtime.md)：共享能力和上下文组合。

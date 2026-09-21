@@ -104,7 +104,7 @@ export const createKernelThing = (options: Options) => {
 
 | 场景 | 等级 | 说明 |
 | --- | --- | --- |
-| 每 tick 都会发生（提交、心跳、pending 往返） | `debug` | 默认关闭，排查时用 `levels: { debug: true }` 打开 |
+| 每 tick 都会发生（提交、心跳） | `debug` | 默认关闭，排查时用 `levels: { debug: true }` 打开 |
 | 状态迁移（初始化、后端切换、恢复完成） | `info` | 默认关闭，排查时打开 |
 | 可自愈异常（写入失败、页面被占用、容量超限） | `warn` | 同一原因只记一次 |
 | 不可自愈的数据问题（schema 非法、归属冲突、版本降级） | `error` | 每实例或每分区首次 |

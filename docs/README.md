@@ -20,7 +20,7 @@
 | EventBus | [core/eventBus](../src/core/eventBus/) | 独立文档待补充；分类见 Core 架构 | 待补充 |
 | ErrorMapper | [core/errorMapper](../src/core/errorMapper/) | [设计](./design/core/errorMapper.md) | [使用](./usage/core/errorMapper.md) |
 | Logger | [core/logger](../src/core/logger/) | [设计](./design/core/logger.md) | [使用](./usage/core/logger.md) |
-| MemoryManager | [core/memoryManager](../src/core/memoryManager/) | [目标设计（未交付）](./design/core/memoryManager.md) | [使用](./usage/core/memoryManager.md) |
+| MemoryManager | [core/memoryManager](../src/core/memoryManager/) | [设计](./design/core/memoryManager.md) | [使用](./usage/core/memoryManager.md) |
 
 ## 业务模块与应用
 
