@@ -21,7 +21,7 @@ import {
   NAMESPACE_KEY,
   NAMESPACE_SCHEMA_VERSION,
 } from './types';
-import { isPlainObject, isReservedKey } from './json';
+import { isPlainObject, isReservedKey } from './validate';
 
 /** 装载得到的一条分区记录：只保留版本与编码后的片段。 */
 export interface StoredRecord {

@@ -9,11 +9,11 @@
  * 实现过程：三个定位函数逐段下降。每一段只访问自有属性：对象用字符串键，数组用非负整数下标
  * 且必须指向已有元素；穿越 null/基本值或段类型与容器不匹配一律抛错，不自动创建、不扩容。
  *
- * 技术要点：不修改数据、不标脏，也不做 JSON 值校验（由调用方用 json.ts 完成），因此预检失败
+ * 技术要点：不修改数据、不标脏，也不做 JSON 值校验（由调用方用 validate.ts 完成），因此预检失败
  * 不会留下任何修改。成本 O(路径长度)；写入定位额外返回途经容器，供新值的“祖先引用”检查。
  * 路径数组不复制，调用方可复用 `as const` 常量。
  */
-import { isReservedKey } from './json';
+import { isReservedKey } from './validate';
 
 type Segment = string | number;
 const hasOwn = Object.prototype.hasOwnProperty;

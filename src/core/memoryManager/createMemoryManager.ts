@@ -35,7 +35,7 @@ import {
   validateForCommit,
   validatePublish,
   validatePublishRoot,
-} from './json';
+} from './validate';
 import {
   NAMESPACE_KEY,
   NAMESPACE_SCHEMA_VERSION,
