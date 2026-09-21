@@ -1,95 +1,111 @@
 /**
  * 文件摘要
  *
- * 模块角色：core/memoryManager 的主实现，统一协调分区申请、存储读写、Segment 分配和恢复。
+ * 模块角色：core/memoryManager 的主实现，是项目访问持久化存储的唯一入口（AGENTS.md §9）。
  *
- * 主要功能：提供按 owner 绑定的申请入口、pending/ready 访问器、tick 生命周期及状态诊断，
- * 支持初始化、数据版本迁移、关键数据提交和按间隔保存的检查点。
+ * 主要功能：为每个 (owner, localId) 提供独立逻辑分区与长期有效的访问器（query/get/commit/remove），
+ * 由宿主 begin/end 驱动 tick 生命周期：首次 begin 同步装载主存储，end 统一提交全部脏分区。
  *
- * 实现过程：begin 加载目录并观察 Segment，申请时匹配或创建分区；启动申请窗口结束后按优先级分配，
- * 用迁移记录逐步完成复制、校验、切换和清理，end 推进迁移并提交需要保存的数据。
+ * 实现过程：装载后每条记录只保留一段已提交 JSON 片段；申请时从片段解析隔离副本，完成初始化或
+ * 业务版本迁移后发布访问器。修改把分区加入去重的脏集合；end 只编码脏分区，clean 分区复用片段，
+ * 与非托管根字段前缀拼接成完整文本后一次写入平台。
  *
- * 技术要点：namespace 负责主存储解析与序列化，segments 校验页面身份，platform 执行宿主访问。
- * 分区对象与脏标记跨 tick 保存在实例内存；ready 视图会检查 tick 和数据引用，禁止继续使用过期视图。
- * global reset 后先按迁移记录冻结业务访问和版本升级；清理页面前核验管理范围、目录引用、归属与代次。
- * 无法证明属于本次迁移的页保留并报告，未就绪分区返回 pending。
+ * 技术要点：
+ * - 空闲 tick 的 end 是 O(1)：脏集合为空且无结构变化时直接返回，不遍历、不序列化、不写平台。
+ * - 回调修改置 needsFullValidation，收尾先完整校验再用无 replacer 的 JSON.stringify 编码；
+ *   只经路径写入/删除的分区因新值已在写入时校验，直接编码。
+ * - 提交顺序固定为“平台接受 → 更新全部候选基线 → 清理脏集合”，任何一步失败或中断都完整保留
+ *   脏集合，下一次 end 按最新工作对象重试。
+ * - 生命周期锁带 tick 归属：真实 tick 来自平台 getTick，同一执行栈中的回调无法伪造新 tick；
+ *   硬终止遗留的旧 tick 锁在下一个真实 tick 的 begin 中清除。
+ * - 所有状态只驻留本实例 heap，global reset 后从平台文本重建；未提交的 heap 修改随之丢失。
  */
 import type {
   ApplyMemoryAccessor,
   DeepReadonly,
-  JsonValue,
-  MemoryAccess,
   MemoryAccessor,
   MemoryApplicationOptions,
   MemoryHost,
-  MemoryPendingReason,
-  PersistenceLayer,
 } from '@/contracts/memory';
 import type { LoggerFactory } from '@/contracts/logging';
-import { createRawStore, loadRawRoot, type RawStore } from './namespace';
-import {
-  createEnvelope,
-  describeMismatch,
-  encodeEnvelope,
-  parseEnvelope,
-} from './segments';
+import { encodeRecord, loadStore } from './namespace';
 import { createScreepsPlatform } from './platform';
+import { locateRemove, locateWrite, normalizePath, readPath } from './paths';
 import {
+  validateForCommit,
+  validatePublish,
+  validatePublishRoot,
+} from './json';
+import {
+  NAMESPACE_KEY,
+  NAMESPACE_SCHEMA_VERSION,
   RAW_MEMORY_LIMIT,
-  SEGMENT_IDS,
-  type AllocationRecord,
-  type Backend,
   type MemoryManagerStatus,
   type MemoryPlatform,
-  type MigrationMove,
-  type PartitionPending,
-  type SegmentEnvelope,
+  type WriteFailure,
 } from './types';
 
-/** 申请与访问期间出现的配置错误：必须直接抛出，不能伪装成 pending。 */
+/** 调用协议或配置错误：直接抛给调用者，不伪装成等待状态。 */
 const configError = (message: string): Error =>
   new Error('MemoryManager: ' + message);
 
-/** 局部 ID 与归属键的稳定性校验：拒绝原型相关键与空串，避免把继承属性当数据。 */
-const isStableKey = (value: string): boolean =>
+const errorText = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+/** 可申请的身份键：字母数字开头，只含 `._-`，并排除原型相关键。 */
+const isStableKey = (value: unknown): value is string =>
   typeof value === 'string' &&
   /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value) &&
   value !== 'prototype' &&
   value !== 'constructor' &&
   !Object.prototype.hasOwnProperty.call(Object.prototype, value);
 
-/** 解析后的申请配置；申请时校验一次，运行期不再读取调用方对象。 */
-interface AppliedOptions {
+/** 回调返回 Promise/thenable 即违反同步契约。 */
+const isThenable = (value: unknown): boolean =>
+  value !== null &&
+  (typeof value === 'object' || typeof value === 'function') &&
+  typeof (value as { then?: unknown }).then === 'function';
+
+/** 旧协议字段：JavaScript 调用方仍可能传入，显式拒绝以免静默忽略语义。 */
+const REMOVED_OPTIONS = ['layer', 'checkpointInterval', 'priority'] as const;
+
+/** 规范化后的申请声明；函数按引用比较，决定重复申请是否同一声明。 */
+interface Declaration {
   version: number;
-  layer: PersistenceLayer;
-  checkpointInterval: number;
-  priority?: number;
-  initialize: () => object;
-  migrate?: (memory: unknown, fromVersion: number) => object;
+  initialize: () => unknown;
+  migrate: ((memory: unknown, fromVersion: number) => unknown) | undefined;
 }
 
-/** 一个逻辑分区：目录决定位置，heap 持有事实源数据，dirty 决定是否回写。 */
-interface Partition {
-  pluginId: string;
+/** 已发布访问器的分区：工作对象、声明、访问器及收尾校验标记。 */
+interface Applied {
+  entry: Entry;
+  declaration: Declaration;
+  /** 工作对象；发布时已通过受管数据校验，之后只经访问器修改。 */
+  data: Record<string, unknown>;
+  accessor: MemoryAccessor<any>;
+  /** 回调修改后置位，end 成功更新该分区基线时清除。 */
+  needsFullValidation: boolean;
+  /** 正在执行 commit(mutator) 回调的 tick；用于拒绝同分区重入，旧 tick 的值视为过期。 */
+  mutatingTick: number;
+}
+
+/** 一条已存储或新建的分区记录；未申请时 applied 为 null，只保留片段。 */
+interface Entry {
+  owner: string;
   localId: string;
-  options: AppliedOptions;
-  generation: number;
-  backend: Backend;
-  segmentId?: number;
-  /**
-   * heap 事实源；仅在"尚未装载"（首次 apply 前、页未激活、恢复失败）时为 null。
-   * 迁移冻结只设置 pending，数据仍在内存中但不可访问（accessor 返回 pending）。
-   */
-  data: Record<string, JsonValue> | null;
+  /** `"localId":` 的预编码前缀，拼接时免去重复转义。 */
+  keyPrefix: string;
   dataVersion: number;
-  dirty: boolean;
-  dirtySince?: number;
-  forceCommit: boolean;
-  pending: PartitionPending | null;
-  writeError: string | null;
-  /** 最近一次已上报的写入错误：同一消息只记录一次，避免每 tick 刷屏。 */
-  lastLoggedError: string | null;
-  accessor: MemoryAccessor<any> | null;
+  /** 已提交基线片段；新建分区在首次成功提交前为 null（此时必在脏集合中）。 */
+  fragment: string | null;
+  applied: Applied | null;
+}
+
+/** 同一 owner 的分区桶；Map 保持装载/创建顺序，输出顺序因此稳定。 */
+interface OwnerBucket {
+  /** `"owner":{` 的预编码前缀。 */
+  prefix: string;
+  entries: Map<string, Entry>;
 }
 
 export interface MemoryManagerOptions {
@@ -98,1504 +114,494 @@ export interface MemoryManagerOptions {
    * 从而保证 Core 模块的依赖方向只由组合根决定。
    */
   logging: LoggerFactory;
-  /** 平台端口；缺省直连 Screeps RawMemory/Segment。 */
+  /** 平台端口；缺省直连 Screeps RawMemory 与 Game.time。 */
   platform?: MemoryPlatform;
-  /**
-   * 读取宿主 Memory 根对象的访问器，用于合并其他代码写入的根字段。
-   *
-   * 缺省不读取全局 `Memory`：Screeps 的 `Memory` 是惰性 getter，读一次会触发引擎
-   * 再解析一遍 RawMemory，等于把整棵 Memory 树在 heap 里存两份。按访问边界规范，
-   * 项目内代码也不应绕开本模块写 Memory，因此默认只保留解析时的根字段快照；
-   * 确有宿主需要合并运行期外部写入时，再显式注入本访问器。
-   */
-  getHostMemory?: () => Record<string, unknown> | undefined;
-  /** 可用页列表；缺省固定 0..9，仅测试需要覆盖。 */
-  segmentIds?: readonly number[];
-  /** 启动窗口最多被延后的 tick 数；超过后强制封存（迟到的申请改用主 Memory）。 */
-  maxStartupDeferrals?: number;
-  /** 等待页可见的最长 tick 数；超过仍未观察到全部页时放弃 Segment 分配。 */
-  maxObservationTicks?: number;
 }
 
-/** 管理器对外能力：MemoryHost 生命周期 + 诊断快照。 */
+/** 管理器对外能力：MemoryHost 生命周期 + 完整诊断快照。 */
 export interface MemoryManager extends MemoryHost {
   getStatus(): MemoryManagerStatus;
 }
+
+/** `"memoryManager":{"schemaVersion":2,"partitions":{` 常量前缀，模块加载时编码一次。 */
+const NAMESPACE_OPEN =
+  JSON.stringify(NAMESPACE_KEY) +
+  ':{"schemaVersion":' +
+  NAMESPACE_SCHEMA_VERSION +
+  ',"partitions":{';
 
 export const createMemoryManager = (
   options: MemoryManagerOptions
 ): MemoryManager => {
   const platform = options.platform ?? createScreepsPlatform();
-  const segmentIds = options.segmentIds ?? SEGMENT_IDS;
-  const maxStartupDeferrals = options.maxStartupDeferrals ?? 10;
-  const maxObservationTicks = options.maxObservationTicks ?? 5;
-  const getHostMemory = options.getHostMemory ?? (() => undefined);
-
-  /** 作用域日志器：固定名称、每实例一份；日志失败由 Logger 自身吞掉，不影响存储流程。 */
   const log = options.logging.scope('MemoryManager');
 
-  const partitions = new Map<string, Partition>();
-  let store: RawStore | null = null;
+  // ---- 装载结果（首次 begin 成功后发布，之后只读） ----
   let loaded = false;
-  let fault: string | null = null;
-  /** 主 Memory 整串写入的最近一次失败原因；写入成功清空。只驻留 heap，reset 后为 null。 */
-  let rawWriteError: string | null = null;
-  /** rawWriteError 已经告警过的文本，同一原因只记一次 warn。 */
-  let lastLoggedRawWriteError: string | null = null;
-  let currentTick = -1;
-  let startupWindowOpen = true;
-  let startupWindowForced = false;
-  let startupDeferrals = 0;
-  let deferredThisTick = false;
-  let rawDirty = false;
-  let allocationPlanned = false;
-  /** 最近一次分配规划中被排除的候选及原因：只做诊断，不影响数据。 */
-  let allocationSkipped: {
-    pluginId: string;
-    localId: string;
-    reason: string;
-  }[] = [];
-  let observationSinceTick = -1;
-  /**
-   * 本 global 观察到的页内容快照：只记录"已经激活并读到内容"的页。
-   * 未出现在这里的页不可写入——没有读过内容就无法断定它不是别人正在使用的页。
-   */
-  const observedSegments = new Map<number, string>();
-  /**
-   * 页解析缓存（页号 → 上次解析的文本与信封头）。
-   * 创建：随 manager 实例；命中：页文本与上次逐字相同；更新：文本变化时重新
-   * parse；清理：页变空时删除。只驻留 heap，global reset 后首 tick 重新解析一次。
-   * 换取：未变化的页不再每 tick（begin/end 共两次）JSON.parse，实测 10 页×64 KB
-   * 约 13 ms/tick。只保留归属判断需要的信封头，不保留解析出的 payload 对象，
-   * 避免与分区 heap 数据重复驻留；文本仍用于精确判断变化。每次观察重新核对目录与
-   * journal，不能把归属判断结果一起缓存，因为目录可能在文本不变时发生切换。
-   */
-  const parsedPages = new Map<
-    number,
-    { text: string; envelope: Omit<SegmentEnvelope, 'payload'> | null }
-  >();
-  /** 被外部数据或未认领信封占用的页：不参与分配、不会被写入。 */
-  const reservedSegments = new Map<number, string>();
-  /** 清理阶段的重试计数（journal 代际 → 次数）：只驻留 heap，不进入存储。 */
-  const cleanupAttempts = new Map<number, number>();
-  /**
-   * 当前 journal 状态（含新目录）是否已经随主 Memory 成功落盘。
-   * 只有为真才允许清空被腾退的页：否则主 Memory 写失败 + global reset 会留下
-   * "存储目录仍指向已清空页"的悬空引用。加载到的 journal 视为已落盘。
-   */
-  let migrationPersisted = false;
-  /**
-   * 待执行搬迁队列：窗口封存后一次性排好（先腾退、再迁入），执行阶段串行推进，
-   * 保证同一时刻至多一个 journal 记录，避免相互覆盖的中间态。
-   */
-  const moveQueue: MigrationMove[] = [];
+  let loadError: string | null = null;
+  let foreignPrefix = '';
+  let preservedKeys: string[] = [];
+  let ignoredSegmentPartitions: { owner: string; localId: string }[] = [];
+  const buckets = new Map<string, OwnerBucket>();
 
-  const key = (pluginId: string, localId: string): string =>
-    pluginId + '/' + localId;
+  // ---- 待提交状态（跨 tick 保留，直到提交成功） ----
+  /** 脏分区集合：待提交工作的唯一索引。 */
+  const dirty = new Set<Applied>();
+  /** 格式转换产生的结构变化，需要在没有业务修改时也写出。 */
+  let structureChanged = false;
+  let writeFailure: WriteFailure | null = null;
+  let lastLoggedWriteError: string | null = null;
 
-  const allocationOf = (
-    pluginId: string,
-    localId: string
-  ): AllocationRecord | undefined =>
-    store?.namespace.allocations[pluginId]?.[localId];
+  // ---- 生命周期（均带 tick 归属） ----
+  /** 最近一次 begin 的 tick；-1 表示尚未 begin。 */
+  let phaseTick = -1;
+  /** 本 phaseTick 的写入阶段是否开放；end 关闭后同 tick 不再重开。 */
+  let phaseOpen = false;
+  /** 正在执行用户回调或提交时的嵌套计数与所属 tick；旧 tick 的计数视为硬终止遗留。 */
+  let busyDepth = 0;
+  let busyTick = -1;
+  /** 本 tick 正在申请中的身份，拒绝 initialize/migrate 内对同一身份的重入申请。 */
+  const applying = new Set<string>();
+  /** 失败申请缓存：相同声明不重跑失败的回调，直接重抛同一错误。 */
+  const failedApplications = new Map<string, { declaration: Declaration; error: Error }>();
 
-  const rawRecordOf = (
-    pluginId: string,
-    localId: string
-  ): { dataVersion: number; payload: JsonValue } | undefined =>
-    store?.namespace.rawPartitions[pluginId]?.[localId];
+  const identity = (owner: string, localId: string): string => owner + '/' + localId;
 
-  /** 把分区标记为等待；等待不计数失败，模块应只跳过依赖 Memory 的行为。 */
-  const setPending = (
-    partition: Partition,
-    reason: MemoryPendingReason,
-    retryAt = currentTick + 1
-  ): void => {
-    // pending 往返属于高频细节，只走 debug（默认关闭），供排查时开启。
-    if (partition.pending?.reason !== reason)
-      log.debug(
-        'partition ' +
-          key(partition.pluginId, partition.localId) +
-          ' pending: ' +
-          reason
-      );
-    partition.pending = { reason, retryAt };
+  const enterBusy = (): void => {
+    if (busyTick !== phaseTick) busyDepth = 0;
+    busyTick = phaseTick;
+    busyDepth++;
   };
-
-  const clearPending = (partition: Partition): void => {
-    if (partition.pending)
-      log.debug(
-        'partition ' +
-          key(partition.pluginId, partition.localId) +
-          ' ready again'
-      );
-    partition.pending = null;
+  const exitBusy = (): void => {
+    busyDepth--;
   };
+  /** 当前真实 tick 内是否有回调或提交正在执行（同步重入的判据）。 */
+  const isBusy = (now: number): boolean => busyDepth > 0 && busyTick === now;
 
-  /**
-   * 冻结由持久 journal 决定，不能只依赖上个 global 留下的 pending 标记。
-   * 在 apply/每 tick begin 装载数据和升级 schema 之前调用；cleanup 已切换后端，可以恢复访问。
-   */
-  const freezeForJournal = (partition: Partition): boolean => {
-    const journal = store?.namespace.migration;
-    if (!journal || journal.phase === 'cleanup') return false;
-    if (
-      !journal.moves.some(
-        (move) =>
-          move.pluginId === partition.pluginId &&
-          move.localId === partition.localId
-      )
-    )
-      return false;
-    setPending(
-      partition,
-      journal.phase === 'verify' ? 'verification' : 'migration'
-    );
-    return true;
-  };
-
-  /** 目录写入统一走这里，确保 allocations 片段失效。 */
-  const writeAllocation = (
-    pluginId: string,
-    localId: string,
-    record: AllocationRecord
-  ): void => {
-    store!.namespace.allocations[pluginId] ??= {};
-    store!.namespace.allocations[pluginId][localId] = record;
-    store!.markAllocationsDirty();
-    rawDirty = true;
-  };
-
-  const writeRawPartition = (
-    pluginId: string,
-    localId: string,
-    dataVersion: number,
-    payload: JsonValue
-  ): void => {
-    store!.namespace.rawPartitions[pluginId] ??= {};
-    store!.namespace.rawPartitions[pluginId][localId] = {
-      dataVersion,
-      payload,
-    };
-    store!.markPluginDirty(pluginId);
-    rawDirty = true;
-  };
-
-  const deleteRawPartition = (pluginId: string, localId: string): void => {
-    const bucket = store!.namespace.rawPartitions[pluginId];
-    if (!bucket || !(localId in bucket)) return;
-    delete bucket[localId];
-    if (Object.keys(bucket).length === 0)
-      delete store!.namespace.rawPartitions[pluginId];
-    store!.markPluginDirty(pluginId);
-    rawDirty = true;
-  };
-
-  const segmentsVisible = (): Record<number, string> => platform.readSegments();
-
-  /**
-   * 请求激活固定页集合。
-   *
-   * MemoryManager 排他占用这 10 页：请求的是精确集合，而不是与外部活动页取并集，
-   * 否则叠加外部页会超过 Screeps 单 tick 最多 10 页的限制。外部工具不应与本模块
-   * 同时使用这些页；其残留数据会被识别为保留页并跳过。
-   */
-  const ensureSegmentsActive = (): void => {
-    const visible = new Set(platform.activeSegments());
-    if (segmentIds.some((id) => !visible.has(id)))
-      platform.activateSegments([...segmentIds]);
-  };
-
-  /** 页内容是否属于本管理器的既有分配或进行中的迁移。 */
-  const pageBelongsToUs = (
-    id: number,
-    envelope: Pick<SegmentEnvelope, 'owner'>
-  ): boolean => {
-    const allocation = allocationOf(
-      envelope.owner.pluginId,
-      envelope.owner.localId
-    );
-    if (allocation?.backend === 'segment' && allocation.segmentId === id)
-      return true;
-    const journal = store?.namespace.migration;
-    if (journal)
-      for (const move of journal.moves)
-        if (move.toSegmentId === id || move.fromSegmentId === id) return true;
-    return false;
-  };
-
-  /**
-   * 刷新页内容观察结果。
-   *
-   * 空页可用；属于我们目录/journal 的页保留；其他任何内容（外部工具数据、没有目录
-   * 归属的历史信封）都登记为保留页，绝不写入。只有观察过的页才允许分配。
-   */
-  const refreshObservations = (): void => {
-    const visible = segmentsVisible();
-    for (const id of segmentIds) {
-      if (visible[id] === undefined) continue;
-      const text = visible[id] ?? '';
-      observedSegments.set(id, text);
-      if (text === '') {
-        reservedSegments.delete(id);
-        parsedPages.delete(id);
-        continue;
-      }
-      let cached = parsedPages.get(id);
-      if (cached?.text !== text) {
-        const parsed = parseEnvelope(text);
-        // 显式投影而非类型断言：Omit 只约束类型，不能移除运行时的 payload 引用。
-        const envelope = parsed
-          ? {
-              schemaVersion: parsed.schemaVersion,
-              owner: parsed.owner,
-              generation: parsed.generation,
-              dataVersion: parsed.dataVersion,
-            }
-          : null;
-        cached = { text, envelope };
-        parsedPages.set(id, cached);
-      }
-      const envelope = cached.envelope;
-      if (envelope && pageBelongsToUs(id, envelope)) {
-        reservedSegments.delete(id);
-        continue;
-      }
-      const reason = envelope
-        ? 'unclaimed envelope ' +
-          envelope.owner.pluginId +
-          '/' +
-          envelope.owner.localId
-        : 'foreign content';
-      // 只在页首次被保留或原因变化时告警，避免每 tick 重复输出。
-      if (reservedSegments.get(id) !== reason) {
-        reservedSegments.set(id, reason);
-        log.warn('segment ' + id + ' reserved: ' + reason);
-      }
-    }
-  };
-
-  const unobservedSegments = (): number[] =>
-    segmentIds.filter((id) => !observedSegments.has(id));
-
-  /** 可分配页：观察过、内容为空，且未被保留。 */
-  const pageAvailable = (id: number): boolean =>
-    observedSegments.get(id) === '' && !reservedSegments.has(id);
-
-  /**
-   * 从后端恢复分区数据。
-   *
-   * 返回错误描述表示数据不可用（损坏、归属不符、降级），调用方据此设置
-   * pending('recovery') 并保留诊断；返回 pending 表示只是还没就绪（页未激活）。
-   */
-  const restorePartition = (
-    partition: Partition
-  ):
-    | { ok: true }
-    | { ok: false; reason: MemoryPendingReason; error?: string } => {
-    const { pluginId, localId } = partition;
-    // 已装载的分区以 heap 为事实源：重试只服务"缺数据"的分区，
-    // 绝不能用存储里的旧内容覆盖内存中尚未提交的修改。
-    if (partition.data !== null) return { ok: true };
-    if (partition.backend === 'raw') {
-      const record = rawRecordOf(pluginId, localId);
-      if (!record)
-        return {
-          ok: false,
-          reason: 'recovery',
-          error: 'missing raw partition',
-        };
-      // 手工编辑或外部损坏可能留下非对象 payload：按 recovery 给出诊断，
-      // 而不是把 5/"str"/[1] 当作 ready，或让 null 永远停在 loading。
-      const restored = asPartitionData(record.payload, 'stored payload');
-      if (restored.ok === false)
-        return { ok: false, reason: 'recovery', error: restored.error };
-      partition.dataVersion = record.dataVersion;
-      partition.data = restored.data;
-      return { ok: true };
-    }
-    const segmentId = partition.segmentId;
-    if (segmentId === undefined)
-      return { ok: false, reason: 'recovery', error: 'missing segment id' };
-    // 目录/journal 引用本实例不管理的页时不能无限等待：直接给出可诊断的错误。
-    if (!segmentIds.includes(segmentId))
-      return {
-        ok: false,
-        reason: 'recovery',
-        error: 'segment ' + segmentId + ' is not managed by this instance',
-      };
-    const text = segmentsVisible()[segmentId];
-    if (text === undefined) return { ok: false, reason: 'segment-activating' };
-    const envelope = parseEnvelope(text);
-    // 从目录恢复时只校验归属与代际：数据版本以信封为准，避免拿未读取的默认值比较。
-    const mismatch = describeMismatch(
-      envelope,
-      { pluginId, localId },
-      partition.generation
-    );
-    if (mismatch) return { ok: false, reason: 'recovery', error: mismatch };
-    const restored = asPartitionData(envelope!.payload, 'stored payload');
-    if (restored.ok === false)
-      return { ok: false, reason: 'recovery', error: restored.error };
-    partition.dataVersion = envelope!.dataVersion;
-    partition.data = restored.data;
-    return { ok: true };
-  };
-
-  /** 分区数据是否是键值对象（非 null、非数组）；持久数据进入迁移或装载前的统一判据。 */
-  const isPartitionObject = (value: unknown): boolean =>
-    value !== null && typeof value === 'object' && !Array.isArray(value);
-
-  /** 分区数据的运行时形状校验：契约要求 initialize/migrate 返回键值对象。 */
-  const asPartitionData = (
-    value: unknown,
-    what: string
-  ):
-    | { ok: true; data: Record<string, JsonValue> }
-    | { ok: false; error: string } =>
-    isPartitionObject(value)
-      ? { ok: true, data: value as Record<string, JsonValue> }
-      : { ok: false, error: what + ' must return a key-value object' };
-
-  /**
-   * 版本处理：同版本直接可用；**任何已存储数据**（含旧布局导入的版本 0）都必须经
-   * migrate 升级——只有完全不存在历史记录才算首次安装，避免把真实 payload 当空数据
-   * 覆盖；新版本（降级）拒绝并给出诊断。
-   */
-  const applyVersion = (
-    partition: Partition,
-    hasHistory: boolean
-  ): { ok: true } | { ok: false; error: string } => {
-    const { version, initialize, migrate } = partition.options;
-    if (!hasHistory) {
-      const created = asPartitionData(initialize(), 'initialize()');
-      if (created.ok === false) return created;
-      partition.data = created.data;
-      partition.dataVersion = version;
-      partition.forceCommit = true;
-      markDirty(partition);
-      return { ok: true };
-    }
-    if (partition.dataVersion === version) return { ok: true };
-    if (partition.dataVersion > version)
-      return {
-        ok: false,
-        error:
-          'stored dataVersion ' +
-          partition.dataVersion +
-          ' is newer than plugin version ' +
-          version,
-      };
-    if (!migrate)
-      return {
-        ok: false,
-        error:
-          'missing migrate for stored dataVersion ' + partition.dataVersion,
-      };
-    const fromVersion = partition.dataVersion;
-    const migrated = asPartitionData(
-      migrate(partition.data, partition.dataVersion),
-      'migrate()'
-    );
-    if (migrated.ok === false) return migrated;
-    partition.data = migrated.data;
-    partition.dataVersion = version;
-    partition.forceCommit = true;
-    markDirty(partition);
-    log.info(
-      'partition ' +
-        key(partition.pluginId, partition.localId) +
-        ' migrated dataVersion ' +
-        fromVersion +
-        ' -> ' +
-        version
-    );
-    return { ok: true };
-  };
-
-  const markDirty = (partition: Partition): void => {
-    if (!partition.dirty) partition.dirtySince = currentTick;
-    partition.dirty = true;
-  };
-
-  /** 申请配置校验：非法配置是装配错误，立即抛出，不进入 pending。 */
-  const resolveOptions = <M extends object>(
-    localId: string,
-    options: MemoryApplicationOptions<M>
-  ): AppliedOptions => {
-    if (!isStableKey(localId)) throw configError('invalid localId: ' + localId);
-    if (!Number.isInteger(options.version) || options.version < 1)
-      throw configError('version must be a positive integer');
-    if (options.layer !== 'critical' && options.layer !== 'checkpoint')
-      throw configError('invalid persistence layer');
-    const interval = options.checkpointInterval ?? 100;
-    if (!Number.isInteger(interval) || interval < 1)
-      throw configError('checkpointInterval must be a positive integer');
-    if (
-      options.layer !== 'checkpoint' &&
-      options.checkpointInterval !== undefined
-    )
+  /** 修改前置条件：写入阶段开放，且本分区没有正在执行的回调。 */
+  const assertWritable = (applied: Applied): void => {
+    if (!phaseOpen)
       throw configError(
-        'checkpointInterval is only valid for checkpoint layer'
+        'modifications are only allowed between begin and end (tick ' + phaseTick + ')'
       );
-    if (options.priority !== undefined && !Number.isFinite(options.priority))
-      throw configError('priority must be a finite number');
+    if (applied.mutatingTick === phaseTick)
+      throw configError(
+        'partition ' +
+          identity(applied.entry.owner, applied.entry.localId) +
+          ' is being modified by a commit callback'
+      );
+  };
+
+  const markDirty = (applied: Applied, fullValidation: boolean): void => {
+    if (fullValidation) applied.needsFullValidation = true;
+    dirty.add(applied);
+  };
+
+  // ---------------------------------------------------------------------------
+  // 访问器
+  // ---------------------------------------------------------------------------
+
+  /**
+   * 为分区创建稳定访问器。方法只捕获 applied 记录（global 内不替换），每次调用都读取
+   * 其当前 data，因此不存在按 tick 失效的视图。
+   */
+  const createAccessor = (applied: Applied): MemoryAccessor<any> => {
+    const get = (keyOrPath: unknown): unknown =>
+      readPath(applied.data, normalizePath(keyOrPath));
+
+    // 剩余参数区分“路径写入缺少 value”与“显式传入的值”；箭头函数没有自己的 arguments。
+    const commit = (...args: unknown[]): unknown => {
+      const first = args[0];
+      if (typeof first === 'function') {
+        assertWritable(applied);
+        // 回调前标脏并要求完整校验：回调可能任意原地修改，抛错或中断也不能丢失这一事实。
+        markDirty(applied, true);
+        applied.mutatingTick = phaseTick;
+        enterBusy();
+        let result: unknown;
+        try {
+          result = (first as (memory: unknown) => unknown)(applied.data);
+        } finally {
+          exitBusy();
+          applied.mutatingTick = -1;
+        }
+        if (isThenable(result))
+          throw configError('commit callback must be synchronous');
+        return result;
+      }
+      if (args.length < 2)
+        throw configError('commit requires a value for path writes');
+      const value = args[1];
+      assertWritable(applied);
+      const path = normalizePath(first);
+      const target = locateWrite(applied.data, path);
+      if (value === undefined)
+        throw configError('undefined is not a JSON value; use remove to delete');
+      // 预检：新值受管校验 + 不得引用写入目标的任何祖先（写入后会成环）。
+      if (value !== null && typeof value === 'object')
+        validatePublish(value, new Set(target.ancestors));
+      else validatePublish(value);
+      markDirty(applied, false);
+      (target.parent as Record<string | number, unknown>)[target.key] = value;
+      return undefined;
+    };
+
+    const remove = (keyOrPath: unknown): boolean => {
+      assertWritable(applied);
+      const located = locateRemove(applied.data, normalizePath(keyOrPath));
+      if (located === null) return false;
+      markDirty(applied, false);
+      delete located.parent[located.key];
+      return true;
+    };
+
+    return {
+      query: () => applied.data as DeepReadonly<any>,
+      get: get as MemoryAccessor<any>['get'],
+      commit: commit as MemoryAccessor<any>['commit'],
+      remove: remove as MemoryAccessor<any>['remove'],
+    };
+  };
+
+  // ---------------------------------------------------------------------------
+  // 申请
+  // ---------------------------------------------------------------------------
+
+  const resolveDeclaration = (options: MemoryApplicationOptions<object>): Declaration => {
+    if (options === null || typeof options !== 'object')
+      throw configError('application options must be an object');
+    for (const key of REMOVED_OPTIONS)
+      if (key in options)
+        throw configError('option ' + key + ' is no longer supported');
+    if (!Number.isSafeInteger(options.version) || options.version < 1)
+      throw configError('version must be a positive integer');
     if (typeof options.initialize !== 'function')
       throw configError('initialize must be a function');
+    if (options.migrate !== undefined && typeof options.migrate !== 'function')
+      throw configError('migrate must be a function');
     return {
       version: options.version,
-      layer: options.layer,
-      checkpointInterval: interval,
-      priority: options.priority,
-      initialize: options.initialize as () => object,
-      migrate: options.migrate as
-        ((memory: unknown, fromVersion: number) => object) | undefined,
+      initialize: options.initialize,
+      migrate: options.migrate,
     };
   };
 
-  /** 重复申请只有"声明完全一致"才复用；函数按引用比较，不做源码级等价判断。 */
-  const sameDeclaration = (
-    partition: Partition,
-    next: AppliedOptions
-  ): boolean =>
-    partition.options.version === next.version &&
-    partition.options.layer === next.layer &&
-    partition.options.checkpointInterval === next.checkpointInterval &&
-    partition.options.priority === next.priority &&
-    partition.options.initialize === next.initialize &&
-    partition.options.migrate === next.migrate;
+  const sameDeclaration = (a: Declaration, b: Declaration): boolean =>
+    a.version === b.version && a.initialize === b.initialize && a.migrate === b.migrate;
 
-  /**
-   * 创建访问句柄。
-   *
-   * ready 句柄绑定签发 tick 与当时的数据引用：跨 tick 调用、分区进入 pending、或数据
-   * 被重新加载都会抛协议错误。契约规定 ready 引用只对当 tick 有效，这里用运行时检查
-   * 把该约定落实，避免旧句柄绕过迁移冻结或写回已经脱离事实源的对象。
-   */
-  const createAccessor = (partition: Partition): MemoryAccessor<any> => ({
-    access: (): MemoryAccess<any> => {
-      if (partition.pending)
-        return {
-          status: 'pending',
-          reason: partition.pending.reason,
-          retryAt: partition.pending.retryAt,
-        };
-      const issuedData = partition.data;
-      if (issuedData === null)
-        return {
-          status: 'pending',
-          reason: 'loading',
-          retryAt: currentTick + 1,
-        };
-      const issuedTick = currentTick;
-      const assertUsable = (): void => {
-        if (currentTick !== issuedTick)
-          throw configError(
-            'ready handle issued at tick ' +
-              issuedTick +
-              ' cannot be used at tick ' +
-              currentTick
-          );
-        if (partition.pending)
-          throw configError(
-            'partition is pending (' + partition.pending.reason + ')'
-          );
-        if (partition.data !== issuedData)
-          throw configError('partition data was reloaded; access again');
-      };
-      return {
-        status: 'ready',
-        query: () => {
-          assertUsable();
-          return issuedData as DeepReadonly<any>;
-        },
-        commit: <R>(mutator: (memory: any) => R): R => {
-          assertUsable();
-          markDirty(partition);
-          return mutator(issuedData);
-        },
-      };
-    },
-  });
-
-  /** 新建分区：目录立即落一条记录，数据先写 Raw（窗口封存后再决定是否搬到 Segment）。 */
-  const createPartition = (
-    pluginId: string,
-    localId: string,
-    applied: AppliedOptions
-  ): Partition => {
-    const partition: Partition = {
-      pluginId,
-      localId,
-      options: applied,
-      generation: 0,
-      backend: 'raw',
-      data: null,
-      dataVersion: applied.version,
-      dirty: false,
-      forceCommit: false,
-      pending: null,
-      writeError: null,
-      lastLoggedError: null,
-      accessor: null,
-    };
-    const version = applyVersion(partition, false);
-    if (version.ok === false) throw configError(version.error);
-    writeAllocation(pluginId, localId, { backend: 'raw', generation: 0 });
-    writeRawPartition(
-      pluginId,
-      localId,
-      partition.dataVersion,
-      partition.data!
-    );
-    partition.accessor = createAccessor(partition);
-    return partition;
-  };
-
-  /** 恢复已有分区：目录决定后端，后端决定数据来源，随后处理版本与 pending。 */
-  const restoreExistingPartition = (
-    pluginId: string,
-    localId: string,
-    allocation: AllocationRecord,
-    applied: AppliedOptions
-  ): Partition => {
-    const partition: Partition = {
-      pluginId,
-      localId,
-      options: applied,
-      generation: allocation.generation,
-      backend: allocation.backend,
-      segmentId: allocation.segmentId,
-      data: null,
-      dataVersion: 0,
-      dirty: false,
-      forceCommit: false,
-      pending: null,
-      writeError: null,
-      lastLoggedError: null,
-      accessor: null,
-    };
-    // 不提前装载或调用 migrate：升级后的 heap 不能被旧迁移副本覆盖或错误标为已提交。
-    if (freezeForJournal(partition)) {
-      partition.accessor = createAccessor(partition);
-      return partition;
-    }
-    const restored = restorePartition(partition);
-    if (restored.ok === false) {
-      setPending(partition, restored.reason);
-      partition.writeError = restored.error ?? null;
-      if (restored.error)
-        log.error(
-          'partition ' + key(pluginId, localId) + ': ' + restored.error
-        );
-      partition.accessor = createAccessor(partition);
-      return partition;
-    }
-    const versioned = applyVersion(partition, true);
-    if (versioned.ok === false) {
-      setPending(partition, 'recovery');
-      partition.writeError = versioned.error;
-      partition.accessor = createAccessor(partition);
-      return partition;
-    }
-    partition.accessor = createAccessor(partition);
-    return partition;
-  };
-
-  /** 带 owner 的内部申请实现；对外通过 bind(owner) 收敛为 ApplyMemoryAccessor。 */
-  type ApplyWithOwner = <M extends object>(
-    owner: string,
-    localId: string,
-    options: MemoryApplicationOptions<M>
-  ) => MemoryAccessor<M>;
-
-  const apply: ApplyWithOwner = <M extends object>(
-    owner: string,
-    localId: string,
-    options: MemoryApplicationOptions<M>
-  ): MemoryAccessor<M> => {
-    if (!isStableKey(owner)) throw configError('invalid owner: ' + owner);
-    const applied = resolveOptions(localId, options);
-    const identity = key(owner, localId);
-    const existing = partitions.get(identity);
-    if (existing) {
-      if (!sameDeclaration(existing, applied))
-        throw configError('conflicting declaration for ' + identity);
-      return existing.accessor as MemoryAccessor<M>;
-    }
-    if (!loaded && fault === null)
-      throw configError('begin(tick) must run before applying for memory');
-    if (fault !== null) {
-      // 存储不可解析时不能假装是新分区，也不能抛错中断模块的无关行为：
-      // 返回持久 pending 并把故障暴露在 getStatus().fault。
-      const pending: Partition = {
-        pluginId: owner,
-        localId,
-        options: applied,
-        generation: 0,
-        backend: 'raw',
-        data: null,
-        dataVersion: applied.version,
-        dirty: false,
-        forceCommit: false,
-        pending: { reason: 'recovery', retryAt: currentTick },
-        writeError: fault,
-        lastLoggedError: fault,
-        accessor: null,
-      };
-      pending.accessor = createAccessor(pending);
-      partitions.set(identity, pending);
-      return pending.accessor as MemoryAccessor<M>;
-    }
-    const allocation = allocationOf(owner, localId);
-    const partition = allocation
-      ? restoreExistingPartition(owner, localId, allocation, applied)
-      : createPartition(owner, localId, applied);
-    partitions.set(identity, partition);
-    return partition.accessor as MemoryAccessor<M>;
+  /** 同步运行用户回调；thenable 结果违反契约。 */
+  const runCallback = <T>(callback: () => T, what: string): T => {
+    const value = callback();
+    if (isThenable(value)) throw new Error(what + ' must be synchronous');
+    return value;
   };
 
   /**
-   * 规划本 global 的页分配。
-   *
-   * 只有在所有固定页都被观察过之后才执行：没读过的页可能是别人正在使用的数据。
-   * 已占用的页包括目录中所有 segment 分配（含本 global 未申请的模块）与 journal
-   * 涉及的页；落选者（含被抢占的原所有者）先腾退，入选者再取一个"已观察且为空"的
-   * 空闲页。没有可用页时该分区继续留在主 Memory，不报错。
+   * 从历史片段或 initialize 构造工作对象。任何回调都作用于隔离副本：历史片段在此解析出
+   * 新对象，失败时不影响已提交片段，也不影响其他分区。返回是否需要标脏。
    */
-  const planAllocation = (): void => {
-    allocationPlanned = true;
-    const journal = store!.namespace.migration;
-    const inFlight = new Set(
-      (journal?.moves ?? []).map((move) => key(move.pluginId, move.localId))
-    );
-    allocationSkipped = [];
-    const candidates = [...partitions.values()]
-      .filter((partition) => {
-        if (partition.options.priority === undefined) return false;
-        if (inFlight.has(key(partition.pluginId, partition.localId)))
-          return false;
-        // 数据未装载或已损坏的分区不参与搬迁：否则会把未知版本搬进新页，
-        // 甚至覆盖仍在存储里的真实数据。诊断里区分"损坏"与"尚未装载"。
-        if (partition.pending?.reason === 'recovery') {
-          allocationSkipped.push({
-            pluginId: partition.pluginId,
-            localId: partition.localId,
-            reason: 'recovery',
-          });
-          return false;
-        }
-        if (partition.data === null) {
-          allocationSkipped.push({
-            pluginId: partition.pluginId,
-            localId: partition.localId,
-            reason: 'data-not-loaded',
-          });
-          return false;
-        }
-        return true;
-      })
-      .sort((a, b) => {
-        const byPriority =
-          (b.options.priority ?? 0) - (a.options.priority ?? 0);
-        if (byPriority !== 0) return byPriority;
-        return key(a.pluginId, a.localId) < key(b.pluginId, b.localId) ? -1 : 1;
-      });
-    const eligible = new Set(
-      candidates
-        .slice(0, segmentIds.length)
-        .map((partition) => key(partition.pluginId, partition.localId))
-    );
-    // 先统计即将被腾退的页：它们会在本批串行队列里先清空，随后可分配给入选者。
-    const vacatingPages = new Map<number, string>();
-    for (const partition of candidates) {
-      const identity = key(partition.pluginId, partition.localId);
-      if (eligible.has(identity)) continue;
-      if (partition.backend !== 'segment' || partition.segmentId === undefined)
-        continue;
-      vacatingPages.set(partition.segmentId, identity);
+  const buildWorkingData = (
+    entry: Entry | undefined,
+    declaration: Declaration
+  ): { data: Record<string, unknown>; dataVersion: number; changed: boolean } => {
+    if (!entry) {
+      const created = runCallback(declaration.initialize, 'initialize()');
+      validatePublishRoot(created);
+      return { data: created as Record<string, unknown>, dataVersion: declaration.version, changed: true };
     }
-    const claimed = new Set<number>();
-    for (const bucket of Object.values(store!.namespace.allocations))
-      for (const record of Object.values(bucket)) {
-        if (record.backend !== 'segment' || record.segmentId === undefined)
-          continue;
-        // 即将腾退的页不占用名额：本批串行队列会先清空它，再分配给入选者；
-        // 目录中其他模块（本 global 未申请）的页照常占用，不允许被抢占。
-        if (vacatingPages.has(record.segmentId)) continue;
-        claimed.add(record.segmentId);
-      }
-    for (const move of journal?.moves ?? []) {
-      if (move.fromSegmentId !== undefined) claimed.add(move.fromSegmentId);
-      if (move.toSegmentId !== undefined) claimed.add(move.toSegmentId);
-    }
-    // 腾退：落选的原页所有者搬回 Raw，释放页。
-    for (const partition of candidates) {
-      const identity = key(partition.pluginId, partition.localId);
-      if (eligible.has(identity)) continue;
-      if (partition.backend !== 'segment') continue;
-      moveQueue.push({
-        pluginId: partition.pluginId,
-        localId: partition.localId,
-        dataVersion: partition.dataVersion,
-        from: 'segment',
-        fromSegmentId: partition.segmentId,
-        fromGeneration: partition.generation,
-        to: 'raw',
-      });
-    }
-    // 迁入：入选但还没有页的分区按 ID 顺序取空闲页（腾退中的页也可预约）。
-    for (const partition of candidates) {
-      const identity = key(partition.pluginId, partition.localId);
-      if (!eligible.has(identity)) continue;
-      if (partition.backend === 'segment') continue;
-      const free = segmentIds.find(
-        (id) => !claimed.has(id) && (pageAvailable(id) || vacatingPages.has(id))
-      );
-      if (free === undefined) continue;
-      claimed.add(free);
-      moveQueue.push({
-        pluginId: partition.pluginId,
-        localId: partition.localId,
-        dataVersion: partition.dataVersion,
-        from: 'raw',
-        to: 'segment',
-        toSegmentId: free,
-      });
-    }
-  };
-
-  /**
-   * 清理只有在页面属于指定 owner/代次/数据版本、仍在管理范围且不被任何目录引用时才写入。
-   * cleanup 的源页使用迁移前的代次，abort 的目标页使用本次 journal 代次；两者不能混用。
-   * 旧 cleanup journal 缺少源代次时宁可保留页，不能由页自身声明身份来证明其可删除。
-   */
-  const clearVacatedSegment = (
-    id: number,
-    move: MigrationMove,
-    generation: number | undefined,
-    report = true
-  ): boolean => {
-    const refuse = (reason: string): false => {
-      reservedSegments.set(id, reason);
-      if (report) log.warn('segment ' + id + ' cleanup refused: ' + reason);
-      return false;
-    };
-    if (!segmentIds.includes(id)) return refuse('unmanaged segment');
-    for (const bucket of Object.values(store!.namespace.allocations))
-      if (
-        Object.values(bucket).some(
-          (allocation) =>
-            allocation.backend === 'segment' && allocation.segmentId === id
-        )
-      )
-        return refuse('still referenced by directory');
-    const text = segmentsVisible()[id];
-    if (text === undefined) {
-      observedSegments.delete(id);
-      if (report)
-        log.warn('segment ' + id + ' not visible for cleanup; will retry');
-      return false;
-    }
-    // 已为空不必产生宿主写入；尤其不能把未知内容当空串处理。
-    if (text === '') return true;
-    if (generation === undefined)
-      return refuse('source generation unavailable');
-    const mismatch = describeMismatch(
-      parseEnvelope(text),
-      move,
-      generation,
-      move.dataVersion
-    );
-    if (mismatch) return refuse(mismatch);
-    try {
-      platform.writeSegment(id, '');
-      observedSegments.set(id, '');
-      reservedSegments.delete(id);
-      return true;
-    } catch (error) {
-      observedSegments.delete(id);
-      if (report)
-        log.warn(
-          'segment ' +
-            id +
-            ' cleanup failed: ' +
-            (error instanceof Error ? error.message : String(error))
-        );
-      return false;
-    }
-  };
-
-  /** 搬迁冻结：参与搬迁的分区在 copy/verify 阶段进入 pending，避免中途数据继续变化。 */
-  const freezeMoves = (
-    moves: readonly MigrationMove[],
-    reason: MemoryPendingReason = 'migration'
-  ): void => {
-    for (const move of moves) {
-      const partition = partitions.get(key(move.pluginId, move.localId));
-      if (!partition) continue;
-      setPending(partition, reason);
-    }
-  };
-
-  /**
-   * 中止当前迁移：清理写出的目标页（仅在目录仍不指向它时）、给在场分区留下诊断、
-   * 丢弃 journal，然后继续队列中的下一个搬迁。
-   */
-  const abortMigration = (
-    reason: string,
-    moves: readonly MigrationMove[]
-  ): void => {
-    const generation = store!.namespace.migration?.generation;
-    for (const move of moves) {
-      if (move.to === 'segment' && move.toSegmentId !== undefined) {
-        const allocation = allocationOf(move.pluginId, move.localId);
-        const stillOurs =
-          allocation?.backend === 'segment' &&
-          allocation.segmentId === move.toSegmentId;
-        if (!stillOurs) clearVacatedSegment(move.toSegmentId, move, generation);
-      }
-      const partition = partitions.get(key(move.pluginId, move.localId));
-      if (partition) {
-        partition.writeError = reason;
-        clearPending(partition);
-      }
-    }
-    store!.namespace.migration = null;
-    migrationPersisted = false;
-    store!.markMigrationDirty();
-    rawDirty = true;
-    log.warn('migration ' + String(generation) + ' aborted: ' + reason);
-    startNextMove();
-  };
-
-  /**
-   * 取出下一个仍然适用的搬迁并开启 journal。
-   *
-   * generation 取自持久计数器：每次搬迁都是全新代际，旧页残留的相同 owner/版本信封
-   * 不会被回读校验误认成本次写入结果。
-   */
-  const startNextMove = (): boolean => {
-    let move = moveQueue.shift();
-    while (move) {
-      const partition = partitions.get(key(move.pluginId, move.localId));
-      // 只有"在场且已经在目标后端"才说明这条计划过期；模块不在场时照常搬迁，
-      // 数据来自存储，恢复不依赖模块重新申请。
-      if (!partition || partition.backend !== move.to) break;
-      move = moveQueue.shift();
-    }
-    if (!move) return false;
-    const generation = store!.namespace.generationCounter + 1;
-    store!.namespace.generationCounter = generation;
-    store!.namespace.migration = {
-      generation,
-      phase: 'copy',
-      reason: move.from === 'segment' ? 'preemption' : 'allocation',
-      moves: [move],
-      staged: {},
-    };
-    store!.markMigrationDirty();
-    rawDirty = true;
-    migrationPersisted = false;
-    freezeMoves([move]);
-    log.info(
-      'migration ' +
-        generation +
-        ' start: ' +
-        key(move.pluginId, move.localId) +
-        ' ' +
-        move.from +
-        ' -> ' +
-        move.to +
-        (move.toSegmentId !== undefined
-          ? ' (segment ' + move.toSegmentId + ')'
-          : '')
-    );
-    return true;
-  };
-
-  /**
-   * 推进迁移一步。
-   *
-   * copy：把源数据（优先已冻结的内存副本，其次从 Raw 记录或 Segment 信封读取）暂存到
-   * journal，并写入目标页信封；verify：下一 tick 回读目标页，用 journal 里的
-   * owner/generation/dataVersion 校验；switch：更新目录、写 Raw 分区、释放被腾退的页。
-   * 全程不需要模块重新申请——模块不在场时数据仍从存储搬运，恢复信息不依赖 heap。
-   */
-  const advanceMigration = (): void => {
-    const journal = store!.namespace.migration;
-    if (!journal) {
-      startNextMove();
-      return;
-    }
-    const visible = segmentsVisible();
-    if (journal.phase === 'cleanup') {
-      // 目录必须已经随主 Memory 成功落盘，才允许清空旧页；写入失败时停在 cleanup，
-      // 由 end 重试写入（rawDirty 仍为真），成功后的下一 tick 再清理。
-      if (!migrationPersisted) return;
-      const attempts = (cleanupAttempts.get(journal.generation) ?? 0) + 1;
-      cleanupAttempts.set(journal.generation, attempts);
-      // 同一代际的清理失败只在首次尝试时告警：重试日志不重复刷屏（同一原因只记一次）。
-      const report = attempts === 1;
-      let allCleared = true;
-      for (const item of journal.moves)
-        if (
-          item.fromSegmentId !== undefined &&
-          !clearVacatedSegment(
-            item.fromSegmentId,
-            item,
-            item.fromGeneration,
-            report
-          )
-        )
-          allCleared = false;
-      if (!allCleared && attempts < 3) {
-        store!.markMigrationDirty();
-        rawDirty = true;
-        return;
-      }
-      if (!allCleared)
-        log.warn(
-          'migration ' +
-            journal.generation +
-            ' cleanup gave up on some vacated pages; they stay reserved'
-        );
-      cleanupAttempts.delete(journal.generation);
-      store!.namespace.migration = null;
-      store!.markMigrationDirty();
-      rawDirty = true;
-      log.info('migration ' + journal.generation + ' cleaned up');
-      startNextMove();
-      return;
-    }
-    // 每个恢复阶段都校验页范围，不能仅 copy 检查而让 verify/switch 绕过。
-    if (
-      journal.moves.some(
-        (item) =>
-          (item.to === 'segment' && !segmentIds.includes(item.toSegmentId!)) ||
-          (item.from === 'segment' && !segmentIds.includes(item.fromSegmentId!))
-      )
-    ) {
-      abortMigration('migration references unmanaged segment', journal.moves);
-      return;
-    }
-    // 兼容旧的未切换 journal：仅从仍指向源页的目录补齐清理凭证，不能从待删页自证。
-    for (const item of journal.moves) {
-      const allocation = allocationOf(item.pluginId, item.localId);
-      if (
-        item.from === 'segment' &&
-        item.fromGeneration === undefined &&
-        allocation?.backend === 'segment' &&
-        allocation.segmentId === item.fromSegmentId
-      ) {
-        item.fromGeneration = allocation.generation;
-        store!.markMigrationDirty();
-        rawDirty = true;
-      }
-    }
-    if (journal.phase === 'copy') {
-      for (const item of journal.moves) {
-        const identity = key(item.pluginId, item.localId);
-        const resident = partitions.get(identity);
-        let payload: JsonValue;
-        if (resident?.data) {
-          payload = resident.data as JsonValue;
-        } else if (item.from === 'segment') {
-          const text = visible[item.fromSegmentId!];
-          if (text === undefined) {
-            ensureSegmentsActive();
-            freezeMoves(journal.moves);
-            return;
-          }
-          const envelope = parseEnvelope(text);
-          if (
-            !envelope ||
-            envelope.owner.pluginId !== item.pluginId ||
-            envelope.owner.localId !== item.localId
-          ) {
-            abortMigration(
-              'migration source missing for ' + identity,
-              journal.moves
-            );
-            return;
-          }
-          payload = envelope.payload;
-          if (!isPartitionObject(payload)) {
-            abortMigration(
-              'migration source payload is not a key-value object for ' +
-                identity,
-              journal.moves
-            );
-            return;
-          }
-        } else {
-          const record = rawRecordOf(item.pluginId, item.localId);
-          if (!record) {
-            abortMigration(
-              'migration source missing for ' + identity,
-              journal.moves
-            );
-            return;
-          }
-          payload = record.payload;
-          if (!isPartitionObject(payload)) {
-            abortMigration(
-              'migration source payload is not a key-value object for ' +
-                identity,
-              journal.moves
-            );
-            return;
-          }
-        }
-        journal.staged[identity] = payload;
-      }
-      const needVisible = journal.moves.filter((item) => item.to === 'segment');
-      if (
-        needVisible.some((item) => visible[item.toSegmentId!] === undefined)
-      ) {
-        ensureSegmentsActive();
-        freezeMoves(journal.moves);
-        return;
-      }
-      for (const item of needVisible) {
-        // 目标页必须是空的（观察过的空页或刚腾退的页）；非空且不属于我们的页绝不写入。
-        const target = item.toSegmentId!;
-        const current = visible[target] ?? '';
-        const allocation = allocationOf(item.pluginId, item.localId);
-        const ours =
-          allocation?.backend === 'segment' &&
-          allocation.segmentId === target &&
-          describeMismatch(
-            parseEnvelope(current),
-            item,
-            allocation.generation,
-            item.dataVersion
-          ) === null;
-        if (!ours && current !== '') {
-          abortMigration(
-            'target segment ' + target + ' is not empty',
-            journal.moves
-          );
-          return;
-        }
-        try {
-          platform.writeSegment(
-            item.toSegmentId!,
-            encodeEnvelope(
-              createEnvelope(
-                { pluginId: item.pluginId, localId: item.localId },
-                journal.generation,
-                item.dataVersion,
-                journal.staged[key(item.pluginId, item.localId)]
-              )
-            )
-          );
-        } catch (error) {
-          abortMigration(
-            error instanceof Error ? error.message : String(error),
-            journal.moves
-          );
-          return;
-        }
-      }
-      journal.phase = 'verify';
-      store!.markMigrationDirty();
-      rawDirty = true;
-      freezeMoves(journal.moves, 'verification');
-      log.info(
-        'migration ' + journal.generation + ' copied; awaiting verification'
-      );
-      return;
-    }
-    // switch 再次核验目标，防止 verify 后重启/页被替换时删除唯一仍有效的 Raw 源。
-    if (journal.phase === 'verify' || journal.phase === 'switch') {
-      for (const item of journal.moves) {
-        const identity = key(item.pluginId, item.localId);
-        if (item.to === 'raw') {
-          // 切回 Raw 的数据来自 heap 或 journal 暂存；两者都不是键值对象时，
-          // 继续切换会写出缺失/损坏的记录并在 cleanup 删除唯一有效的 Segment 源。
-          const carried =
-            partitions.get(identity)?.data ?? journal.staged[identity];
-          if (!isPartitionObject(carried)) {
-            abortMigration(
-              'migration payload missing or invalid for ' + identity,
-              journal.moves
-            );
-            return;
-          }
-          continue;
-        }
-        const text = visible[item.toSegmentId!];
-        if (text === undefined) {
-          ensureSegmentsActive();
-          freezeMoves(journal.moves, 'verification');
-          return;
-        }
-        const envelope = parseEnvelope(text);
-        const mismatch = describeMismatch(
-          envelope,
-          { pluginId: item.pluginId, localId: item.localId },
-          journal.generation,
-          item.dataVersion
-        );
-        if (mismatch) {
-          abortMigration(
-            'migration verification failed: ' + mismatch,
-            journal.moves
-          );
-          return;
-        }
-        // 信封头正确不代表数据可恢复：目标 payload 必须是键值对象，才允许删除 Raw 源。
-        if (!isPartitionObject(envelope!.payload)) {
-          abortMigration(
-            'migration verification failed: target payload is not a key-value object',
-            journal.moves
-          );
-          return;
-        }
-      }
-      if (journal.phase === 'verify') {
-        journal.phase = 'switch';
-        store!.markMigrationDirty();
-        rawDirty = true;
-        freezeMoves(journal.moves);
-        log.info(
-          'migration ' + journal.generation + ' verified; switching directory'
-        );
-        return;
-      }
-    }
-    for (const item of journal.moves) {
-      const identity = key(item.pluginId, item.localId);
-      const resident = partitions.get(identity);
-      const staged = journal.staged[identity];
-      if (item.to === 'segment') {
-        deleteRawPartition(item.pluginId, item.localId);
-        writeAllocation(item.pluginId, item.localId, {
-          backend: 'segment',
-          segmentId: item.toSegmentId,
-          generation: journal.generation,
-        });
-        if (resident) {
-          resident.backend = 'segment';
-          resident.segmentId = item.toSegmentId;
-          resident.generation = journal.generation;
-          resident.dirty = false;
-          resident.dirtySince = undefined;
-          resident.forceCommit = false;
-          // 数据尚未装载时显式回到 loading，让下一 tick 从新后端装载；
-          // 否则会出现"无 pending 也无数据"的失真状态（accessor 永久 loading）。
-          if (resident.data === null) setPending(resident, 'loading');
-          else clearPending(resident);
-        }
-      } else {
-        writeRawPartition(
-          item.pluginId,
-          item.localId,
-          item.dataVersion,
-          (resident?.data ?? staged) as JsonValue
-        );
-        writeAllocation(item.pluginId, item.localId, {
-          backend: 'raw',
-          generation: journal.generation,
-        });
-        if (resident) {
-          resident.backend = 'raw';
-          resident.segmentId = undefined;
-          resident.generation = journal.generation;
-          resident.dirty = false;
-          resident.dirtySince = undefined;
-          resident.forceCommit = false;
-          if (resident.data === null) setPending(resident, 'loading');
-          else clearPending(resident);
-        }
-        // 被腾退的页留到 cleanup 阶段（目录成功落盘后）再清空。
-      }
-      delete journal.staged[identity];
-    }
-    // 目录切换只改 heap；被腾退的页要等包含新目录的整串写入成功之后，在 cleanup
-    // 阶段才清空——否则主 Memory 写失败叠加 global reset 会留下"存储目录仍指向
-    // 已清空页"的悬空引用，旧数据的唯一副本随之丢失。
-    journal.phase = 'cleanup';
-    store!.markMigrationDirty();
-    rawDirty = true;
-    migrationPersisted = false;
-    log.info('migration ' + journal.generation + ' switched; cleanup pending');
-    return;
-  };
-
-  /** 分区是否到期提交：critical 与强制提交当 tick，checkpoint 按首次 dirty 起算。 */
-  const isDue = (partition: Partition, tick: number): boolean =>
-    partition.forceCommit ||
-    partition.options.layer === 'critical' ||
-    (partition.dirtySince !== undefined &&
-      tick - partition.dirtySince >= partition.options.checkpointInterval - 1);
-
-  /**
-   * 暂存到期分区并写 Segment 信封。
-   *
-   * Raw 分区只更新命名空间对象，返回值交给 end 在整串写入成功后统一清 dirty——
-   * 若在这里就清，主 Memory 写入失败时会把"未落盘"误判成"已提交"。
-   */
-  const commitPartitions = (tick: number): Partition[] => {
-    const stagedRaw: Partition[] = [];
-    for (const partition of partitions.values()) {
-      if (!partition.dirty || !isDue(partition, tick)) continue;
-      // pending 期间数据不在稳定状态（页未激活、搬迁冻结、损坏）：本 tick 不写回。
-      if (partition.pending) continue;
-      if (partition.backend === 'raw') {
-        writeRawPartition(
-          partition.pluginId,
-          partition.localId,
-          partition.dataVersion,
-          partition.data as JsonValue
-        );
-        stagedRaw.push(partition);
-        continue;
-      }
-      // 页未激活时写入没有意义：请求激活并保持 dirty，下一 tick 再提交。
-      if (
-        partition.segmentId === undefined ||
-        segmentsVisible()[partition.segmentId] === undefined
-      ) {
-        ensureSegmentsActive();
-        setPending(partition, 'segment-activating');
-        continue;
-      }
+    const stored = JSON.parse(entry.fragment!) as { dataVersion: number; payload: unknown };
+    if (stored.dataVersion === declaration.version) {
       try {
-        const envelope = createEnvelope(
-          { pluginId: partition.pluginId, localId: partition.localId },
-          partition.generation,
-          partition.dataVersion,
-          partition.data as JsonValue
-        );
-        platform.writeSegment(partition.segmentId, encodeEnvelope(envelope));
-        partition.dirty = false;
-        partition.dirtySince = undefined;
-        partition.forceCommit = false;
-        partition.writeError = null;
-        partition.lastLoggedError = null;
+        validatePublishRoot(stored.payload);
       } catch (error) {
-        // 单页失败不影响其他分区；保留 dirty 与诊断，下一 tick 重试。
-        const message = error instanceof Error ? error.message : String(error);
-        partition.writeError = message;
-        if (partition.lastLoggedError !== message) {
-          partition.lastLoggedError = message;
-          log.warn(
-            'segment write failed for ' +
-              key(partition.pluginId, partition.localId) +
-              ': ' +
-              message
-          );
-        }
+        throw new Error(
+          'stored payload (dataVersion ' + stored.dataVersion + ') is not managed data: ' +
+            errorText(error) + '; declare a new version with migrate to repair it'
+        );
       }
+      return { data: stored.payload as Record<string, unknown>, dataVersion: stored.dataVersion, changed: false };
     }
-    return stagedRaw;
+    const migrate = declaration.migrate;
+    if (!migrate)
+      throw new Error(
+        'missing migrate for stored dataVersion ' + stored.dataVersion +
+          ' (declared version ' + declaration.version + ')'
+      );
+    const migrated = runCallback(
+      () => migrate(stored.payload, stored.dataVersion),
+      'migrate()'
+    );
+    validatePublishRoot(migrated);
+    log.info(
+      'partition ' + identity(entry.owner, entry.localId) + ' migrated dataVersion ' +
+        stored.dataVersion + ' -> ' + declaration.version
+    );
+    return { data: migrated as Record<string, unknown>, dataVersion: declaration.version, changed: true };
+  };
+
+  const apply = (
+    owner: string,
+    localId: string,
+    options: MemoryApplicationOptions<object>
+  ): MemoryAccessor<any> => {
+    if (!isStableKey(owner)) throw configError('invalid owner: ' + String(owner));
+    if (!isStableKey(localId)) throw configError('invalid localId: ' + String(localId));
+    const declaration = resolveDeclaration(options);
+    const id = identity(owner, localId);
+    const bucket = buckets.get(owner);
+    const entry = bucket?.entries.get(localId);
+    if (entry?.applied) {
+      if (!sameDeclaration(entry.applied.declaration, declaration))
+        throw configError('conflicting declaration for ' + id);
+      return entry.applied.accessor;
+    }
+    if (loadError !== null) throw configError('storage load failed: ' + loadError);
+    if (!loaded || !phaseOpen)
+      throw configError('apply is only allowed between a successful begin and end');
+    const failed = failedApplications.get(id);
+    if (failed && sameDeclaration(failed.declaration, declaration)) throw failed.error;
+    if (applying.has(id)) throw configError('reentrant application for ' + id);
+
+    applying.add(id);
+    enterBusy();
+    let built: ReturnType<typeof buildWorkingData>;
+    try {
+      built = buildWorkingData(entry, declaration);
+    } catch (error) {
+      const wrapped = configError('partition ' + id + ': ' + errorText(error));
+      failedApplications.set(id, { declaration, error: wrapped });
+      throw wrapped;
+    } finally {
+      exitBusy();
+      applying.delete(id);
+    }
+
+    // 发布：以下步骤不调用用户代码。先登记脏状态、最后才把新记录挂进输出桶——即使在两步之间
+    // 被硬终止，输出也不会出现没有片段的记录（孤立的脏项不在桶中，拼接时不会被遍历）。
+    failedApplications.delete(id);
+    const target: Entry = entry ?? {
+      owner,
+      localId,
+      keyPrefix: JSON.stringify(localId) + ':',
+      dataVersion: built.dataVersion,
+      fragment: null,
+      applied: null,
+    };
+    target.dataVersion = built.dataVersion;
+    const applied: Applied = {
+      entry: target,
+      declaration,
+      data: built.data,
+      accessor: null as unknown as MemoryAccessor<any>,
+      needsFullValidation: false,
+      mutatingTick: -1,
+    };
+    applied.accessor = createAccessor(applied);
+    if (built.changed) markDirty(applied, false);
+    target.applied = applied;
+    if (!entry) {
+      let ownerBucket = bucket;
+      if (!ownerBucket) {
+        ownerBucket = { prefix: JSON.stringify(owner) + ':{', entries: new Map() };
+        buckets.set(owner, ownerBucket);
+      }
+      ownerBucket.entries.set(localId, target);
+    }
+    return applied.accessor;
+  };
+
+  // ---------------------------------------------------------------------------
+  // 生命周期
+  // ---------------------------------------------------------------------------
+
+  /** 校验 tick 参数与真实 tick 一致，并拒绝同一执行栈内的重入。 */
+  const checkLifecycleCall = (what: string, tick: number): void => {
+    if (!Number.isSafeInteger(tick)) throw configError(what + ' requires an integer tick');
+    const now = platform.getTick();
+    if (tick !== now)
+      throw configError(what + '(' + tick + ') does not match current tick ' + now);
+    if (isBusy(now)) throw configError(what + ' cannot be called reentrantly');
+  };
+
+  const load = (): void => {
+    try {
+      const store = loadStore(platform.readRaw());
+      foreignPrefix = store.foreignPrefix;
+      preservedKeys = store.preservedKeys;
+      ignoredSegmentPartitions = store.ignoredSegmentPartitions;
+      for (const record of store.records) {
+        let bucket = buckets.get(record.owner);
+        if (!bucket) {
+          bucket = { prefix: JSON.stringify(record.owner) + ':{', entries: new Map() };
+          buckets.set(record.owner, bucket);
+        }
+        bucket.entries.set(record.localId, {
+          owner: record.owner,
+          localId: record.localId,
+          keyPrefix: JSON.stringify(record.localId) + ':',
+          dataVersion: record.dataVersion,
+          fragment: record.fragment,
+          applied: null,
+        });
+      }
+      structureChanged = store.structureChanged;
+      for (const warning of store.warnings) log.warn(warning);
+      loaded = true;
+    } catch (error) {
+      buckets.clear();
+      loadError = errorText(error);
+      log.error('storage load failed: ' + loadError);
+    }
   };
 
   const begin = (tick: number): void => {
-    currentTick = tick;
-    deferredThisTick = false;
-    if (!loaded && fault === null) {
-      try {
-        const loadedRoot = loadRawRoot(platform.readRaw());
-        store = createRawStore(loadedRoot);
-        // 加载到的 journal 已经存在于存储中，可以直接进入后续阶段。
-        migrationPersisted = store.namespace.migration !== null;
-        // 加载期被安全跳过的内容（例如旧布局的原型键）：只记录诊断，不阻断启动。
-        for (const warning of loadedRoot.warnings) log.warn(warning);
-        loaded = true;
-      } catch (error) {
-        fault = error instanceof Error ? error.message : String(error);
-        // fault 只建立一次，因此这条 error 每个实例最多出现一次。
-        log.error('storage load failed: ' + fault);
-      }
+    checkLifecycleCall('begin', tick);
+    if (tick < phaseTick) throw configError('begin(' + tick + ') is older than ' + phaseTick);
+    if (tick > phaseTick) {
+      // 新的真实 tick：终结上一阶段（可能因硬终止或遗漏 end 而未关闭），清除旧 tick 临时锁。
+      // 脏集合、结构变化与已发布访问器全部保留，end 会按最新工作对象重试。
+      phaseTick = tick;
+      phaseOpen = false;
+      busyDepth = 0;
+      applying.clear();
+      if (!loaded && loadError === null) load();
+      phaseOpen = loaded;
     }
-    if (!loaded) return;
-    ensureSegmentsActive();
-    refreshObservations();
-    /**
-     * 重试等待中的分区。
-     *
-     * 两种情形需要重试：①上一 tick 申请激活的页本 tick 可见；②分区没有数据
-     * （switch 之后或装载失败）。规则：
-     * - 冻结类 pending（migration/verification）必须保持——搬迁期间若恢复 ready，
-     *   插件的新提交不会被搬进目标，却会在 switch 时被清 dirty，造成静默丢失；
-     *   冻结时刻的数据由搬迁本身落盘。
-     * - 有未提交修改（dirty）时 heap 是事实源，只清 pending 让下一次提交重试，
-     *   绝不能用存储里的旧信封覆盖脏数据。
-     * - recovery 且无数据时允许重读自愈（结论保留在 writeError 中，语义是
-     *   "最近一次故障"，不代表当前仍不可用）。
-     */
-    for (const partition of partitions.values()) {
-      if (freezeForJournal(partition)) continue;
-      const pendingReason = partition.pending?.reason;
-      if (pendingReason === 'migration' || pendingReason === 'verification')
-        continue;
-      if (partition.dirty) {
-        clearPending(partition);
-        continue;
-      }
-      if (partition.data !== null) continue;
-      const restored = restorePartition(partition);
-      if (restored.ok === false) {
-        if (restored.reason === 'recovery') {
-          setPending(partition, 'recovery');
-          partition.writeError = restored.error ?? null;
+    // 同 tick 重复 begin 不重开已关闭的阶段；装载故障每次都报告给宿主。
+    if (loadError !== null) throw configError('storage load failed: ' + loadError);
+  };
+
+  /** 记录整串提交失败；同一文本只告警一次。 */
+  const recordFailure = (failure: WriteFailure): void => {
+    writeFailure = failure;
+    const text = describeFailure(failure);
+    if (text !== lastLoggedWriteError) {
+      lastLoggedWriteError = text;
+      log.warn('memory commit failed: ' + text);
+    }
+  };
+
+  const describeFailure = (failure: WriteFailure): string =>
+    failure.stage +
+    (failure.owner !== undefined ? ' ' + failure.owner + '/' + failure.localId : '') +
+    ': ' +
+    failure.message;
+
+  /**
+   * 编码脏分区并拼接完整文本。失败时抛出带阶段的 WriteFailure，调用方不推进任何基线。
+   * 候选片段只存在于返回的 Map 中，失败即丢弃。
+   */
+  const buildText = (
+    tick: number
+  ): { text: string; candidates: Map<Entry, string> } => {
+    const candidates = new Map<Entry, string>();
+    for (const applied of dirty) {
+      const entry = applied.entry;
+      const where = { owner: entry.owner, localId: entry.localId };
+      if (applied.needsFullValidation) {
+        try {
+          validateForCommit(applied.data);
+        } catch (error) {
+          throw { stage: 'validate', tick, message: errorText(error), ...where } as WriteFailure;
         }
-        continue;
       }
-      const versioned = applyVersion(partition, true);
-      if (versioned.ok === false) {
-        setPending(partition, 'recovery');
-        partition.writeError = versioned.error;
-        log.error(
-          'partition ' +
-            key(partition.pluginId, partition.localId) +
-            ': ' +
-            versioned.error
-        );
-        continue;
+      let fragment: string;
+      try {
+        fragment = encodeRecord(entry.dataVersion, applied.data);
+      } catch (error) {
+        throw { stage: 'encode', tick, message: errorText(error), ...where } as WriteFailure;
       }
-      clearPending(partition);
-      log.info(
-        'partition ' + key(partition.pluginId, partition.localId) + ' recovered'
-      );
+      candidates.set(entry, fragment);
     }
+    const blocks: string[] = [];
+    for (const bucket of buckets.values()) {
+      const parts: string[] = [];
+      for (const entry of bucket.entries.values())
+        parts.push(entry.keyPrefix + (candidates.get(entry) ?? entry.fragment!));
+      blocks.push(bucket.prefix + parts.join(',') + '}');
+    }
+    const text = '{' + foreignPrefix + NAMESPACE_OPEN + blocks.join(',') + '}}}';
+    if (text.length > RAW_MEMORY_LIMIT)
+      throw {
+        stage: 'capacity',
+        tick,
+        message: 'Memory text ' + text.length + ' UTF-16 code units exceeds ' + RAW_MEMORY_LIMIT,
+      } as WriteFailure;
+    return { text, candidates };
   };
 
   const end = (tick: number): void => {
-    if (!loaded || fault !== null) return;
-    refreshObservations();
-    // 1) 启动窗口：申请收齐才封存；被延后到上限后强制封存并记录诊断。
-    if (startupWindowOpen) {
-      if (deferredThisTick && startupDeferrals < maxStartupDeferrals) {
-        startupDeferrals++;
-      } else {
-        startupWindowOpen = false;
-        startupWindowForced = deferredThisTick;
-        if (startupWindowForced)
-          log.warn(
-            'startup window force-sealed after ' +
-              startupDeferrals +
-              ' deferrals; late applications stay on raw memory'
-          );
-      }
-    } else if (!allocationPlanned) {
-      // 2) 页分配等所有固定页都被观察过：没读过的页不能假定为空。
-      if (unobservedSegments().length === 0) {
-        planAllocation();
-      } else {
-        if (observationSinceTick < 0) observationSinceTick = tick;
-        if (tick - observationSinceTick >= maxObservationTicks) {
-          // 观察不到页（例如引擎未激活）：放弃 Segment 分配，全部留在主 Memory。
-          allocationPlanned = true;
-        }
-      }
-    }
-    // 3) 推进迁移、暂存到期分区，最后一次性写出主 Memory。
-    advanceMigration();
-    const stagedRaw = commitPartitions(tick);
-    const external = getHostMemory() ?? null;
-    const externalChanged = store!.hasExternalChanges(external);
-    if (!rawDirty && !externalChanged) {
-      // 没有待写内容：此前失败的变化已被撤销（如宿主删掉了无法序列化的字段），
-      // 持久文本与当前状态一致，不能让过期的失败诊断一直挂着。
-      rawWriteError = null;
-      lastLoggedRawWriteError = null;
-      return;
-    }
+    checkLifecycleCall('end', tick);
+    if (tick !== phaseTick) throw configError('end(' + tick + ') without begin');
+    if (!phaseOpen) return; // 重复 end 或装载失败：不重复提交
+    phaseOpen = false;
+    // 空闲路径：O(1) 判断后直接返回。
+    if (dirty.size === 0 && !structureChanged) return;
+    enterBusy();
     try {
-      const text = store!.serialize(external);
-      // 超过引擎上限的写入必然失败；提前给出带体积的诊断，走同一条重试/告警路径。
-      if (text.length > RAW_MEMORY_LIMIT)
-        throw new Error(
-          'Memory text ' + text.length + ' chars exceeds ' + RAW_MEMORY_LIMIT
-        );
-      platform.writeRaw(text);
-      rawDirty = false;
-      rawWriteError = null;
-      lastLoggedRawWriteError = null;
-      migrationPersisted = store!.namespace.migration !== null;
-      store!.commitExternal(external);
-      for (const partition of stagedRaw) {
-        partition.dirty = false;
-        partition.dirtySince = undefined;
-        partition.forceCommit = false;
-        partition.writeError = null;
-        partition.lastLoggedError = null;
+      let built: { text: string; candidates: Map<Entry, string> };
+      try {
+        built = buildText(tick);
+      } catch (failure) {
+        if (failure instanceof Error)
+          recordFailure({ stage: 'encode', tick, message: failure.message });
+        else recordFailure(failure as WriteFailure);
+        return;
       }
-    } catch (error) {
-      // 主 Memory 写入失败：保留 rawDirty 与分区 dirty，记录诊断并在下一 tick 重试。
-      const message = error instanceof Error ? error.message : String(error);
-      // 管理器级诊断：失败可能来自宿主根字段或目录变化，此时 stagedRaw 为空，
-      // 只靠分区级记录会让失败静默。
-      rawWriteError = message;
-      if (lastLoggedRawWriteError !== message) {
-        lastLoggedRawWriteError = message;
-        log.warn('raw memory write failed: ' + message);
+      try {
+        platform.writeRaw(built.text);
+      } catch (error) {
+        recordFailure({ stage: 'platform', tick, message: errorText(error) });
+        return;
       }
-      for (const partition of stagedRaw) {
-        partition.writeError = message;
-        if (partition.lastLoggedError !== message) {
-          partition.lastLoggedError = message;
-          log.warn(
-            'raw write failed for ' +
-              key(partition.pluginId, partition.localId) +
-              ': ' +
-              message
-          );
-        }
+      // 平台已接受：先更新全部候选基线，最后才清脏；中断只会导致冗余提交。
+      for (const [entry, fragment] of built.candidates) {
+        entry.fragment = fragment;
+        if (entry.applied) entry.applied.needsFullValidation = false;
       }
+      dirty.clear();
+      structureChanged = false;
+      if (writeFailure !== null) {
+        log.info('memory commit recovered after: ' + describeFailure(writeFailure));
+        writeFailure = null;
+        lastLoggedWriteError = null;
+      }
+    } finally {
+      exitBusy();
     }
-  };
-
-  /** 本轮申请未收齐时延后封存窗口（例如框架进入安全模式或跳过部分插件）。 */
-  const deferStartupWindow = (): void => {
-    deferredThisTick = true;
   };
 
   const bind =
     (owner: string): ApplyMemoryAccessor =>
     (localId, applicationOptions) =>
-      apply(owner, localId, applicationOptions);
+      apply(owner, localId, applicationOptions) as never;
 
-  const getStatus = (): MemoryManagerStatus => ({
-    loaded,
-    fault,
-    rawWriteError,
-    tick: currentTick,
-    startupWindowOpen,
-    startupWindowForced,
-    startupDeferrals,
-    allocations: [...partitions.values()].map((partition) => ({
-      pluginId: partition.pluginId,
-      localId: partition.localId,
-      backend: partition.backend,
-      segmentId: partition.segmentId,
-      // pending 以 accessor 的实际判定为准：无数据即 loading，避免状态与真实相反。
-      pending:
-        partition.pending?.reason ??
-        (partition.data === null ? 'loading' : null),
-      dirty: partition.dirty,
-      writeError: partition.writeError,
-    })),
-    migration: store?.namespace.migration
-      ? {
-          generation: store.namespace.migration.generation,
-          phase: store.namespace.migration.phase,
-          reason: store.namespace.migration.reason,
-          moves: store.namespace.migration.moves.length,
-        }
-      : null,
-    reservedSegments: [...reservedSegments].map(([segmentId, reason]) => ({
-      segmentId,
-      reason,
-    })),
-    allocationSkipped: allocationSkipped.map((entry) => ({ ...entry })),
-    unobservedSegments: unobservedSegments(),
-    preservedRootKeys: store ? store.preservedKeys() : [],
-  });
+  const getStatus = (): MemoryManagerStatus => {
+    const partitions: MemoryManagerStatus['partitions'] = [];
+    for (const bucket of buckets.values())
+      for (const entry of bucket.entries.values())
+        partitions.push({
+          owner: entry.owner,
+          localId: entry.localId,
+          dataVersion: entry.dataVersion,
+          applied: entry.applied !== null,
+        });
+    return {
+      loaded,
+      loadError,
+      rawWriteError: writeFailure ? describeFailure(writeFailure) : null,
+      writeFailure: writeFailure ? { ...writeFailure } : null,
+      tick: phaseTick,
+      dirty: [...dirty].map((applied) => ({
+        owner: applied.entry.owner,
+        localId: applied.entry.localId,
+      })),
+      structureChanged,
+      partitions,
+      ignoredSegmentPartitions: ignoredSegmentPartitions.map((id) => ({ ...id })),
+      preservedRootKeys: [...preservedKeys],
+    };
+  };
 
-  return { begin, end, deferStartupWindow, bind, getStatus };
+  return { begin, end, bind, getStatus };
 };

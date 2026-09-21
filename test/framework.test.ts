@@ -10,9 +10,9 @@ import {
   type MemoryManagerOptions,
 } from '@/core/memoryManager';
 import { createRuntime } from '@/core/runtime';
+import { runInNewContext } from 'node:vm';
 import { createLogging } from '@/core/logger';
 import type { MemoryAccessor, MemoryHost } from '@/contracts/memory';
-import type { MemoryPlatform } from '@/core/memoryManager/types';
 import type { LeviathanPlugin, PluginContext } from '@/contracts';
 import { createProfiler } from '@/core/profiler';
 import type { ProfilerMemory } from '@/core/profiler/types';
@@ -46,10 +46,9 @@ const harness = (plugins: LeviathanPlugin[] = [], extra: any = {}) => {
   (globalThis as any).RawMemory = { get: read, set: write };
   /** 大多数 Framework 用例不测试持久化：注入显式空端口，保留旧用例的无存储语义。 */
   const unassembledMemory: MemoryHost = {
-    getStatus: () => ({ rawWriteError: null }),
+    getStatus: () => ({ loadError: null, rawWriteError: null }),
     begin: () => undefined,
     end: () => undefined,
-    deferStartupWindow: () => undefined,
     bind: () => () => {
       throw new Error('MemoryManager is not assembled');
     },
@@ -904,24 +903,38 @@ describe('Framework critical event listener failure', () => {
 });
 
 describe('Framework memory integration', () => {
-  /** S04：真实 MemoryManager 下，停用再启用与 setup 重试都复用同一声明，数据延续且不重复初始化。 */
-  it('reapplies a stable memory declaration after disable/enable and a failed setup', () => {
-    let raw = '{}';
+  /**
+   * 真实 MemoryManager 的平台：raw 整串 + 从 harness 的 Game 读取真实 tick。
+   * 管理器在 harness 之前创建，因此 tick 源通过 attach 延迟绑定。
+   */
+  const createPlatform = (initial = '{}') => {
+    let raw = initial;
+    let game: { time: number } = { time: 1 };
     const manager = createMemoryManager({
-      segmentIds: [],
       platform: {
         readRaw: () => raw,
         writeRaw: (text) => {
           raw = text;
         },
-        readSegments: () => ({}),
-        writeSegment: () => undefined,
-        activeSegments: () => [],
-        activateSegments: () => undefined,
+        getTick: () => game.time,
       },
     });
-    const initialize = jest.fn(() => ({ n: 0 }));
-    const options = { version: 1, layer: 'critical', initialize } as const;
+    return {
+      manager,
+      raw: () => raw,
+      attach: (target: { time: number }) => {
+        game = target;
+      },
+    };
+  };
+  const counterInit = () => ({ n: 0 });
+  const counterOptions = { version: 1, initialize: counterInit };
+
+  /** S04：停用再启用与 setup 重试都复用同一声明，数据延续且不重复初始化。 */
+  it('reapplies a stable memory declaration after disable/enable and a failed setup', () => {
+    const plat = createPlatform();
+    const initialize = jest.fn(counterInit);
+    const options = { version: 1, initialize };
     let setups = 0;
     let executions = 0;
     let accessor: MemoryAccessor<{ n: number }>;
@@ -935,16 +948,13 @@ describe('Framework memory integration', () => {
           },
           onTickExecute() {
             executions++;
-            const access = accessor.access();
-            if (access.status === 'ready')
-              access.commit((data) => {
-                data.n++;
-              });
+            accessor.commit((data) => void data.n++);
           },
         }),
       ],
-      { memory: manager }
+      { memory: plat.manager }
     );
+    plat.attach(h.game);
     for (let i = 0; i < 6; i++) h.next();
     h.framework.disable('consumer');
     h.next();
@@ -952,105 +962,54 @@ describe('Framework memory integration', () => {
     for (let i = 0; i < 3; i++) h.next();
 
     const failures = h.framework.getStatus().failures;
-    expect(
-      failures.some((f) => /conflicting declaration/.test(f.message))
-    ).toBe(false);
+    expect(failures.some((f) => /conflicting declaration/.test(f.message))).toBe(false);
     expect(initialize).toHaveBeenCalledTimes(1);
     expect(executions).toBeGreaterThan(1);
-    const stored = JSON.parse(raw).memoryManager.rawPartitions.consumer.main;
-    expect(stored.payload.n).toBeGreaterThan(1);
+    const stored = JSON.parse(plat.raw()).memoryManager.partitions.consumer.main;
+    expect(stored.payload.n).toBe(executions);
   });
 
   it('exposes raw write failure and recovery without blocking corrective plugin work', () => {
-    let raw = '{}';
+    const plat = createPlatform();
     let accessor: MemoryAccessor<{ blob: string }>;
     let blob = 'x'.repeat(2_200_000);
-    const manager = createMemoryManager({
-      segmentIds: [],
-      platform: {
-        readRaw: () => raw,
-        writeRaw: (text) => {
-          raw = text;
-        },
-        readSegments: () => ({}),
-        writeSegment: () => undefined,
-        activeSegments: () => [],
-        activateSegments: () => undefined,
-      },
-    });
-    const execute = jest.fn(() => {
-      const access = accessor.access();
-      expect(access.status).toBe('ready');
-      if (access.status === 'ready')
-        access.commit((data) => {
-          data.blob = blob;
-        });
-    });
+    const execute = jest.fn(() => accessor.commit('blob', blob));
     const h = harness(
       [
         plugin('writer', {
           setup(context) {
             accessor = context.memory('main', {
               version: 1,
-              layer: 'critical',
               initialize: () => ({ blob: '' }),
             });
           },
           onTickExecute: execute,
         }),
       ],
-      { memory: manager }
+      { memory: plat.manager }
     );
+    plat.attach(h.game);
     h.next();
     h.next();
     const failed = h.framework.getStatus();
-    expect(failed.memory.rawWriteError).toContain('exceeds');
+    expect(failed.memory.rawWriteError).toMatch(/^capacity: .*exceeds/);
+    expect(failed.memory.loadError).toBeNull();
     expect(failed.safeMode).toBe(false);
     expect(failed.failures).toEqual([]);
-    expect(manager.getStatus().allocations[0].dirty).toBe(true);
-    expect(raw).toBe('{}');
+    expect(plat.manager.getStatus().dirty).toEqual([{ owner: 'writer', localId: 'main' }]);
+    expect(plat.raw()).toBe('{}');
     failed.memory.rawWriteError = null;
-    expect(h.framework.getStatus().memory.rawWriteError).toContain('exceeds');
+    expect(h.framework.getStatus().memory.rawWriteError).toMatch(/exceeds/);
 
     blob = 'recovered';
     h.next();
     expect(execute).toHaveBeenCalledTimes(3);
     expect(h.framework.getStatus().memory.rawWriteError).toBeNull();
-    expect(manager.getStatus().allocations[0].dirty).toBe(false);
-    expect(
-      JSON.parse(raw).memoryManager.rawPartitions.writer.main.payload.blob
-    ).toBe('recovered');
+    expect(plat.manager.getStatus().dirty).toEqual([]);
+    expect(JSON.parse(plat.raw()).memoryManager.partitions.writer.main.payload.blob).toBe(
+      'recovered'
+    );
   });
-
-  /** 只服务本组用例的假平台：raw 整串 + 一 tick 延迟可见的 Segment。 */
-  const createPlatform = () => {
-    let raw = '{}';
-    const content: Record<number, string> = {};
-    let visible: number[] = [];
-    let requested: number[] = [];
-    const platform: MemoryPlatform = {
-      readRaw: () => raw,
-      writeRaw: (value) => {
-        raw = value;
-      },
-      readSegments: () =>
-        Object.fromEntries(visible.map((id) => [id, content[id] ?? ''])),
-      writeSegment: (id, value) => {
-        content[id] = value;
-      },
-      activeSegments: () => [...visible],
-      activateSegments: (ids) => {
-        requested = [...ids];
-      },
-    };
-    return {
-      platform,
-      raw: () => raw,
-      nextTick: () => {
-        visible = [...requested];
-      },
-    };
-  };
 
   it('binds applications by plugin id and persists them through a reset', () => {
     const plat = createPlatform();
@@ -1059,100 +1018,92 @@ describe('Framework memory integration', () => {
       setup(context) {
         accessor = context.memory('main', {
           version: 1,
-          layer: 'critical',
-          priority: 5,
           initialize: () => ({ ticks: 0 }),
         });
       },
       onTickExecute() {
-        const access = accessor!.access();
-        if (access.status === 'ready')
-          access.commit((memory) => (memory.ticks += 1));
+        accessor!.commit((memory) => (memory.ticks += 1));
       },
     });
-
-    const first = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
+    const h = harness([consumer], { memory: plat.manager });
+    plat.attach(h.game);
+    h.next();
+    h.next();
+    h.next();
+    expect(plat.manager.getStatus().partitions[0]).toMatchObject({
+      owner: 'consumer',
+      localId: 'main',
+      applied: true,
     });
-    const h = harness([consumer], { memory: first });
-    h.next();
-    h.next();
-    h.next();
-    // 迁移需要跨 tick 完成，但每次 begin 都会推进；这里确认最终落在 Segment 上。
-    for (let i = 0; i < 5; i++) {
-      plat.nextTick();
-      h.next();
-    }
 
-    const namespace = JSON.parse(plat.raw()).memoryManager;
-    expect(first.getStatus().allocations[0].pluginId).toBe('consumer');
-    expect(namespace.allocations.consumer.main.backend).toBe('segment');
-
-    // 模拟 global reset：新管理器读同一份存储，插件重新申请后数据延续。
+    // global reset：新管理器读同一份存储，插件重新申请后数据延续，initialize 不再执行。
     const second = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
+      platform: {
+        readRaw: plat.raw,
+        writeRaw: () => undefined,
+        getTick: () => h2.game.time,
+      },
     });
     let restored: MemoryAccessor<{ ticks: number }> | undefined;
+    const initialize = jest.fn(() => ({ ticks: -1 }));
     const restarted = plugin('consumer', {
       setup(context) {
-        restored = context.memory('main', {
-          version: 1,
-          layer: 'critical',
-          priority: 5,
-          initialize: () => ({ ticks: -1 }),
-        });
+        restored = context.memory('main', { version: 1, initialize });
       },
     });
     const h2 = harness([restarted], { memory: second });
     h2.next();
-    const restoredAccess = restored!.access();
-    expect(restoredAccess.status).toBe('ready');
-    if (restoredAccess.status === 'ready')
-      expect(restoredAccess.query().ticks).toBeGreaterThan(0);
+    expect(restored!.query().ticks).toBe(3);
+    expect(initialize).not.toHaveBeenCalled();
   });
 
-  it('defers the memory startup window while plugins are not admitted', () => {
-    const plat = createPlatform();
-    const manager = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
-    });
-    const consumer = plugin('consumer', {
-      setup(context) {
-        context.memory('main', {
-          version: 1,
-          layer: 'critical',
-          priority: 5,
-          initialize: () => ({ ticks: 0 }),
-        });
-      },
-    });
-    const h = harness([consumer], { memory: manager });
-
-    // 低 bucket：普通插件不被准入，setup 未执行 → 申请窗口必须保持开启。
-    h.game.cpu.bucket = 0;
+  it('enters safe mode on load failure, keeps storage intact and does not wedge the loop', () => {
+    const plat = createPlatform('{broken');
+    const setup = jest.fn();
+    const h = harness([plugin('consumer', { setup })], { memory: plat.manager });
+    plat.attach(h.game);
     h.next();
-    expect(manager.getStatus().startupWindowOpen).toBe(true);
-
-    // bucket 恢复后插件正常 setup 并申请，本 tick 收尾即可封存窗口。
-    h.game.cpu.bucket = 10000;
-    plat.nextTick();
     h.next();
-    expect(manager.getStatus().startupWindowOpen).toBe(false);
+    const status = h.framework.getStatus();
+    expect(status.safeMode).toBe(true);
+    expect(status.memory.loadError).toMatch(/JSON/);
+    expect(setup).not.toHaveBeenCalled();
+    expect(plat.raw()).toBe('{broken');
+  });
+
+  it('routes application failures into the plugin error boundary', () => {
+    const plat = createPlatform(
+      JSON.stringify({
+        memoryManager: { schemaVersion: 2, partitions: { consumer: { main: { dataVersion: 2, payload: {} } } } },
+      })
+    );
+    const h = harness(
+      [
+        plugin('consumer', {
+          setup(context) {
+            context.memory('main', counterOptions);
+          },
+        }),
+      ],
+      { memory: plat.manager }
+    );
+    plat.attach(h.game);
+    h.next();
+    const status = h.framework.getStatus();
+    expect(status.safeMode).toBe(false);
+    expect(status.failures[0]).toMatchObject({ pluginId: 'consumer', phase: 'setup' });
+    expect(status.failures[0].message).toMatch(/missing migrate for stored dataVersion 2/);
   });
 
   it('isolates memory lifecycle failures without wedging the loop', () => {
-    // end 抛错：业务照常执行，下一 tick 仍能进入（running 已复位）。
+    // end 抛错：业务照常执行，下一 tick 仍能进入（runningTick 已复位）。
     const onTickExecute = jest.fn();
-    const endBoom = {
+    const endBoom: MemoryHost = {
       begin: jest.fn(),
       end: jest.fn(() => {
         throw new Error('end boom');
       }),
-      deferStartupWindow: jest.fn(),
-      getStatus: () => ({ rawWriteError: null }),
+      getStatus: () => ({ loadError: null, rawWriteError: null }),
       bind: jest.fn(),
     };
     const h = harness([plugin('consumer', { onTickExecute })], {
@@ -1165,14 +1116,13 @@ describe('Framework memory integration', () => {
     expect(onTickExecute).toHaveBeenCalledTimes(2);
     expect(h.framework.getStatus().failures.length).toBeGreaterThan(0);
 
-    // begin 抛错：按内核故障进入安全模式，但下一 tick 依旧能进入而不是永久不可重入。
-    const beginBoom = {
+    // begin 抛错：按宿主故障进入安全模式，但下一 tick 依旧能进入而不是永久不可重入。
+    const beginBoom: MemoryHost = {
       begin: jest.fn(() => {
         throw new Error('begin boom');
       }),
       end: jest.fn(),
-      deferStartupWindow: jest.fn(),
-      getStatus: () => ({ rawWriteError: null }),
+      getStatus: () => ({ loadError: 'begin boom', rawWriteError: null }),
       bind: jest.fn(),
     };
     const h2 = harness([plugin('consumer', {})], { memory: beginBoom });
@@ -1180,46 +1130,53 @@ describe('Framework memory integration', () => {
     expect(() => h2.next()).not.toThrow();
     expect(beginBoom.begin).toHaveBeenCalledTimes(2);
     expect(beginBoom.end).toHaveBeenCalledTimes(2);
+    expect(h2.framework.getStatus().safeMode).toBe(true);
   });
 
-  it('defers the startup window when a plugin setup fails before applying', () => {
+  it('recovers the loop and memory after a hard termination that skips finally blocks', () => {
     const plat = createPlatform();
-    const manager = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
-      maxStartupDeferrals: 5,
-    });
-    let attempts = 0;
-    const flaky = plugin('flaky', {
-      setup(context) {
-        attempts++;
-        if (attempts === 1) throw new Error('first setup fails');
-        context.memory('main', {
-          version: 1,
-          layer: 'critical',
-          priority: 1,
-          initialize: () => ({ n: 0 }),
-        });
-      },
-    });
-    const h = harness([flaky], { memory: manager });
-
+    let hang = false;
+    let accessor: MemoryAccessor<{ n: number }>;
+    const h = harness(
+      [
+        plugin('consumer', {
+          setup(context) {
+            accessor = context.memory('main', counterOptions);
+          },
+          onTickExecute() {
+            accessor.commit((data) => {
+              data.n++;
+              if (hang) for (;;);
+            });
+          },
+        }),
+      ],
+      { memory: plat.manager }
+    );
+    plat.attach(h.game);
     h.next();
-    expect(manager.getStatus().startupWindowOpen).toBe(true);
-
-    plat.nextTick();
+    hang = true;
+    h.game.time++;
+    // vm 超时终止执行时不运行任何 catch/finally，等价于引擎 CPU 硬终止且 heap 保留。
+    expect(() =>
+      runInNewContext('loop()', { loop: h.framework.loop }, { timeout: 50 })
+    ).toThrow(/timed out/);
+    // 同一 tick 内再次进入仍判为重入；下一个真实 tick 自动恢复，不被遗留锁永久锁死。
+    expect(() => h.framework.loop()).toThrow(/not reentrant/);
+    hang = false;
     h.next();
-    expect(manager.getStatus().startupWindowOpen).toBe(false);
+    h.next();
+    const status = h.framework.getStatus();
+    expect(status.safeMode).toBe(false);
+    expect(status.failures).toEqual([]);
+    // 终止 tick 中回调已做的修改保留在脏数据中，随后提交；共计 4 次递增。
+    expect(JSON.parse(plat.raw()).memoryManager.partitions.consumer.main.payload.n).toBe(4);
   });
 
   it('reports a configuration error when no memory manager is assembled', () => {
     const consumer = plugin('consumer', {
       setup(context) {
-        context.memory('main', {
-          version: 1,
-          layer: 'critical',
-          initialize: () => ({ ticks: 0 }),
-        });
+        context.memory('main', counterOptions);
       },
     });
     const h = harness([consumer]);

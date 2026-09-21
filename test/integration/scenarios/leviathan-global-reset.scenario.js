@@ -5,13 +5,12 @@
  * 「世界 A 运行 → 读取 Memory 快照 → 世界 B 以该快照启动」等价表达一次 global reset：
  * heap 全新（探针计数器从零开始），Memory 原样继承。场景同时覆盖两条持久化契约：
  *
- * 1. 外部兼容：旧 `leviathan` 根字段与无关根字段在运行后必须原样保留，
- *    MemoryManager 只拥有 `memoryManager` 键（设计文档 §8）；
- * 2. 失败保护：命名空间 schemaVersion 不认识时必须报告诊断且不覆盖任何存储
- *    （`namespace.ts` 的 loadRawRoot 拒绝写入语义）。
+ * 1. 外部兼容：旧 `leviathan` 根字段与无关根字段在运行后必须原样保留，旧插件数据
+ *    一次性导入为 schemaVersion 2 分区，MemoryManager 只拥有 `memoryManager` 键（设计 §8）；
+ * 2. 失败保护：命名空间 schemaVersion 不认识时锁定装载故障、进入安全模式、报告诊断且不覆盖
+ *    任何存储（`namespace.ts` 的 loadStore 拒绝语义）。
  *
- * 未覆盖边界：主 RawMemory 与 Segment 的分区搬迁、journal 迁移与恢复需要声明 persistence
- * 的业务插件；当前生产 bundle 只有不声明持久化的 roomShortcuts，因此这些路径留待后续场景。
+ * 分区写盘、容量、硬终止与访问器恢复需要申请分区的插件，见 leviathan-memory 场景。
  */
 'use strict';
 
@@ -39,7 +38,7 @@ const LEGACY_NAMESPACE = {
 /** 与 MemoryManager 无关的根字段，用于验证"保留无关根字段"。 */
 const EXTERNAL_ROOT_FIELD = { keep: true, nested: { untouched: [1, 2, 3] } };
 
-/** 未知的命名空间版本：当前实现只认识 schemaVersion 1，其余必须拒绝覆盖。 */
+/** 未知的命名空间版本：实现只认识 schemaVersion 1（转换）与 2，其余必须拒绝覆盖。 */
 const UNKNOWN_SCHEMA_VERSION = 99;
 
 const baseOptions = (memory) => ({
@@ -105,6 +104,18 @@ async function phaseExternalCompatibility() {
         memory.externalTool,
         EXTERNAL_ROOT_FIELD,
         'MemoryManager 不得改写与自身无关的根字段'
+      );
+      assert.deepEqual(
+        memory.memoryManager,
+        {
+          schemaVersion: 2,
+          partitions: {
+            legacyProbe: {
+              main: { dataVersion: 3, payload: LEGACY_NAMESPACE.plugins.legacyProbe },
+            },
+          },
+        },
+        '旧插件数据应一次性导入为 schemaVersion 2 分区'
       );
 
       console.log(
@@ -180,9 +191,11 @@ async function phaseUnknownSchemaProtection() {
       ),
       '诊断日志必须给出无法识别的 schemaVersion'
     );
-    // 故障被吸收为诊断而非抛出：tick 循环继续，且框架分类中没有运行期错误。
+    // 装载故障是宿主故障：Framework 每 tick 进入安全模式并报告，但 tick 循环继续、不写回。
     assert.equal(world.report.ticksRun, TICKS_C);
-    assertRuntimeClean(world.report);
+    const probe = world.evalInBot('JSON.stringify(globalThis.__leviathanIntegrationRuns)', BOT_NAME);
+    await world.tick(1);
+    assert.equal(await probe, TICKS_C + 1, 'loop 不得因装载故障卡死');
 
     console.log(
       `  阶段 3 通过：未知 schemaVersion 被拒绝覆盖并留下诊断，${world.report.ticksRun} tick 未中断`
