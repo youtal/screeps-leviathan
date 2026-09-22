@@ -54,6 +54,7 @@ export function positive(m: MemoryAccessor<State>, roomName: string, i: number) 
   const removed: boolean = m.remove('config');
   m.remove(['rooms', roomName]);
   m.remove(['rooms', roomName, 'note']);
+  m.remove(['rooms', 'W1N1']); // 字面量 Record 键同样是动态条目
   m.remove(['config']);
   void removed;
 }
@@ -116,4 +117,27 @@ export function dynamic(m: MemoryAccessor<any>, path: (string | number)[]) {
   m.remove(['x', 'y']);
   // 宽数组仍然无法静态收窄为元组，需要显式断言。
   m.get(path as unknown as readonly [string]);
+}
+
+/** M6：数字索引 Record 用字符串段访问；带索引签名时静态必填键仍不可删除。 */
+interface History {
+  byTick: Record<number, { cpu: number }>;
+  [extra: string]: unknown;
+}
+interface Mixed {
+  count: number;
+  label?: string;
+  [key: string]: number | string | undefined;
+}
+export function indexSignatures(h: MemoryAccessor<History>, m: MemoryAccessor<Mixed>, tick: number) {
+  const cpu: number | undefined = h.get(['byTick', String(tick), 'cpu']);
+  void cpu;
+  h.commit(['byTick', String(tick)], { cpu: 1 });
+  h.remove(['byTick', String(tick)]);
+  // @ts-expect-error 对象段必须是字符串（运行时同样拒绝数字段）
+  h.get(['byTick', tick]);
+  m.remove('label');
+  m.remove('anyDynamicKey');
+  // @ts-expect-error 索引签名不能放行静态必填键
+  m.remove('count');
 }

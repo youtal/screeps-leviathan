@@ -874,6 +874,167 @@ describe('MemoryManager lifecycle', () => {
   });
 });
 
+/** 2026-09-22 模块审计的回归用例（M1、M3、M6、M7）。 */
+describe('MemoryManager audit regressions', () => {
+  it('M1: isolates initialize and migrate results from shared or frozen objects', () => {
+    const t = setup();
+    const DEFAULT = { n: 0 };
+    const FROZEN = Object.freeze({ n: 0 });
+    const shared = { version: 1, initialize: () => DEFAULT };
+    let x!: MemoryAccessor<{ n: number }>;
+    let y!: MemoryAccessor<{ n: number }>;
+    let frozen!: MemoryAccessor<{ n: number }>;
+    t.tick(() => {
+      x = t.bind('p')('x', shared);
+      y = t.bind('p')('y', shared);
+      frozen = t.bind('p')('frozen', { version: 1, initialize: () => FROZEN });
+    });
+    t.tick(() => {
+      x.commit('n', 5);
+      frozen.commit('n', 1); // 冻结常量被复制，写入不会抛错
+    });
+    expect(y.get('n')).toBe(0);
+    expect(DEFAULT.n).toBe(0);
+    expect(FROZEN.n).toBe(0);
+    expect(partitionOf(t.plat, 'p', 'y').payload.n).toBe(0);
+    expect(partitionOf(t.plat, 'p', 'frozen').payload.n).toBe(1);
+
+    const { manager } = reset(t.plat);
+    manager.begin(t.plat.state.tick);
+    const MIGRATED = { n: 9 };
+    const migrated = manager.bind('p')('x', {
+      version: 2,
+      initialize: () => ({ n: 0 }),
+      migrate: () => MIGRATED,
+    });
+    migrated.commit('n', 10);
+    expect(MIGRATED.n).toBe(9);
+  });
+
+  it('M3: rejects symbol-keyed properties at publish and at commit time', () => {
+    const t = setup();
+    const marker = Symbol('marker');
+    let a!: MemoryAccessor<any>;
+    t.tick(() => {
+      expect(() =>
+        t.bind('p')('bad', { version: 1, initialize: () => ({ list: Object.assign([1], { [marker]: 1 }) }) })
+      ).toThrow(/\$\.list: symbol-keyed property/);
+      a = t.bind('p')('a', { version: 1, initialize: () => ({ box: {} }) });
+      expect(() => a.commit('box', { [marker]: true })).toThrow(/symbol-keyed property/);
+    });
+    const committed = t.plat.state.raw;
+    t.tick(() => a.commit((memory) => void (memory.box[marker] = 1)));
+    expect(t.plat.state.raw).toBe(committed);
+    expect(t.manager.getStatus().writeFailure).toMatchObject({
+      stage: 'validate',
+      owner: 'p',
+      localId: 'a',
+    });
+    expect(t.manager.getStatus().writeFailure!.message).toMatch(/\$\.box: symbol-keyed property/);
+  });
+
+  it('M6: addresses numeric-keyed records with string segments', () => {
+    const t = setup();
+    t.tick(() => {
+      const history = t.bind('p')('history', {
+        version: 1,
+        initialize: () => ({ byTick: {} as Record<number, { cpu: number }> }),
+      });
+      history.commit(['byTick', String(100)], { cpu: 3 });
+      expect(history.get(['byTick', '100', 'cpu'])).toBe(3);
+      expect(() => (history as MemoryAccessor<any>).get(['byTick', 100])).toThrow(/string key/);
+      expect(history.remove(['byTick', '100'])).toBe(true);
+    });
+  });
+
+  it('M7: rejects malformed application calls', () => {
+    const t = setup();
+    t.tick(() => {
+      const accessor = t.bind('p')('a', counterOptions) as MemoryAccessor<any>;
+      expect(() => (accessor.commit as any)('count')).toThrow(/requires a value/);
+      expect(() => t.bind('p')('b', null as any)).toThrow(/options must be an object/);
+      expect(() =>
+        t.bind('p')('c', { version: 1, initialize: counterInit, migrate: 'x' as any })
+      ).toThrow(/migrate must be a function/);
+    });
+  });
+
+  it('M7: rejects reentrant applications and lifecycle calls from initialize', () => {
+    const t = setup();
+    t.tick(() => {
+      const bind = t.bind('p');
+      const errors: string[] = [];
+      const options: MemoryApplicationOptions<Counter> = {
+        version: 1,
+        initialize: () => {
+          for (const attempt of [
+            () => bind('a', options),
+            () => t.manager.begin(t.plat.state.tick),
+            () => t.manager.end(t.plat.state.tick),
+          ]) {
+            try {
+              attempt();
+            } catch (error) {
+              errors.push((error as Error).message);
+            }
+          }
+          return { count: 0 };
+        },
+      };
+      expect(bind('a', options).query()).toEqual({ count: 0 });
+      expect(errors).toEqual([
+        expect.stringMatching(/reentrant application for p\/a/),
+        expect.stringMatching(/begin cannot be called reentrantly/),
+        expect.stringMatching(/end cannot be called reentrantly/),
+      ]);
+    });
+  });
+
+  it('M7: rejects remove on the partition being modified by its own callback', () => {
+    const t = setup();
+    t.tick(() => {
+      const accessor = t.bind('p')('a', {
+        version: 1,
+        initialize: () => ({ count: 0, extra: 1 }),
+      }) as MemoryAccessor<any>;
+      accessor.commit(() => {
+        expect(() => accessor.remove('extra')).toThrow(/being modified/);
+      });
+    });
+  });
+
+  it('M7: reports malformed stored structures as load errors', () => {
+    const v2 = (partitions: unknown, extra: object = {}) =>
+      JSON.stringify({ memoryManager: { schemaVersion: 2, partitions, ...extra } });
+    const v1 = (allocations: unknown, rawPartitions: unknown = {}) =>
+      JSON.stringify({ memoryManager: { schemaVersion: 1, allocations, rawPartitions } });
+    const cases: [string, RegExp][] = [
+      [JSON.stringify({ memoryManager: [] }), /namespace: not an object/],
+      [v2({ a: { b: { dataVersion: 1, payload: {}, extra: 1 } } }), /Unknown record field extra/],
+      [v2({ a: { '': { dataVersion: 1, payload: {} } } }), /Invalid partitions key/],
+      [v2({ a: 5 }), /Invalid partitions bucket/],
+      [v1({ a: { main: 5 } }), /Invalid allocation at a\/main/],
+      [v1({ a: { main: { backend: 'disk' } } }), /Invalid allocation backend/],
+      [JSON.stringify({ memoryManager: { schemaVersion: 1, allocations: {}, rawPartitions: 5 } }), /Invalid MemoryManager rawPartitions/],
+    ];
+    for (const [raw, error] of cases) {
+      const t = setup(raw);
+      expect(() => t.begin()).toThrow(error);
+      expect(t.plat.state.writes).toBe(0);
+    }
+  });
+
+  it('M7: skips and reports unsafe legacy plugin keys', () => {
+    const legacy = { plugins: JSON.parse('{"__proto__":{"x":1},"ok":{"y":2}}') };
+    const t = setup(JSON.stringify({ leviathan: legacy }));
+    t.tick();
+    expect(stored(t.plat).memoryManager.partitions).toEqual({
+      ok: { main: { dataVersion: 0, payload: { y: 2 } } },
+    });
+    expect(t.logs.lines.some((line) => line.includes('legacy import skipped unsafe key: __proto__'))).toBe(true);
+  });
+});
+
 /** 类型层面的使用示例也要能在运行时工作：const 路径常量复用。 */
 describe('MemoryManager path constants', () => {
   it('accepts reusable readonly path constants', () => {

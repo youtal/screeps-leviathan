@@ -114,8 +114,13 @@ export interface MemoryManagerOptions {
    * 从而保证 Core 模块的依赖方向只由组合根决定。
    */
   logging: LoggerFactory;
-  /** 平台端口；缺省直连 Screeps RawMemory 与 Game.time。 */
+  /** 平台端口；缺省直连 Screeps RawMemory，tick 取自 getTick。提供时整体生效，忽略 getTick。 */
   platform?: MemoryPlatform;
+  /**
+   * 缺省平台的真实 tick 来源；缺省读取全局 `Game.time`。Runtime 注入 `() => getGame().time`，
+   * 使 Framework 传给 begin/end 的 tick 与这里的判定出自同一个 Game 端口。
+   */
+  getTick?: () => number;
 }
 
 /** 管理器对外能力：MemoryHost 生命周期 + 完整诊断快照。 */
@@ -133,7 +138,7 @@ const NAMESPACE_OPEN =
 export const createMemoryManager = (
   options: MemoryManagerOptions
 ): MemoryManager => {
-  const platform = options.platform ?? createScreepsPlatform();
+  const platform = options.platform ?? createScreepsPlatform(options.getTick);
   const log = options.logging.scope('MemoryManager');
 
   // ---- 装载结果（首次 begin 成功后发布，之后只读） ----
@@ -289,6 +294,18 @@ export const createMemoryManager = (
   const sameDeclaration = (a: Declaration, b: Declaration): boolean =>
     a.version === b.version && a.initialize === b.initialize && a.migrate === b.migrate;
 
+  /**
+   * 发布前取得与调用方完全隔离的工作对象。
+   *
+   * initialize/migrate 可能返回模块级常量或与其它分区共用的对象（例如 `() => DEFAULT`）：
+   * 若直接作为工作对象，一个分区的修改会改变常量和另一个分区的 heap，而后者没有标脏，
+   * 持久文本与 heap 静默分叉；冻结的常量还会让之后的写入在标脏后才抛错。值已通过受管校验，
+   * JSON 往返因此无损；分区内部的共享子对象随之拆开，与持久化后的形态一致。
+   * 只在申请发布时执行一次，不进入每 tick 路径。
+   */
+  const isolate = (value: unknown): Record<string, unknown> =>
+    JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+
   /** 同步运行用户回调；thenable 结果违反契约。 */
   const runCallback = <T>(callback: () => T, what: string): T => {
     const value = callback();
@@ -298,7 +315,8 @@ export const createMemoryManager = (
 
   /**
    * 从历史片段或 initialize 构造工作对象。任何回调都作用于隔离副本：历史片段在此解析出
-   * 新对象，失败时不影响已提交片段，也不影响其他分区。返回是否需要标脏。
+   * 新对象，失败时不影响已提交片段，也不影响其他分区；回调的返回值同样复制后才发布。
+   * 返回是否需要标脏。
    */
   const buildWorkingData = (
     entry: Entry | undefined,
@@ -307,7 +325,7 @@ export const createMemoryManager = (
     if (!entry) {
       const created = runCallback(declaration.initialize, 'initialize()');
       validatePublishRoot(created);
-      return { data: created as Record<string, unknown>, dataVersion: declaration.version, changed: true };
+      return { data: isolate(created), dataVersion: declaration.version, changed: true };
     }
     const stored = JSON.parse(entry.fragment!) as { dataVersion: number; payload: unknown };
     if (stored.dataVersion === declaration.version) {
@@ -332,11 +350,12 @@ export const createMemoryManager = (
       'migrate()'
     );
     validatePublishRoot(migrated);
+    const data = isolate(migrated);
     log.info(
       'partition ' + identity(entry.owner, entry.localId) + ' migrated dataVersion ' +
         stored.dataVersion + ' -> ' + declaration.version
     );
-    return { data: migrated as Record<string, unknown>, dataVersion: declaration.version, changed: true };
+    return { data, dataVersion: declaration.version, changed: true };
   };
 
   const apply = (

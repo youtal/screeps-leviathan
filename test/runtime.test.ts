@@ -148,6 +148,27 @@ describe('Runtime context factory', () => {
     expect(saved.memoryManager.partitions.Worker.main.payload.count).toBe(1);
   });
 
+  /** M2：默认 MemoryManager 的真实 tick 取自共享 getGame 端口，而不是全局 Game。 */
+  it('derives the memory tick from the shared getGame port', () => {
+    const fakeGame = { time: 42 } as unknown as Game;
+    const previousGame = (global as any).Game;
+    const previousRaw = (global as any).RawMemory;
+    let raw = '';
+    delete (global as any).Game;
+    (global as any).RawMemory = { get: () => raw, set: (value: string) => { raw = value; } };
+    try {
+      const runtime = createRuntime({ platform: { getGame: () => fakeGame }, profiler: false });
+      runtime.memory.begin(42);
+      runtime.createContext('Worker').memory!('main', { version: 1, initialize: () => ({ n: 1 }) });
+      runtime.memory.end(42);
+      expect(JSON.parse(raw).memoryManager.partitions.Worker.main.payload).toEqual({ n: 1 });
+      expect(() => runtime.memory.begin(43)).toThrow(/does not match current tick 42/);
+    } finally {
+      (global as any).Game = previousGame;
+      (global as any).RawMemory = previousRaw;
+    }
+  });
+
   /** 替换项优先于创建配置，未使用的配置不能触发校验、访问存储或创建第二个实例。 */
   it('prefers supplied instances over module configuration', () => {
     const supplied = createRuntime();

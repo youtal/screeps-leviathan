@@ -6,7 +6,7 @@
  * 主要功能：声明分组的 RuntimeOptions、平台访问选项与 RuntimeOverrides，并转发模块上下文类型。
  *
  * 实现过程：用各模块的创建选项描述配置，用 contracts 的接口描述可替换实例；
- * MemoryManager 配置通过 Omit 排除 logging，因为该依赖必须由 Runtime 统一提供。
+ * MemoryManager 配置通过 Omit 排除 logging 与 getTick，二者必须由 Runtime 统一提供。
  *
  * 技术要点：第二参数的实例替换优先于第一参数的配置；Profiler 配置允许 false，替换项允许 null。
  * 本文件只做编译期检查，不执行配置回调、不创建实例，也不保存跨 tick 状态。
@@ -48,7 +48,8 @@ export interface RuntimePlatformOptions {
 export interface RuntimeOptions {
   platform?: RuntimePlatformOptions;
   logging?: LoggingOptions;
-  memoryManager?: Omit<MemoryManagerOptions, 'logging'>;
+  /** logging 与 getTick 由 Runtime 注入（tick 来自 platform.getGame），不接受单独配置。 */
+  memoryManager?: Omit<MemoryManagerOptions, 'logging' | 'getTick'>;
   profiler?: ProfilerOptions | false;
   errorMapper?: ErrorMapperOptions;
 }

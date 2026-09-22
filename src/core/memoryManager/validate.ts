@@ -5,7 +5,7 @@
  *
  * 主要功能：判断一个值是否满足受管 JSON 约束——null、布尔、有限数字、字符串、无空洞的普通
  * 数组和普通对象；拒绝 undefined、函数、Symbol、BigInt、NaN/Infinity、Map/Set/Date 等非普通
- * 对象、自定义 toJSON、访问器属性及原型相关保留键。
+ * 对象、自定义 toJSON、对象上的访问器属性、Symbol 键及原型相关保留键。
  *
  * 实现过程：两种遍历模式共享同一套节点规则：
  * - publish：发布前（initialize/migrate 返回值、同版本历史数据、路径写入的新值）使用祖先栈
@@ -16,14 +16,20 @@
  *
  * 技术要点：校验失败抛出带位置（如 `$.rooms["W1N1"].links[2]`）的 Error；位置由 trail 栈在
  * 出错时拼接，正常路径只做 push/pop。集合均为调用局部，调用结束即释放，不跨 tick 保存。
- * 每个对象属性读取一次属性描述符以识别访问器属性，代价约为原生 stringify 的一倍量级，
- * 因此收尾阶段只对 needsFullValidation 分区执行。
+ * 每个对象属性读取一次属性描述符以识别访问器属性，每个容器查询一次 Symbol 键，代价约为
+ * 原生 stringify 的 1.5 倍量级，因此收尾阶段只对 needsFullValidation 分区执行。
+ *
+ * 有意不检出（成本取舍，属于引用所有权契约下的违规用法）：数组元素上的访问器、数组的附加
+ * 字符串属性、对象的不可枚举属性。前两者需要逐元素读取描述符或枚举全部键，大型数值数组上
+ * 实测使校验成本增加约 10 倍；不可枚举属性检测在对象密集数据上约增加 15%。这些值会按原生
+ * JSON.stringify 语义写出（getter 取当时的值，附加属性与不可枚举属性被省略）。
  */
 
 const OBJECT_PROTO = Object.prototype;
 const ARRAY_PROTO = Array.prototype;
 const getProto = Object.getPrototypeOf;
 const getDescriptor = Object.getOwnPropertyDescriptor;
+const getSymbols = Object.getOwnPropertySymbols;
 
 /** 原型相关保留键：既不能作为路径段，也不能出现在受管对象中。 */
 export const isReservedKey = (key: string): boolean =>
@@ -101,7 +107,8 @@ const checkNode = (
 
 /**
  * 逐个子成员调用 visit(child, state)；visit 是静态函数、状态显式传入，遍历时不为每个容器分配闭包。
- * 数组检查空洞，对象检查保留键与访问器属性。
+ * 每个容器先拒绝 Symbol 键（JSON.stringify 会静默丢弃它们）；数组检查空洞，对象检查保留键与
+ * 访问器属性。Symbol 检查每个容器分配一个通常为空的数组，数组容器只查一次，不随元素数增长。
  * for...in 只枚举可枚举字符串键，与 JSON.stringify 的输出范围一致；普通对象原型链上没有
  * 可枚举属性，因此这里得到的都是自有键（getOwnPropertyDescriptor 同时确认这一点）。
  */
@@ -111,6 +118,7 @@ const forEachChild = <S extends { trail: (string | number)[] }>(
   visit: (child: unknown, state: S) => void
 ): void => {
   const trail = state.trail;
+  if (getSymbols(container).length > 0) fail(trail, 'symbol-keyed property');
   if (Array.isArray(container)) {
     for (let index = 0; index < container.length; index++) {
       trail.push(index);

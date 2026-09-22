@@ -47,7 +47,8 @@ type Present<T> = Exclude<T, undefined>;
  * - 数组/元组只接受 number 段：元组取对应下标（字面量）或元素并集（宽 number），
  *   这样 `length`、`push` 等方法名不会进入合法路径；
  * - 普通对象只接受 string 段：静态键取属性类型；带字符串索引签名的 Record 接受任意
- *   string，并在键不是已声明键时取索引签名的值类型；
+ *   string，并在键不是已声明键时取索引签名的值类型；`Record<number, X>` 同样接受 string 段
+ *   （JSON 对象键总是字符串，运行时也只接受字符串段，调用方写 `String(tick)`）；
  * - 基本值不可下降。
  * `T extends unknown ?` 让联合类型逐分支分配，保证“某一分支合法即合法”。
  */
@@ -68,7 +69,9 @@ type Step<T, S> = T extends unknown
           ? T[S]
           : string extends keyof T
             ? T[string & keyof T]
-            : never
+            : number extends keyof T
+              ? T[number & keyof T]
+              : never
         : never
       : never
   : never;
@@ -141,22 +144,32 @@ type Last<P extends readonly unknown[]> = P extends readonly [
   : never;
 
 /**
- * 在对象类型 T 上，键 K 是否允许删除：可选属性或字符串索引签名的动态条目可以删除，
- * 静态必填属性不行；数组/元组元素不通过路径删除（避免移位或空洞），一律不行。
+ * 在对象类型 T 上，键 K 是否允许删除：可选属性或字符串/数字索引签名的动态条目可以删除，
+ * 静态必填属性不行（即使同时存在索引签名）；数组/元组元素不通过路径删除（避免移位或空洞）。
  * 联合类型逐分支判断，任一分支允许即允许（运行时再按实际对象检查）。
  */
+/**
+ * 显式声明的键（去掉 string/number 索引签名）。`as` 键重映射把索引签名映射为 never；
+ * 只有这些键才需要按“是否可选”判断，其余键命中的是索引签名的动态条目。
+ */
+type KnownKeys<T> = keyof {
+  [P in keyof T as string extends P ? never : number extends P ? never : P]: unknown;
+};
+
 type Removable<T, K> = T extends unknown
   ? T extends readonly unknown[]
     ? false
     : T extends object
       ? K extends string
-        ? K extends keyof T
+        ? K extends KnownKeys<T>
           ? {} extends Pick<T, K>
             ? true
             : false
           : string extends keyof T
             ? true
-            : false
+            : number extends keyof T
+              ? true
+              : false
         : false
       : false
   : false;
@@ -175,10 +188,15 @@ export type RemovablePath<M, P extends readonly PathSegment[]> = IsAny<M> extend
     ? P
     : never;
 
-/** 顶层键中允许 remove 的键：可选属性或索引签名条目。 */
-export type RemovableKey<M> = {
-  [K in keyof M & string]: true extends Removable<M, K> ? K : never;
-}[keyof M & string] | (string extends keyof M ? string : never);
+/**
+ * 顶层键 K 允许删除时为 K，否则 never：按实参逐个判断，而不是把索引签名整体展开为 string——
+ * 后者会让 `{ count: number; [k: string]: number }` 上的必填键 count 也被放行。M 为 any 时不检查。
+ */
+export type RemovableKey<M, K extends string> = IsAny<M> extends true
+  ? K
+  : true extends Removable<M, K>
+    ? K
+    : never;
 
 /**
  * 长期访问器：申请成功后在所属 MemoryManager 的 global 生命周期内有效，跨 tick 直接使用。
@@ -216,7 +234,7 @@ export interface MemoryAccessor<M extends object> {
   ): void;
 
   /** 删除顶层可选/动态键；删除成功返回 true，目标不存在返回 false 且不标脏。 */
-  remove(key: RemovableKey<M>): boolean;
+  remove<const K extends string>(key: K & NoInfer<RemovableKey<M, K>>): boolean;
   /** 删除深路径的对象属性；数组元素不通过路径删除，缺失的中间层返回 false。 */
   remove<const P extends readonly PathSegment[]>(
     path: P & NoInfer<RemovablePath<M, P>>
