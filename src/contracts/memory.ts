@@ -115,6 +115,13 @@ export type PathValue<M, P extends readonly PathSegment[]> =
       : Descend<M, P>;
 
 /**
+ * 顶层键重载接受的键：显式声明的字符串键与字符串索引键；数字索引签名的记录另外接受任意
+ * 字符串（JSON 对象键总是字符串），与路径重载的 Step 规则一致。保留 `keyof M` 形式，使编辑器
+ * 仍能补全声明过的键。
+ */
+export type TopKey<M> = (keyof M & string) | (number extends keyof M ? string : never);
+
+/**
  * 路径写入接受的值：目标类型去掉 undefined（JSON 不能表达 undefined，删除请用 remove）。
  * 若路径非法则为 never，于是任何实参都无法满足，调用在编译期报错。
  */
@@ -209,8 +216,8 @@ export interface MemoryAccessor<M extends object> {
   /** 整个分区的深只读引用。 */
   query(): DeepReadonly<M>;
 
-  /** 顶层键读取；键缺失返回 undefined，不按点号拆分键名。 */
-  get<K extends keyof M & string>(key: K): DeepReadonly<M[K]> | undefined;
+  /** 顶层键读取；键缺失返回 undefined，不按点号拆分键名。值类型与单段路径相同。 */
+  get<K extends TopKey<M>>(key: K): DeepReadonly<PathValue<M, [K]>> | undefined;
   /**
    * 深路径读取；中间层或目标缺失返回 undefined，穿越基本值或容器类型不匹配时抛错。
    * `const P` 让字面量数组实参直接推导为只读元组，无需调用方写 `as const`；
@@ -226,7 +233,7 @@ export interface MemoryAccessor<M extends object> {
    */
   commit<R>(mutator: (memory: M) => R): R;
   /** 顶层键赋值：值必须是该键的完整类型（不含 undefined）；预检成功后标脏写入。 */
-  commit<K extends keyof M & string>(key: K, value: Exclude<M[K], undefined>): void;
+  commit<K extends TopKey<M>>(key: K, value: PathWriteValue<M, [K]>): void;
   /** 深路径赋值：所有中间容器必须已经存在；预检失败不修改数据也不标脏。 */
   commit<const P extends readonly PathSegment[]>(
     path: P & NoInfer<ValidPath<M, P>>,

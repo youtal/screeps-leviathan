@@ -6,9 +6,9 @@
  * 主要功能：为每个 (owner, localId) 提供独立逻辑分区与长期有效的访问器（query/get/commit/remove），
  * 由宿主 begin/end 驱动 tick 生命周期：首次 begin 同步装载主存储，end 统一提交全部脏分区。
  *
- * 实现过程：装载后每条记录只保留一段已提交 JSON 片段；申请时从片段解析隔离副本，完成初始化或
- * 业务版本迁移后发布访问器。修改把分区加入去重的脏集合；end 只编码脏分区，clean 分区复用片段，
- * 与非托管根字段前缀拼接成完整文本后一次写入平台。
+ * 实现过程：装载只解析一次主文本，记录以解析出的 payload 暂存；申请同版本分区时直接取用该对象，
+ * 迁移前先把它编码为已提交片段以固定基线。修改把分区加入去重的脏集合；end 只编码脏分区，
+ * clean 分区复用片段（首次拼接时才为尚未编码的记录与根字段生成），拼接成完整文本后一次写入平台。
  *
  * 技术要点：
  * - 空闲 tick 的 end 是 O(1)：脏集合为空且无结构变化时直接返回，不遍历、不序列化、不写平台。
@@ -18,6 +18,7 @@
  *   脏集合，下一次 end 按最新工作对象重试。
  * - 生命周期锁带 tick 归属：真实 tick 来自平台 getTick，同一执行栈中的回调无法伪造新 tick；
  *   硬终止遗留的旧 tick 锁在下一个真实 tick 的 begin 中清除。
+ * - initialize/migrate 返回值与路径写入的新值都在校验的同一次遍历中复制，调用方保留原对象。
  * - 所有状态只驻留本实例 heap，global reset 后从平台文本重建；未提交的 heap 修改随之丢失。
  */
 import type {
@@ -32,8 +33,9 @@ import { encodeRecord, loadStore } from './namespace';
 import { createScreepsPlatform } from './platform';
 import { locateRemove, locateWrite, normalizePath, readPath } from './paths';
 import {
+  copyPublish,
+  copyPublishRoot,
   validateForCommit,
-  validatePublish,
   validatePublishRoot,
 } from './validate';
 import {
@@ -96,8 +98,17 @@ interface Entry {
   /** `"localId":` 的预编码前缀，拼接时免去重复转义。 */
   keyPrefix: string;
   dataVersion: number;
-  /** 已提交基线片段；新建分区在首次成功提交前为 null（此时必在脏集合中）。 */
+  /**
+   * 已提交基线片段，按需生成：装载的记录在首次拼接或迁移前才编码（此前为 null，数据暂存在
+   * retained）；新建分区在首次成功提交前为 null（此时必在脏集合中）。
+   */
   fragment: string | null;
+  /**
+   * 装载时解析出、尚未编码的历史 payload。生命周期：首次拼接时编码为 fragment 后释放；同版本
+   * 申请时直接成为工作对象并释放；迁移前先编码基线再交给 migrate 并释放。未申请的历史分区在
+   * 首次提交前以对象形式驻留 heap。
+   */
+  retained: { payload: unknown } | null;
   applied: Applied | null;
 }
 
@@ -144,7 +155,9 @@ export const createMemoryManager = (
   // ---- 装载结果（首次 begin 成功后发布，之后只读） ----
   let loaded = false;
   let loadError: string | null = null;
-  let foreignPrefix = '';
+  /** 非托管根字段拼成的前缀；首次拼接时由 foreignValues 生成，之后固定。 */
+  let foreignPrefix: string | null = null;
+  let foreignValues: [string, unknown][] = [];
   let preservedKeys: string[] = [];
   let ignoredSegmentPartitions: { owner: string; localId: string }[] = [];
   const buckets = new Map<string, OwnerBucket>();
@@ -242,12 +255,14 @@ export const createMemoryManager = (
       const target = locateWrite(applied.data, path);
       if (value === undefined)
         throw configError('undefined is not a JSON value; use remove to delete');
-      // 预检：新值受管校验 + 不得引用写入目标的任何祖先（写入后会成环）。
-      if (value !== null && typeof value === 'object')
-        validatePublish(value, new Set(target.ancestors));
-      else validatePublish(value);
+      // 预检：新值受管校验并复制（调用方保留原对象，之后修改、冻结或复用它都不影响分区），
+      // 且不得引用写入目标的任何祖先。
+      const copied = copyPublish(
+        value,
+        value !== null && typeof value === 'object' ? new Set(target.ancestors) : null
+      );
       markDirty(applied, false);
-      (target.parent as Record<string | number, unknown>)[target.key] = value;
+      (target.parent as Record<string | number, unknown>)[target.key] = copied;
       return undefined;
     };
 
@@ -294,18 +309,6 @@ export const createMemoryManager = (
   const sameDeclaration = (a: Declaration, b: Declaration): boolean =>
     a.version === b.version && a.initialize === b.initialize && a.migrate === b.migrate;
 
-  /**
-   * 发布前取得与调用方完全隔离的工作对象。
-   *
-   * initialize/migrate 可能返回模块级常量或与其它分区共用的对象（例如 `() => DEFAULT`）：
-   * 若直接作为工作对象，一个分区的修改会改变常量和另一个分区的 heap，而后者没有标脏，
-   * 持久文本与 heap 静默分叉；冻结的常量还会让之后的写入在标脏后才抛错。值已通过受管校验，
-   * JSON 往返因此无损；分区内部的共享子对象随之拆开，与持久化后的形态一致。
-   * 只在申请发布时执行一次，不进入每 tick 路径。
-   */
-  const isolate = (value: unknown): Record<string, unknown> =>
-    JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
-
   /** 同步运行用户回调；thenable 结果违反契约。 */
   const runCallback = <T>(callback: () => T, what: string): T => {
     const value = callback();
@@ -314,48 +317,84 @@ export const createMemoryManager = (
   };
 
   /**
-   * 从历史片段或 initialize 构造工作对象。任何回调都作用于隔离副本：历史片段在此解析出
-   * 新对象，失败时不影响已提交片段，也不影响其他分区；回调的返回值同样复制后才发布。
-   * 返回是否需要标脏。
+   * 编码并固定一条记录的已提交基线（幂等）。数据来源依次为：已发布分区的工作对象（clean 分区
+   * 未经访问器修改，内容即持久化内容）、装载暂存的 payload。编码后释放暂存对象。
+   */
+  const materialize = (entry: Entry): string => {
+    if (entry.fragment !== null) return entry.fragment;
+    const source = entry.applied !== null ? entry.applied.data : entry.retained!.payload;
+    entry.fragment = encodeRecord(entry.dataVersion, source);
+    entry.retained = null;
+    return entry.fragment;
+  };
+
+  /**
+   * 从历史记录或 initialize 构造工作对象。initialize/migrate 的返回值在校验的同一次遍历中复制
+   * （调用方可返回模块级常量、共用或冻结对象）。历史 payload 优先使用装载暂存的对象，避免二次
+   * 解析；交给 migrate 之前先编码基线，migrate 修改或抛错都不影响已提交片段与其他分区。
+   * consumedRetained 为真表示暂存对象已成为工作对象，发布时释放暂存引用。
    */
   const buildWorkingData = (
     entry: Entry | undefined,
     declaration: Declaration
-  ): { data: Record<string, unknown>; dataVersion: number; changed: boolean } => {
+  ): {
+    data: Record<string, unknown>;
+    dataVersion: number;
+    changed: boolean;
+    consumedRetained: boolean;
+  } => {
     if (!entry) {
       const created = runCallback(declaration.initialize, 'initialize()');
-      validatePublishRoot(created);
-      return { data: isolate(created), dataVersion: declaration.version, changed: true };
+      return {
+        data: copyPublishRoot(created),
+        dataVersion: declaration.version,
+        changed: true,
+        consumedRetained: false,
+      };
     }
-    const stored = JSON.parse(entry.fragment!) as { dataVersion: number; payload: unknown };
-    if (stored.dataVersion === declaration.version) {
+    const storedVersion = entry.dataVersion;
+    if (storedVersion === declaration.version) {
+      const fromRetained = entry.retained !== null;
+      const payload = fromRetained
+        ? entry.retained!.payload
+        : (JSON.parse(entry.fragment!) as { payload: unknown }).payload;
       try {
-        validatePublishRoot(stored.payload);
+        validatePublishRoot(payload);
       } catch (error) {
         throw new Error(
-          'stored payload (dataVersion ' + stored.dataVersion + ') is not managed data: ' +
+          'stored payload (dataVersion ' + storedVersion + ') is not managed data: ' +
             errorText(error) + '; declare a new version with migrate to repair it'
         );
       }
-      return { data: stored.payload as Record<string, unknown>, dataVersion: stored.dataVersion, changed: false };
+      return {
+        data: payload as Record<string, unknown>,
+        dataVersion: storedVersion,
+        changed: false,
+        consumedRetained: fromRetained,
+      };
     }
     const migrate = declaration.migrate;
     if (!migrate)
       throw new Error(
-        'missing migrate for stored dataVersion ' + stored.dataVersion +
+        'missing migrate for stored dataVersion ' + storedVersion +
           ' (declared version ' + declaration.version + ')'
       );
-    const migrated = runCallback(
-      () => migrate(stored.payload, stored.dataVersion),
-      'migrate()'
-    );
-    validatePublishRoot(migrated);
-    const data = isolate(migrated);
+    // 先固定基线，再把一个与基线无关的对象交给 migrate：暂存对象可以直接交出（之后释放），
+    // 否则从基线片段解析新副本。
+    let payload: unknown;
+    if (entry.retained !== null) {
+      payload = entry.retained.payload;
+      materialize(entry);
+    } else {
+      payload = (JSON.parse(materialize(entry)) as { payload: unknown }).payload;
+    }
+    const migrated = runCallback(() => migrate(payload, storedVersion), 'migrate()');
+    const data = copyPublishRoot(migrated);
     log.info(
       'partition ' + identity(entry.owner, entry.localId) + ' migrated dataVersion ' +
-        stored.dataVersion + ' -> ' + declaration.version
+        storedVersion + ' -> ' + declaration.version
     );
-    return { data, dataVersion: declaration.version, changed: true };
+    return { data, dataVersion: declaration.version, changed: true, consumedRetained: false };
   };
 
   const apply = (
@@ -404,9 +443,11 @@ export const createMemoryManager = (
       keyPrefix: JSON.stringify(localId) + ':',
       dataVersion: built.dataVersion,
       fragment: null,
+      retained: null,
       applied: null,
     };
     target.dataVersion = built.dataVersion;
+    if (built.consumedRetained) target.retained = null;
     const applied: Applied = {
       entry: target,
       declaration,
@@ -445,7 +486,8 @@ export const createMemoryManager = (
   const load = (): void => {
     try {
       const store = loadStore(platform.readRaw());
-      foreignPrefix = store.foreignPrefix;
+      foreignValues = store.foreign;
+      foreignPrefix = null;
       preservedKeys = store.preservedKeys;
       ignoredSegmentPartitions = store.ignoredSegmentPartitions;
       for (const record of store.records) {
@@ -459,7 +501,8 @@ export const createMemoryManager = (
           localId: record.localId,
           keyPrefix: JSON.stringify(record.localId) + ':',
           dataVersion: record.dataVersion,
-          fragment: record.fragment,
+          fragment: null,
+          retained: { payload: record.payload },
           applied: null,
         });
       }
@@ -532,11 +575,34 @@ export const createMemoryManager = (
       }
       candidates.set(entry, fragment);
     }
+    if (foreignPrefix === null) {
+      let prefix = '';
+      for (const [key, value] of foreignValues)
+        prefix += JSON.stringify(key) + ':' + JSON.stringify(value) + ',';
+      foreignPrefix = prefix;
+      foreignValues = [];
+    }
     const blocks: string[] = [];
     for (const bucket of buckets.values()) {
       const parts: string[] = [];
-      for (const entry of bucket.entries.values())
-        parts.push(entry.keyPrefix + (candidates.get(entry) ?? entry.fragment!));
+      for (const entry of bucket.entries.values()) {
+        let fragment = candidates.get(entry);
+        if (fragment === undefined) {
+          // 首次拼接时为尚未编码的 clean 记录生成基线；该内容即已持久化的内容，与本轮成败无关。
+          try {
+            fragment = materialize(entry);
+          } catch (error) {
+            throw {
+              stage: 'encode',
+              tick,
+              message: errorText(error),
+              owner: entry.owner,
+              localId: entry.localId,
+            } as WriteFailure;
+          }
+        }
+        parts.push(entry.keyPrefix + fragment);
+      }
       blocks.push(bucket.prefix + parts.join(',') + '}');
     }
     const text = '{' + foreignPrefix + NAMESPACE_OPEN + blocks.join(',') + '}}}';

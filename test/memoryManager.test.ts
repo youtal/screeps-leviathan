@@ -1035,6 +1035,141 @@ describe('MemoryManager audit regressions', () => {
   });
 });
 
+/** 2026-09-22 第二轮模块审计的回归用例（N1、N3、N4）。 */
+describe('MemoryManager audit round-2 regressions', () => {
+  it('N1: copies path-written values so callers keep ownership', () => {
+    const t = setup();
+    const DEFAULT = { limit: 1 };
+    const FROZEN = Object.freeze({ limit: 1 });
+    let a!: MemoryAccessor<any>;
+    let b!: MemoryAccessor<any>;
+    t.tick(() => {
+      a = t.bind('p')('a', { version: 1, initialize: () => ({}) });
+      b = t.bind('p')('b', { version: 1, initialize: () => ({}) });
+      a.commit('config', DEFAULT);
+      b.commit('config', DEFAULT);
+      a.commit('frozen', FROZEN);
+    });
+    t.tick(() => {
+      a.commit(['config', 'limit'], 5);
+      a.commit(['frozen', 'limit'], 2); // 冻结原对象不影响分区中的副本
+      a.commit('snapshot', a.get('config')); // 分区内复制，不再共享
+      a.commit(['config', 'limit'], 7);
+    });
+    DEFAULT.limit = 9; // 调用方事后修改原对象
+    expect(FROZEN.limit).toBe(1);
+    expect(b.get(['config', 'limit'])).toBe(1);
+    expect(a.get(['snapshot', 'limit'])).toBe(5);
+    expect(partitionOf(t.plat, 'p', 'a').payload).toEqual({
+      config: { limit: 7 },
+      frozen: { limit: 2 },
+      snapshot: { limit: 5 },
+    });
+    expect(partitionOf(t.plat, 'p', 'b').payload).toEqual({ config: { limit: 1 } });
+  });
+
+  it('N3: ignores enumerable prototype extensions like JSON.stringify does', () => {
+    const t = setup();
+    let status: ReturnType<MemoryManager['getStatus']>;
+    let raw: string;
+    (Object.prototype as any).polluted = 1;
+    try {
+      t.tick(() => {
+        const a = t.bind('p')('a', { version: 1, initialize: () => ({ box: {} }) }) as MemoryAccessor<any>;
+        a.commit('box', { v: 1 });
+        a.commit((memory) => void (memory.extra = { y: 1 }));
+      });
+      status = t.manager.getStatus();
+      raw = t.plat.state.raw;
+    } finally {
+      delete (Object.prototype as any).polluted;
+    }
+    expect(status.writeFailure).toBeNull();
+    expect(raw).not.toContain('polluted');
+    expect(partitionOf(t.plat, 'p', 'a').payload).toEqual({ box: { v: 1 }, extra: { y: 1 } });
+  });
+
+  const history = (extra: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      tool: { note: 'kept' },
+      memoryManager: {
+        schemaVersion: 2,
+        partitions: {
+          p: {
+            a: { dataVersion: 1, payload: { count: 5 } },
+            b: { dataVersion: 1, payload: { count: 6, list: [1, 2] } },
+            c: { dataVersion: 1, payload: { count: 7 } },
+            ...extra,
+          },
+        },
+      },
+    });
+
+  it('N4: loads without encoding and applies without re-parsing', () => {
+    const t = setup(history());
+    const stringify = jest.spyOn(JSON, 'stringify');
+    const parse = jest.spyOn(JSON, 'parse');
+    try {
+      t.begin();
+      // 装载只解析一次，不重新编码 payload 或根字段（只编码 owner/localId 等键名前缀）。
+      expect(stringify.mock.calls.filter(([value]) => typeof value !== 'string')).toEqual([]);
+      expect(parse).toHaveBeenCalledTimes(1);
+      parse.mockClear();
+      const a = t.bind('p')('a', counterOptions);
+      expect(parse).not.toHaveBeenCalled(); // 同版本申请直接使用暂存对象
+      expect(a.query()).toEqual({ count: 5 });
+      a.commit('count', 50);
+      t.end();
+    } finally {
+      stringify.mockRestore();
+      parse.mockRestore();
+    }
+    // 未修改的记录与根字段按原内容写出。
+    const expected = JSON.parse(history());
+    expected.memoryManager.partitions.p.a.payload.count = 50;
+    expect(stored(t.plat)).toEqual(expected);
+    expect(t.plat.state.raw).toContain('"b":{"dataVersion":1,"payload":{"count":6,"list":[1,2]}}');
+  });
+
+  it('N4: attributes a lazy encoding failure of a clean partition to its owner', () => {
+    const t = setup(history());
+    t.tick(() => {
+      const a = t.bind('p')('a', counterOptions);
+      // 协议违规：通过读取引用制造循环，分区没有被标脏，首次拼接时才会编码它。
+      (a.query() as any).self = a.query();
+      (t.bind('p')('b', counterOptions) as MemoryAccessor<any>).commit('count', 1);
+    });
+    expect(t.manager.getStatus().writeFailure).toMatchObject({ stage: 'encode', owner: 'p', localId: 'a' });
+    expect(t.plat.state.writes).toBe(0);
+  });
+
+  it('N4: fixes the baseline before migrate so a mutating failure cannot leak', () => {
+    const t = setup(history());
+    t.tick(() => {
+      const failing = {
+        version: 2,
+        initialize: counterInit,
+        migrate: (memory: any) => {
+          memory.count = -1; // 修改收到的对象后抛错
+          throw new Error('migrate failed');
+        },
+      };
+      expect(() => t.bind('p')('a', failing)).toThrow(/migrate failed/);
+      t.bind('p')('c', counterOptions).commit('count', 70); // 触发整串拼接
+    });
+    expect(partitionOf(t.plat, 'p', 'a')).toEqual({ dataVersion: 1, payload: { count: 5 } });
+    t.tick(() => {
+      const fixed = t.bind('p')('a', {
+        version: 2,
+        initialize: counterInit,
+        migrate: (memory: any) => ({ count: memory.count * 2 }),
+      });
+      expect(fixed.query()).toEqual({ count: 10 }); // 从基线重新解析，而不是被修改过的对象
+    });
+    expect(partitionOf(t.plat, 'p', 'a')).toEqual({ dataVersion: 2, payload: { count: 10 } });
+  });
+});
+
 /** 类型层面的使用示例也要能在运行时工作：const 路径常量复用。 */
 describe('MemoryManager path constants', () => {
   it('accepts reusable readonly path constants', () => {

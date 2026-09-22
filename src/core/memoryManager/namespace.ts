@@ -4,17 +4,19 @@
  * 模块角色：core/memoryManager 的主存储格式装载层，只在 global 首次 begin 时运行一次。
  *
  * 主要功能：解析主存储文本，按设计 §8 的兼容协议识别 schemaVersion 2、转换 schemaVersion 1、
- * 在缺少命名空间时导入旧 leviathan 插件数据；输出每个分区记录的 JSON 片段基线、非托管根字段的
- * 片段前缀、结构变化标记及诊断。
+ * 在缺少命名空间时导入旧 leviathan 插件数据；输出每个分区记录的版本与已解析 payload、
+ * 非托管根字段的键值、结构变化标记及诊断。
  *
- * 实现过程：JSON.parse 整个文本后逐层校验容器结构；每条记录立即重新编码为
- * `{"dataVersion":N,"payload":...}` 片段，非托管根字段编码为 `"key":value,` 前缀。之后不再
- * 持有解析出的对象——未申请分区只保留片段字符串，申请时再从片段解析出隔离副本。
+ * 实现过程：JSON.parse 整个文本后逐层校验容器结构，但**不在装载时重新编码**：记录的 payload
+ * 与非托管根字段以解析出的对象交给管理器，由管理器在首次需要片段时（首次提交拼接整串，或
+ * 迁移前固定基线）才编码。global reset 首 tick 因此只承担一次整体解析；申请同版本分区时直接
+ * 使用该对象，不再二次解析。encodeRecord 仍由本文件提供，保证记录片段格式只有一处定义。
  *
  * 技术要点：只接受可安全理解的结构，否则抛错由管理器锁定装载故障、保护原文本不被覆盖。
  * 历史 payload 可以是任意 JSON 值（数组、null、基本值或尚不满足受管约束的对象），装载只保证
  * 其无损保留；是否可发布访问器由申请时的校验决定。Segment 归属的身份被忽略且不读取任何页面。
- * 一次性成本：一次整体解析 + 每条记录与每个根字段各一次编码；global 内不再重复。
+ * 一次性成本：一次整体解析；编码推迟到管理器首次需要片段时，每条记录至多一次。
+ * 旧 leviathan 导入的 payload 是保留根字段的子对象，导入时复制，二者不共享可变对象。
  */
 import {
   LEGACY_NAMESPACE_KEY,
@@ -23,18 +25,18 @@ import {
 } from './types';
 import { isPlainObject, isReservedKey } from './validate';
 
-/** 装载得到的一条分区记录：只保留版本与编码后的片段。 */
+/** 装载得到的一条分区记录：版本与已解析的 payload（尚未编码为片段）。 */
 export interface StoredRecord {
   owner: string;
   localId: string;
   dataVersion: number;
-  /** `{"dataVersion":N,"payload":...}` 的 JSON 文本，即已提交基线。 */
-  fragment: string;
+  /** 历史 payload：任意 JSON 值，与其它记录、根字段不共享对象。 */
+  payload: unknown;
 }
 
 export interface LoadedStore {
-  /** 非托管根字段拼成的前缀，形如 `"a":1,"b":{...},`；没有时为空串。 */
-  foreignPrefix: string;
+  /** 非托管根字段（键与已解析值），按原顺序；由管理器首次拼接时编码为前缀。 */
+  foreign: [string, unknown][];
   preservedKeys: string[];
   records: StoredRecord[];
   /** 格式转换或导入产生了需要写出的结构变化。 */
@@ -52,7 +54,7 @@ const isLoadableKey = (key: string): boolean => key !== '' && !isReservedKey(key
 const hasOwn = (object: object, key: string): boolean =>
   Object.prototype.hasOwnProperty.call(object, key);
 
-/** 编码一条记录片段；payload 来自 JSON.parse，必然可编码。 */
+/** 编码一条记录片段 `{"dataVersion":N,"payload":...}`；payload 须为可编码的 JSON 值。 */
 export const encodeRecord = (dataVersion: number, payload: unknown): string =>
   '{"dataVersion":' + dataVersion + ',"payload":' + JSON.stringify(payload) + '}';
 
@@ -96,7 +98,7 @@ const loadV2 = (namespace: Record<string, unknown>): StoredRecord[] => {
   const records: StoredRecord[] = [];
   forEachIdentity(namespace.partitions, 'partitions', (owner, localId, value) => {
     const { dataVersion, payload } = readRecord(value, owner + '/' + localId);
-    records.push({ owner, localId, dataVersion, fragment: encodeRecord(dataVersion, payload) });
+    records.push({ owner, localId, dataVersion, payload });
   });
   return records;
 };
@@ -128,15 +130,16 @@ const loadV1 = (
     if (value === undefined)
       throw new Error('Missing raw partition for allocation ' + owner + '/' + localId);
     const { dataVersion, payload } = readRecord(value, owner + '/' + localId);
-    records.push({ owner, localId, dataVersion, fragment: encodeRecord(dataVersion, payload) });
+    records.push({ owner, localId, dataVersion, payload });
   });
   return records;
 };
 
 /**
  * 旧 leviathan 布局导入：plugins 下的对象数据按 owner/main 建立记录，版本取
- * framework.pluginVersions，缺失或非法记 0（要求业务 migrate）。片段在此刻编码，
- * 与保留的 leviathan 根字段片段互不共享可变对象。
+ * framework.pluginVersions，缺失或非法记 0（要求业务 migrate）。payload 是保留的 leviathan
+ * 根字段的子对象，导入时经 JSON 往返复制：否则同版本申请或迁移对它的修改会改写保留字段。
+ * 该转换每个存储只发生一次。
  */
 const importLegacy = (legacy: unknown, warnings: string[]): StoredRecord[] => {
   if (!isPlainObject(legacy)) return [];
@@ -156,7 +159,7 @@ const importLegacy = (legacy: unknown, warnings: string[]): StoredRecord[] => {
       owner,
       localId: 'main',
       dataVersion,
-      fragment: encodeRecord(dataVersion, payload),
+      payload: JSON.parse(JSON.stringify(payload)),
     });
   }
   return records;
@@ -192,16 +195,14 @@ export const loadStore = (text: string): LoadedStore => {
     }
   }
   const preservedKeys = Object.keys(parsed).filter((key) => key !== NAMESPACE_KEY);
-  let foreignPrefix = '';
-  for (const key of preservedKeys)
-    foreignPrefix += JSON.stringify(key) + ':' + JSON.stringify(parsed[key]) + ',';
+  const foreign: [string, unknown][] = preservedKeys.map((key) => [key, parsed[key]]);
   if (ignoredSegmentPartitions.length)
     warnings.push(
       'ignored segment partitions: ' +
         ignoredSegmentPartitions.map((id) => id.owner + '/' + id.localId).join(', ')
     );
   return {
-    foreignPrefix,
+    foreign,
     preservedKeys,
     records,
     structureChanged,

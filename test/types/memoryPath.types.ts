@@ -141,3 +141,14 @@ export function indexSignatures(h: MemoryAccessor<History>, m: MemoryAccessor<Mi
   // @ts-expect-error 索引签名不能放行静态必填键
   m.remove('count');
 }
+
+/** N6：数字索引记录作为分区根时，键重载与路径重载一致。 */
+export function numericRoot(m: MemoryAccessor<Record<number, { cpu: number }>>) {
+  const byKey: { readonly cpu: number } | undefined = m.get('100');
+  const byPath: number | undefined = m.get(['100', 'cpu']);
+  m.commit('100', { cpu: 1 });
+  m.remove('100');
+  // @ts-expect-error 键重载同样检查值类型
+  m.commit('100', { cpu: 'x' });
+  void [byKey, byPath];
+}
