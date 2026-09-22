@@ -104,11 +104,36 @@ const plugin: LeviathanPlugin = {
 | `migrate(memory, fromVersion)` | 存在不同版本的历史数据时 | 同步接收与历史记录隔离的副本（`unknown`），自行校验并返回目标版本对象（同样在校验后复制）；升级、降级、旧布局导入的版本 0 都走这里 |
 
 - 已存储版本与 `version` 不同而没有 `migrate`：申请抛错，**绝不**回退到 `initialize` 覆盖历史。
-- `migrate`/`initialize` 抛错或返回非法数据：申请抛错，历史记录不变。相同声明的失败在本 global 内缓存，不会每 tick 重跑失败回调；修正声明（新的函数引用或版本）即可重新申请。
+- `migrate`/`initialize` 抛错、返回 Promise 或返回非法数据：申请抛错，历史记录不变。这类失败**不缓存**，下一次申请会重新运行回调（插件场景下，Framework 熔断会在连续失败后停用插件，`recover()` 后再次重试）。
+- 管理器自己判定的确定性错误——缺少 `migrate`、同版本历史数据不满足数据约束——在本 global 内缓存：相同声明再次申请直接抛出同一错误，不重复解析与校验。修正声明（新的函数引用或版本）即可重新申请。
 - 同版本的历史数据不满足数据约束（例如根是数组）：只拒绝该分区申请；声明新版本并提供 `migrate` 修复。
 - 重复申请只有 `version`、`initialize`、`migrate` 完全相同（函数按引用）才返回同一访问器，否则抛 `conflicting declaration`。
 - 旧协议字段 `layer`、`checkpointInterval`、`priority` 会被显式拒绝。
 - 申请只能在 `begin` 成功之后、`end` 之前（插件的 `setup` 与各钩子中）进行；迟到申请与首次申请规则相同，没有申请窗口。
+
+### initialize 与 migrate 必须是确定性函数
+
+`initialize`、`migrate` 只能依赖自己的输入（`migrate` 收到的历史数据与版本号），不要读取 Game、其他插件的服务或其他分区。原因：
+
+- 它们只在申请时运行一次，结果随即持久化；读到的暂时性状态会被固化进存储；
+- 依赖暂时条件的回调会在条件不满足时让申请失败，插件 setup 随之失败，连续失败后被 Framework 熔断。
+
+依赖游戏状态的初始数据，在申请成功后按需补齐：
+
+```ts
+// initialize 只返回静态默认值
+const initialize = () => ({ seeded: false, sources: [] as string[] });
+
+onTickExecute(context) {
+  if (!state.get('seeded')) {
+    const room = context.env.getRoom('W1N1');
+    if (room) {
+      state.commit('sources', room.find(FIND_SOURCES).map((source) => source.id));
+      state.commit('seeded', true);
+    }
+  }
+}
+```
 
 停用或卸载插件不会删除分区，本 global 未申请的历史分区也原样保留并参与写出。没有分区删除或更名接口。
 

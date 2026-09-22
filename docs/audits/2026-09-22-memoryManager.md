@@ -59,12 +59,12 @@
 
 ## 6. 第二轮审计（基线 `3cc5c49`）
 
-范围与方法同第一轮；性能数据用 Rollup 打包后在纯 Node 中测量（Jest 的 vm 沙箱会把耗时放大数十倍，不作依据）。没有 P1；上一轮修复复查无回归。
+范围与方法同第一轮；性能数据用 Rollup 打包后在纯 Node 中测量（Jest 的 vm 沙箱会把耗时放大数十倍，不作依据）。没有 P1；上一轮修复复查无回归。N1、N3–N6 先行关闭，N2 经讨论按 A（文档约束）+ B（只缓存确定性失败）关闭，见 §6.4。
 
 | 编号 | 级别 | 问题 | 处置 | 回归证据 |
 | --- | --- | --- | --- | --- |
 | N1 | P2 | 路径写入直接保存调用方对象：`a`、`b` 写入同一个常量后，只改 `a` 会同时改变常量与 `b` 的 heap（`b` 未标脏，存储与 heap 分叉）；写入冻结对象后再写其内部会在标脏后才抛错。与 M1 同类，发生在写入路径 | 已修复：新值在校验的同一次遍历中复制（`copyPublish`），`initialize`/`migrate` 改用同一机制（取代上一轮的 JSON 往返）。`commit('b', get('a'))` 因此得到独立副本 | `N1: copies path-written values…`；撤销复制后失败 |
-| N2 | P3 | `initialize`/`migrate` 的暂时性失败被缓存到本 global 结束，叠加 Framework 熔断，插件要到 global reset 才能恢复 | **未处置，待决定**（按设计 §7 的既定行为） | — |
+| N2 | P3 | `initialize`/`migrate` 的暂时性失败被缓存到本 global 结束，叠加 Framework 熔断，插件要到 global reset 才能恢复 | 已修复（A+B）：只缓存管理器判定的确定性失败，回调阶段的失败不缓存；契约、设计与使用说明写明 initialize/migrate 必须是确定性函数，并给出申请后补齐游戏状态数据的写法 | `MemoryManager application failure cache` 两个用例；Framework 用例 `recovers a plugin whose initialize failed transiently after recover()`；恢复“全部缓存”后三者失败 |
 | N3 | P3 | 可枚举的 `Object.prototype` 扩展使所有对象校验以 “inherited property” 失败，全部持久化中断，而 `JSON.stringify` 能照常输出 | 已修复：继承键与 `JSON.stringify` 一致地跳过 | `N3: ignores enumerable prototype extensions…`；恢复报错后失败 |
 | N4 | P3 | 装载时逐条重新编码记录，申请时又对同一记录二次解析 | 已修复：装载只解析不编码；同版本申请直接使用解析出的对象；片段在首次拼接时生成；迁移前先编码固定基线；旧 leviathan 导入的 payload 复制，不与保留根字段共享 | `N4:` 三个用例；撤销“迁移前固定基线”或“导入复制”后对应用例失败 |
 | N5 | P4 | `validate.ts` 注释称校验约为 stringify 的 1.5 倍，小对象密集数据实测 2.4–3.3 倍 | 已更正注释 | — |
@@ -93,3 +93,10 @@
 ### 6.3 验证
 
 `npx tsc --noEmit`（检查时间 2.97 s）、`npm test`（Jest 167 项与 node 测试 10 项）、`npm run build`、`git diff --check`、`npm run test:integration`（三个场景）。覆盖率（行）：createMemoryManager 99.7%、namespace 100%、paths 98.5%、validate 100%。
+
+### 6.4 N2 的处置（A + B）
+
+- **A（文档约束）**：`MemoryApplicationOptions`、设计 §3 与使用说明写明 initialize/migrate 只依赖输入，不读取 Game、服务或其他分区；依赖游戏状态的初始数据在申请成功后通过 commit 补齐。
+- **B（缓存范围）**：`failedApplications` 只登记缺少 migrate、同版本历史数据不合规两类管理器判定的错误；initialize/migrate 抛错、返回 thenable 或返回值不合规被标记为 `CallbackFailure`，不登记，下一次申请重新运行。设计 §7 同步更新。
+- **行为变化**：`migrate` 有逻辑错误时不再只运行一次。插件场景下，Framework 熔断在连续 3 次失败后停用插件，每次 `recover()` 之后最多再重跑约 3 个 tick；每次重跑都从已固定的基线重新解析，收到未被上次修改污染的副本（用例断言两次都收到原值）。
+- **验证**：`tsc`、`npm test`（Jest 170 项）、`build`、`git diff --check` 通过；把缓存恢复为“全部登记”后，上述三个用例失败。
