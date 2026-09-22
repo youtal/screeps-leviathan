@@ -53,6 +53,29 @@ describe('EventBus', () => {
     }
   );
 
+  /** G07：作用域标签只在 info 开启时生成；开启时房间作用域的通知日志仍带完整标签。 */
+  it('labels room-scoped notify logs when info is enabled', () => {
+    const info = jest.fn();
+    const logger = {
+      debug: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      success: jest.fn(),
+      info,
+      report: jest.fn(),
+      isEnabled: jest.fn(() => true),
+    };
+    const bus = createCoreBus({ scope: () => logger } as never);
+    const scope = { scope: 'room', roomName: 'W1N1' } as const;
+    bus.subscribe(scope, 'creep:spawn', 'sub', jest.fn());
+    info.mockClear();
+    bus.publish(scope, 'creep:spawn', { creepName: 'c' });
+
+    expect(info).toHaveBeenCalledWith(
+      'subscriber sub notified for event creep:spawn in room W1N1'
+    );
+  });
+
   it('should subscribe and publish global events', () => {
     const bus = createBus();
     const mockListener = jest.fn();

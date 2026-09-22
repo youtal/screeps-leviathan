@@ -246,12 +246,13 @@ export const createBus = (logging: LoggerFactory): Bus => {
      */
     if (!snapshot) return 0;
 
-    const label = scopeLabel(scope);
     /**
      * info 等级在作用域创建时定型；关闭时逐订阅者的两条日志连模板字符串都不求值。
-     * 每次通知只查询一次，回调内的日志等级不会中途变化。
+     * 每次通知只查询一次，回调内的日志等级不会中途变化。作用域标签只用于这些 info 日志，
+     * 也只在开启时生成，关闭时每次发布不再为房间、编组作用域构造字符串。
      */
     const infoEnabled = log.isEnabled('info');
+    const label = infoEnabled ? scopeLabel(scope) : '';
     snapshot.forEach(([subscriber, listener]) => {
       if (infoEnabled)
         log.info(`notifying subscriber ${subscriber} for event ${eventType}`);

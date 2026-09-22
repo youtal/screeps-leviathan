@@ -305,11 +305,17 @@ describe('Profiler', () => {
       'Profiler: label "dup" 已被使用，未执行包裹'
     );
 
+    // G05：标题行与数据行都使用 report 级别（默认开启），默认配置下报告完整可见。
     profiler.report();
-    expect(env.log.report).toHaveBeenCalledTimes(2);
+    expect(env.log.report).toHaveBeenCalledTimes(3);
+    expect(env.log.report).toHaveBeenNthCalledWith(
+      1,
+      'Profiler 报告 (共 2 项)'
+    );
 
     profiler.report(false, 'slow');
-    expect(env.log.info).toHaveBeenCalledWith('Profiler 报告 (过滤器: slow)');
+    expect(env.log.report).toHaveBeenCalledWith('Profiler 报告 (过滤器: slow)');
+    expect(env.log.info).not.toHaveBeenCalled();
 
     profiler.reset();
     expect(memory).toEqual({});

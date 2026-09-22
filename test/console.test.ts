@@ -11,14 +11,27 @@
  * 因此本用例同时回归“连续分隔符产生的空片段”：空片段必须原位保留、渲染为空串，
  * 不得让后续片段整体前移错配，也不得退化成 undefined 槽位或抛错。
  *
- * 运行方式与前提：普通 Jest（Node 环境，无需游戏全局对象）。用例直接读取源文件，
+ * 运行方式与前提：普通 Jest（Node 环境）。模板相关用例直接读取源文件，
  * 并先按构建期 html-minifier 的 `removeComments: true` 去掉 HTML 注释，再走 split(';;')
  * 与 replaceHtml + fixRetraction，最后只做语法解析（`new Function` 不执行脚本，因此
  * document/angular 等浏览器对象不会真的被访问）。
+ *
+ * 渲染器冒烟测试：createForm、createHelp 经 test/support/htmlTransform.cjs 导入模板，
+ * 两者都读取 Game.time 生成 DOM 名称，因此用例在 beforeEach 中注入只含 time 的 Game。
+ * 这些用例只断言结构（单行、控件与字段、占位符全部替换、按钮脚本可解析、调用形式），
+ * 输入全部是不含 HTML 特殊字符的普通文本：是否转义属于尚未决定的 A11，不在此锁定。
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fixRetraction, replaceHtml } from '@utils/console/utils';
+import {
+  dyeBlue,
+  dyeGreen,
+  dyeYellow,
+  fixRetraction,
+  replaceHtml,
+} from '@utils/console/utils';
+import { createForm } from '@utils/console/form/createForm';
+import { createHelp } from '@utils/console/help/createHelp';
 
 // 具名导入而非默认导入：tsconfig 未开启 esModuleInterop，默认导入会取到 undefined。
 const formTemplatePath = join(
@@ -42,7 +55,7 @@ const helpTemplatePath = join(
 
 /**
  * 去掉 HTML 注释，模拟构建期 Rollup htmlString 插件的 removeComments 行为。
- * 模板的说明注释里也含有 `;;` 字样，不先删除会让 split 得到多余片段。
+ * 产物中不含注释，注释里若出现 `;;` 字样也不会影响产物的分段，测试须与之一致。
  */
 const stripHtmlComments = (html: string): string =>
   html.replace(/<!--[\s\S]*?-->/g, '');
@@ -135,5 +148,186 @@ describe('replaceHtml literal handling', () => {
 
   it('matches placeholder keys containing regex metacharacters literally', () => {
     expect(replaceHtml('{a.b} {aXb}', { 'a.b': 'dot' })).toBe('dot {aXb}');
+  });
+});
+
+/**
+ * 取出渲染结果中按钮的 onclick 脚本。
+ * 与 renderButtonScript 不同，这里的输入来自真实的 createForm 输出。
+ */
+const extractButtonScript = (html: string): string => {
+  const matched = html.match(/onclick="([\s\S]*?)"\s*>/);
+  if (!matched) throw new Error('rendered form has no onclick attribute');
+  return matched[1];
+};
+
+/** 断言渲染结果中不残留任何模板占位符。 */
+const expectNoPlaceholders = (html: string, placeholders: string[]): void => {
+  for (const placeholder of placeholders) {
+    expect(html).not.toContain(`{${placeholder}}`);
+  }
+};
+
+describe('createForm', () => {
+  beforeEach(() => {
+    (global as any).Game = { time: 123 };
+  });
+
+  afterEach(() => {
+    delete (global as any).Game;
+  });
+
+  it('renders every control type, the field names and the submit button', () => {
+    const options = [
+      { value: '0', label: 'OptionA' },
+      { value: '1', label: 'OptionB' },
+    ];
+    const html = createForm(
+      'demo',
+      [
+        {
+          name: 'myInput',
+          label: 'InputLabel',
+          type: 'input',
+          placeholder: 'InputHint',
+        },
+        { name: 'mySelect', label: 'SelectLabel', type: 'select', options },
+        { name: 'myCheckbox', label: 'CheckLabel', type: 'checkbox', options },
+        { name: 'myRadio', label: 'RadioLabel', type: 'radio', options },
+      ],
+      { content: 'Submit', command: 'myCommand' }
+    );
+
+    // 控制台按行拆分输出，渲染结果必须是单行。
+    expect(html.includes('\n')).toBe(false);
+    // 表单名拼接 Game.time，同一名称同时用于 form 属性与按钮脚本的 DOM 查询。
+    expect(html).toContain('<form name="demo123">');
+    expect(html).toContain("document.forms['demo123']");
+    // 字段名按声明顺序进入按钮脚本的数组字面量。
+    expect(html).toContain(
+      "['myInput','mySelect','myCheckbox','myRadio'].map("
+    );
+
+    expect(html).toContain('<input name="myInput" placeholder="InputHint"');
+    expect(html).toContain('<select name="mySelect"');
+    expect(html).toContain('<option value="0">OptionA</option>');
+    expect(html).toContain('<option value="1">OptionB</option>');
+    // 复选与单选按候选项展开为同名控件，浏览器据此分组。
+    expect(html.split('type="checkbox" name="myCheckbox"')).toHaveLength(3);
+    expect(html.split('type="radio" name="myRadio"')).toHaveLength(3);
+    for (const label of [
+      'InputLabel',
+      'SelectLabel',
+      'CheckLabel',
+      'RadioLabel',
+    ]) {
+      expect(html).toContain(`<span>${label}</span>`);
+    }
+
+    expect(html).toContain('>Submit</button>');
+    const script = extractButtonScript(html);
+    expect(script).toContain('(myCommand)(');
+    // 真实渲染结果中的按钮脚本同样必须在折叠后可解析（只解析，不执行）。
+    expect(() => new Function(script)).not.toThrow();
+
+    expectNoPlaceholders(html, [
+      'formName',
+      'formContent',
+      'elementNames',
+      'command',
+      'buttonLabel',
+      'name',
+      'label',
+      'content',
+      'option',
+      'value',
+      'placeholder',
+    ]);
+  });
+
+  it('renders a form without fields as an empty name list', () => {
+    const html = createForm('empty', [], { content: 'Go', command: 'run' });
+    const script = extractButtonScript(html);
+
+    expect(html).toContain('<form name="empty123">');
+    expect(script).toContain('[].map(');
+    expect(() => new Function(script)).not.toThrow();
+  });
+});
+
+describe('createHelp', () => {
+  beforeEach(() => {
+    (global as any).Game = { time: 123 };
+  });
+
+  afterEach(() => {
+    delete (global as any).Game;
+  });
+
+  it('renders modules, API entries, parameters and call forms', () => {
+    const html = createHelp(
+      {
+        name: 'ModuleA',
+        describe: 'ModuleA intro',
+        api: [
+          {
+            title: 'Work',
+            describe: 'Does work',
+            params: [
+              { name: 'roomName', desc: 'Target room' },
+              { name: 'count', desc: 'How many' },
+            ],
+            functionName: 'doWork',
+          },
+          { title: 'Status', functionName: 'status', commandType: true },
+        ],
+      },
+      { name: 'ModuleB', describe: 'ModuleB intro', api: [] }
+    );
+
+    expect(html.includes('\n')).toBe(false);
+    // 多个模块依次渲染在同一个外层容器中。
+    expect(html.split('class="module-help"')).toHaveLength(2);
+    expect(html.split('class="module-container"')).toHaveLength(3);
+    expect(html.indexOf(dyeYellow('ModuleA'))).toBeLessThan(
+      html.indexOf(dyeYellow('ModuleB'))
+    );
+    expect(html).toContain(dyeGreen('ModuleA intro'));
+
+    // 折叠控件的 id 由函数名与 Game.time 组成，label 与 input 共用。
+    for (const id of ['doWork123', 'status123']) {
+      expect(html).toContain(`for="${id}"`);
+      expect(html).toContain(`id="${id}"`);
+    }
+    expect(html).toContain(`Work ${dyeYellow('doWork', true)}`);
+    expect(html).toContain(dyeGreen('Does work'));
+    expect(html).toContain(
+      `  - ${dyeBlue('roomName')}: ${dyeGreen('Target room')}`
+    );
+    expect(html).toContain(`  - ${dyeBlue('count')}: ${dyeGreen('How many')}`);
+    // 普通函数展示带参数的调用形式；命令型入口只展示名称，不带括号。
+    expect(html).toContain(
+      `${dyeYellow('doWork')}(${dyeBlue('roomName')}, ${dyeBlue('count')})`
+    );
+    expect(html).toContain(dyeYellow('status'));
+    expect(html).not.toContain(`${dyeYellow('status')}(`);
+
+    expectNoPlaceholders(html, [
+      'checkboxId',
+      'content',
+      'describe',
+      'functionList',
+      'title',
+    ]);
+  });
+
+  it('keeps empty parentheses for a function without parameters', () => {
+    const html = createHelp({
+      name: 'ModuleC',
+      describe: 'ModuleC intro',
+      api: [{ title: 'Ping', functionName: 'ping' }],
+    });
+
+    expect(html).toContain(`${dyeYellow('ping')}()`);
   });
 });

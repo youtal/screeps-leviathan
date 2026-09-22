@@ -3,8 +3,9 @@
  * build/upload.mjs 复用。
  *
  * 主要能力：parseUploadDestination 解析命令行上传目标；htmlString 把 .html 模板压缩成
- * 可直接 import 的 JS 字符串模块；screepsUpload 在 writeBundle 阶段把构建产物上传到
- * 指定分支并回读校验。
+ * 可直接 import 的 JS 字符串模块；sourceMapModule 把 source map 包装成可 require 的模块并
+ * 剥离 sourcesContent（API 上传与 copyPath 部署共用）；screepsUpload 在 writeBundle 阶段把
+ * 构建产物上传到指定分支并回读校验，每个 API 请求受 timeoutMs 超时约束。
  *
  * 运行环境是 Node 构建进程（不是 Screeps 运行时），因此可以使用 fetch/Buffer 等能力；
  * 副作用集中在 screepsUpload：它会向 Screeps 官方 API 发起真实 HTTP 请求，凭据来自
@@ -56,6 +57,23 @@ export const htmlString = (options = {}) => ({
   },
 });
 
+/**
+ * 单次 API 请求的默认超时（毫秒）。上传目标可用 `timeoutMs` 覆盖；超时后请求被中止并报错，
+ * 避免服务器无响应时构建进程无限期挂起。
+ */
+export const DEFAULT_UPLOAD_TIMEOUT_MS = 30_000;
+
+/**
+ * 把 source map 文本包装成 Screeps 可 require 的 CJS 模块，并剥离 sourcesContent：
+ * 游戏内错误映射只需要 mappings 与 sources，源码全文只会增大模块体积与解析成本，也不应随
+ * 部署外泄。API 上传与 copyPath 本地部署共用这一处理，两条路径的产物保持一致。
+ */
+export const sourceMapModule = (mapText) => {
+  const map = JSON.parse(mapText);
+  delete map.sourcesContent;
+  return `module.exports = ${JSON.stringify(map)};`;
+};
+
 /** 拼接 API 地址：path 为 '/' 时视为无前缀，其他情况去掉结尾 '/' 再与 protocol://host:port 组合。 */
 const apiUrl = (config, endpoint) => {
   const basePath = config.path === '/' ? '' : config.path.replace(/\/$/, '');
@@ -68,7 +86,8 @@ const apiUrl = (config, endpoint) => {
 /**
  * 统一的 JSON 请求封装：注入 X-Token 鉴权头，可选 query 参数，body 自动序列化。
  * 失败路径全部转成带 endpoint 与原因的异常——网络层不 ok、业务 ok !== 1、响应不是合法
- * JSON 都会让构建失败，避免出现「命令成功但代码其实没上传」的静默错误。
+ * JSON、超过 timeoutMs 仍未完成都会让构建失败，避免出现「命令成功但代码其实没上传」的静默
+ * 错误或无限期挂起。超时覆盖整个请求（含读取响应体）。
  */
 const request = async (config, endpoint, options = {}) => {
   const url = apiUrl(config, endpoint);
@@ -78,30 +97,41 @@ const request = async (config, endpoint, options = {}) => {
     }
   }
 
-  const response = await fetch(url, {
-    method: options.method ?? 'GET',
-    headers: {
-      'Content-Type': 'application/json; charset=utf-8',
-      'X-Token': config.token,
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
-  const text = await response.text();
+  const method = options.method ?? 'GET';
+  const timeoutMs = config.timeoutMs ?? DEFAULT_UPLOAD_TIMEOUT_MS;
+  let response;
+  let text;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'X-Token': config.token,
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    text = await response.text();
+  } catch (error) {
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError')
+      throw new Error(
+        `Screeps API ${method} ${endpoint} timed out after ${timeoutMs} ms`
+      );
+    throw error;
+  }
   let data;
 
   try {
     data = JSON.parse(text);
   } catch {
     throw new Error(
-      `Screeps API ${options.method ?? 'GET'} ${endpoint} returned invalid JSON (HTTP ${response.status})`
+      `Screeps API ${method} ${endpoint} returned invalid JSON (HTTP ${response.status})`
     );
   }
 
   if (!response.ok || data.ok !== 1) {
     const reason = data.error ?? data.message ?? `HTTP ${response.status}`;
-    throw new Error(
-      `Screeps API ${options.method ?? 'GET'} ${endpoint} failed: ${reason}`
-    );
+    throw new Error(`Screeps API ${method} ${endpoint} failed: ${reason}`);
   }
 
   return data;
@@ -121,10 +151,9 @@ const collectModules = (bundle) => {
       modules[moduleName] = output.code;
 
       if (output.map) {
-        const map = JSON.parse(output.map.toString());
-        delete map.sourcesContent;
-        modules[`${output.fileName}.map`] =
-          `module.exports = ${JSON.stringify(map)};`;
+        modules[`${output.fileName}.map`] = sourceMapModule(
+          output.map.toString()
+        );
       }
     } else if (output.fileName.endsWith('.wasm')) {
       modules[output.fileName] = {
@@ -145,7 +174,9 @@ const validateConfig = (config) => {
     typeof config.hostname !== 'string' ||
     typeof config.port !== 'number' ||
     typeof config.path !== 'string' ||
-    typeof config.branch !== 'string'
+    typeof config.branch !== 'string' ||
+    (config.timeoutMs !== undefined &&
+      !(Number.isSafeInteger(config.timeoutMs) && config.timeoutMs > 0))
   ) {
     throw new TypeError('Invalid Screeps upload configuration');
   }

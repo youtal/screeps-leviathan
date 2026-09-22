@@ -201,6 +201,107 @@ describe('RoomShortcuts', () => {
     );
   });
 
+  /** 废墟缺失或不在事件房间时同样无法证明要删的条目，必须整房失效，下次查询重新扫描。 */
+  it.each([
+    ['cannot be found', null, 'not found; invalidating'],
+    ['belongs to another room', 'W2N2', 'belongs to room W2N2'],
+  ])('invalidates the room when the ruin %s', (_case, ruinRoom, warning) => {
+    const harness = createHarness();
+    const spawn = {
+      id: 'spawn-1',
+      structureType: STRUCTURE_SPAWN,
+      pos: { roomName: 'W1N1' },
+    };
+    harness.setStructures([spawn]);
+    harness.shortcuts.getSpawn('W1N1');
+    if (ruinRoom)
+      harness.addObject({
+        id: 'ruin-1',
+        pos: { roomName: ruinRoom },
+        structure: spawn,
+      });
+    harness.listeners.get('structure:destroyed')!({
+      roomName: 'W1N1',
+      structureId: spawn.id,
+      ruinId: 'ruin-1',
+    });
+    harness.shortcuts.getSpawn('W1N1');
+    expect(harness.room.find).toHaveBeenCalledTimes(6); // 失效后重新初始化一次
+    expect(harness.log.warn).toHaveBeenCalledWith(
+      expect.stringContaining(warning)
+    );
+  });
+
+  /** 每个查询接口映射到对应的建筑类型，集合接口返回数组、单体接口返回对象。 */
+  it('maps every getter to its structure type and result shape', () => {
+    const types = {
+      STRUCTURE_EXTENSION: 'extension',
+      STRUCTURE_RAMPART: 'rampart',
+      STRUCTURE_ROAD: 'road',
+      STRUCTURE_WALL: 'constructedWall',
+      STRUCTURE_KEEPER_LAIR: 'keeperLair',
+      STRUCTURE_PORTAL: 'portal',
+      STRUCTURE_LINK: 'link',
+      STRUCTURE_LAB: 'lab',
+      STRUCTURE_CONTAINER: 'container',
+      STRUCTURE_TOWER: 'tower',
+      STRUCTURE_POWER_BANK: 'powerBank',
+      STRUCTURE_OBSERVER: 'observer',
+      STRUCTURE_POWER_SPAWN: 'powerSpawn',
+      STRUCTURE_EXTRACTOR: 'extractor',
+      STRUCTURE_NUKER: 'nuker',
+      STRUCTURE_FACTORY: 'factory',
+      STRUCTURE_TERMINAL: 'terminal',
+      STRUCTURE_INVADER_CORE: 'invaderCore',
+    };
+    Object.assign(global as any, types);
+    const harness = createHarness();
+    const all = [
+      STRUCTURE_SPAWN,
+      STRUCTURE_STORAGE,
+      ...Object.values(types),
+    ].map((type) => ({
+      id: type + '-1',
+      structureType: type,
+      pos: { roomName: 'W1N1' },
+    }));
+    harness.setStructures(all);
+    const byType = (type: string) =>
+      all.find((object) => object.structureType === type);
+    const s = harness.shortcuts;
+    const collections: [unknown[], string][] = [
+      [s.getSpawn('W1N1'), 'spawn'],
+      [s.getExtension('W1N1'), 'extension'],
+      [s.getRampart('W1N1'), 'rampart'],
+      [s.getRoad('W1N1'), 'road'],
+      [s.getWall('W1N1'), 'constructedWall'],
+      [s.getKeeperLair('W1N1'), 'keeperLair'],
+      [s.getPortal('W1N1'), 'portal'],
+      [s.getLink('W1N1'), 'link'],
+      [s.getLab('W1N1'), 'lab'],
+      [s.getContainer('W1N1'), 'container'],
+      [s.getTower('W1N1'), 'tower'],
+      [s.getPowerBank('W1N1'), 'powerBank'],
+    ];
+    for (const [result, type] of collections)
+      expect(result).toEqual([byType(type)]);
+    const singles: [unknown, string][] = [
+      [s.getObserver('W1N1'), 'observer'],
+      [s.getPowerSpawn('W1N1'), 'powerSpawn'],
+      [s.getExtractor('W1N1'), 'extractor'],
+      [s.getNuker('W1N1'), 'nuker'],
+      [s.getFactory('W1N1'), 'factory'],
+      [s.getStorage('W1N1'), 'storage'],
+      [s.getTerminal('W1N1'), 'terminal'],
+      [s.getInVaderCore('W1N1'), 'invaderCore'],
+    ];
+    for (const [result, type] of singles) expect(result).toBe(byType(type));
+    // 本夹具的 room.find 只返回建筑，矿源与矿物为空结果。
+    expect(s.getSource('W1N1')).toEqual([]);
+    expect(s.getMineral('W1N1')).toBeUndefined();
+    expect(harness.room.find).toHaveBeenCalledTimes(3); // 全部查询共用一次初始化
+  });
+
   /** 失去视野时 getRoom 返回 undefined：继续返回缓存会给出过期引用，因此必须失效，并在视野恢复后重新 find。 */
   it('invalidates cached room data when vision is lost', () => {
     const harness = createHarness();
@@ -235,7 +336,7 @@ describe('RoomShortcuts', () => {
     const calls = harness.log.info.mock.calls.map(([content]: [unknown]) => content);
     // 查询路径上的 info 都以回调传入：日志器在 info 关闭时不会调用它们。
     expect(calls.every((content: unknown) => typeof content === 'function')).toBe(true);
-    expect(calls.map((content: () => string) => content())).toEqual([
+    expect((calls as (() => string)[]).map((content) => content())).toEqual([
       'Room W1N1 cache refresh requested, initializing now.',
       'Room W1N1 shortcuts initialized.',
       'Room W1N1 cache refresh requested, initializing now.',

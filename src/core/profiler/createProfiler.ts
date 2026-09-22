@@ -150,12 +150,12 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
    *
    * 报告是只读操作：过滤分支走 db.get，命中不存在的 label 会得到全零记录而不会创建 Memory 项。
    * 全量分支对当前命名空间做一次 Object.entries 与排序，成本 O(n log n)，只在显式调用时发生，
-   * 不进入每 tick 热路径。输出经 log.info/log.report，受模块日志开关控制；平均时间用 `|| 0`
-   * 兜住 calls 为 0 时的 NaN。
+   * 不进入每 tick 热路径。标题与数据行都经 log.report（回应显式请求的输出，默认开启），
+   * 受模块日志开关控制；平均时间用 `|| 0` 兜住 calls 为 0 时的 NaN。
    */
   const report = (detailed = false, filter = ''): void => {
     if (filter) {
-      log.info(`Profiler 报告 (过滤器: ${filter})`);
+      log.report(`Profiler 报告 (过滤器: ${filter})`);
       const data = db.get(filter);
       log.report(
         `  ${filter} - 总时间: ${data.totalTime}, 自身时间: ${data.selfTime}, 调用次数: ${data.calls}, 平均时间: ${
@@ -170,7 +170,7 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
     /** 默认按自身耗时降序排列，优先暴露最值得直接优化的函数。 */
     entries.sort((a, b) => b[1].selfTime - a[1].selfTime);
 
-    log.info(`Profiler 报告 (共 ${entries.length} 项)`);
+    log.report(`Profiler 报告 (共 ${entries.length} 项)`);
     for (const [label, record] of entries) {
       log.report(
         `  ${label} - 总时间: ${record.totalTime}, 自身时间: ${record.selfTime}, 调用次数: ${record.calls}, 平均时间: ${

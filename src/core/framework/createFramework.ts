@@ -77,6 +77,14 @@ export const createFramework = (options: FrameworkOptions): Framework => {
   };
   // 错误映射与 report 回调同样走 Profiler 计时，避免故障路径的耗时在统计中隐形。
   errors.setMeasure(measure);
+  /**
+   * 正在执行的事件回调嵌套层数。回调以订阅者身份、沿用发布者当时的阶段运行（意图提交等
+   * 按阶段判定的能力保持不变），但 setup 专属接口（subscribe、provide、onDispose）只属于
+   * 插件自己的 setup 主体：层数大于 0 时一律拒绝。否则其他插件 setup 期间触发的回调可以
+   * 越权订阅、发布服务，onDispose 还会把清理函数登记到正在 setup 的发布者名下。
+   * 每个新 tick 开始时复位，硬终止遗留的层数不会延续。
+   */
+  let eventDepth = 0;
   /** 动态调用归属，用于限制 setup/submit 权限；嵌套事件回调退出后必须恢复外层值。 */
   let currentPhase: Phase = 'framework';
   let currentPlugin = '';
@@ -207,12 +215,25 @@ export const createFramework = (options: FrameworkOptions): Framework => {
         listener: (data: DataByEvent<T>) => void
       ) => {
         const owner = initialized.get(id)?.cleanup ?? activeCleanup;
-        if (!owner || currentPlugin !== id || currentPhase !== 'setup')
-          throw new Error('Subscribe only during setup');
+        if (
+          !owner ||
+          currentPlugin !== id ||
+          currentPhase !== 'setup' ||
+          eventDepth > 0
+        )
+          throw new Error(
+            'Subscribe only during setup (not in event callbacks)'
+          );
         const key = id + ':' + subscriber;
         base.bus.subscribe(scope, type, key, (data) => {
           if (available.has(id) && !failed.has(id)) {
-            const result = invoke(id, currentPhase, () => listener(data));
+            eventDepth++;
+            let result: ReturnType<typeof invoke>;
+            try {
+              result = invoke(id, currentPhase, () => listener(data));
+            } finally {
+              eventDepth--;
+            }
             // critical 订阅者失败必须立即生效：发布者自己的钩子仍会正常返回，
             // 若等到 tickEnd 的健康统计才进入安全模式，其后的插件阶段与意图提交
             // 已经在故障状态下执行了。commit 阶段还要清空可用集合，阻止同批剩余意图。
@@ -259,6 +280,7 @@ export const createFramework = (options: FrameworkOptions): Framework => {
           if (
             currentPlugin !== id ||
             currentPhase !== 'setup' ||
+            eventDepth > 0 ||
             !plugin.manifest.provides?.includes(name)
           ) {
             throw new Error('Undeclared service or invalid phase: ' + name);
@@ -287,8 +309,15 @@ export const createFramework = (options: FrameworkOptions): Framework => {
             .map((r) => ({ ...r })),
       },
       onDispose: (cleanup) => {
-        if (currentPlugin !== id || currentPhase !== 'setup' || !activeCleanup)
-          throw new Error('onDispose only during setup');
+        if (
+          currentPlugin !== id ||
+          currentPhase !== 'setup' ||
+          eventDepth > 0 ||
+          !activeCleanup
+        )
+          throw new Error(
+            'onDispose only during setup (not in event callbacks)'
+          );
         activeCleanup.push(cleanup);
       },
     };
@@ -320,6 +349,7 @@ export const createFramework = (options: FrameworkOptions): Framework => {
     currentPhase = 'framework';
     currentPlugin = '';
     activeCleanup = undefined;
+    eventDepth = 0;
     failures = [];
     failed = new Set();
     available = new Set();
@@ -527,6 +557,7 @@ export const createFramework = (options: FrameworkOptions): Framework => {
         currentPhase = 'framework';
         currentPlugin = '';
         activeCleanup = undefined;
+        eventDepth = 0;
       }
     }
   };

@@ -778,6 +778,45 @@ describe('ErrorMapper', () => {
     ).not.toThrow();
   });
 
+  /** G02：默认日志出口按插件与阶段去重，成功后重置；注入的 report 每次都收到。 */
+  it('deduplicates repeated failures in the default report and resets after success', () => {
+    const lines: string[] = [];
+    const mapper = createErrorMapper(
+      createLogging({ output: { write: (line) => lines.push(line) } }),
+      { loadSourceMap: () => ({}) }
+    );
+    const meta = { tick: 1, pluginId: 'a', phase: 'tickExecute' } as const;
+    const fail = (message: string) =>
+      mapper.capture(meta, () => {
+        throw new Error(message);
+      });
+    fail('storage broken');
+    fail('storage broken');
+    fail('storage broken');
+    expect(lines).toHaveLength(1);
+    fail('another cause'); // 原因变化时重新记录
+    expect(lines).toHaveLength(2);
+    mapper.capture(meta, () => 'recovered'); // 成功一次即重置
+    fail('another cause');
+    expect(lines).toHaveLength(3);
+    // 其他插件或阶段互不影响。
+    mapper.capture({ ...meta, phase: 'tickEnd' }, () => {
+      throw new Error('another cause');
+    });
+    expect(lines).toHaveLength(4);
+
+    const report = jest.fn();
+    const custom = createErrorMapper(createLogging(), {
+      loadSourceMap: () => ({}),
+      report,
+    });
+    for (let i = 0; i < 3; i++)
+      custom.capture(meta, () => {
+        throw new Error('same');
+      });
+    expect(report).toHaveBeenCalledTimes(3);
+  });
+
   /** 默认报告出口必须在创建映射器时派生一次作用域日志器，故障密集时不能反复重建。 */
   it('derives the default scope logger once per mapper instance', () => {
     const error = jest.fn();
@@ -1207,6 +1246,88 @@ describe('Framework memory integration', () => {
     h.next();
     expect(h.framework.getStatus().failures).toEqual([]);
     expect(JSON.parse(plat.raw()).memoryManager.partitions.seeded.main.payload.n).toBe(2);
+  });
+
+  /** G01：事件回调中 setup 专属接口一律拒绝；按阶段判定的意图提交保持不变。 */
+  it('rejects setup-only APIs inside event callbacks and keeps cleanup ownership', () => {
+    const trace: string[] = [];
+    const watcher = plugin('watcher', {
+      manifest: { id: 'watcher', version: 1, provides: ['late'] },
+      setup(context) {
+        context.services.provide('late', {});
+        context.events.subscribe(
+          { scope: 'global' },
+          'creep:spawn',
+          'watch',
+          () => {
+            for (const [name, action] of [
+              [
+                'onDispose',
+                () => context.onDispose(() => trace.push('watcher cleanup')),
+              ],
+              [
+                'subscribe',
+                () =>
+                  context.events.subscribe(
+                    { scope: 'global' },
+                    'creep:death',
+                    'late',
+                    () => undefined
+                  ),
+              ],
+              ['provide', () => context.services.provide('late', {})],
+            ] as const) {
+              try {
+                action();
+                trace.push(name + ' allowed');
+              } catch {
+                trace.push(name + ' rejected');
+              }
+            }
+          }
+        );
+        context.events.subscribe(
+          { scope: 'global' },
+          'creep:death',
+          'intent',
+          () => {
+            context.intents.submit({
+              subjectId: 'c1',
+              channel: 'move',
+              execute: () => OK,
+            });
+            trace.push('intent submitted');
+          }
+        );
+      },
+    });
+    const h = harness([watcher]);
+    h.next();
+    const publisher = plugin('publisher', {
+      setup(context) {
+        context.events.publish({ scope: 'global' }, 'creep:spawn', {
+          creepName: 'x',
+          roomName: 'W1N1',
+          spawnId: 's' as Id<StructureSpawn>,
+        } as never);
+      },
+      onTickExecute(context) {
+        context.events.publish({ scope: 'global' }, 'creep:death', {
+          creepName: 'x',
+        } as never);
+      },
+    });
+    h.framework.register(publisher);
+    h.next();
+    h.framework.disable('publisher');
+    h.next();
+    expect(trace).toEqual([
+      'onDispose rejected',
+      'subscribe rejected',
+      'provide rejected',
+      'intent submitted',
+    ]);
+    expect(h.framework.getStatus().failures).toEqual([]);
   });
 
   it('reports a configuration error when no memory manager is assembled', () => {

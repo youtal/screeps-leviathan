@@ -46,9 +46,13 @@ export interface PluginContext extends ModuleContext {
   readonly memory: ApplyMemoryAccessor;
   readonly cpu: CpuBudget;
   readonly services: {
-    /** T 由使用者声明，运行时只校验服务归属与可用性，不验证 T 的结构。 */
+    /**
+     * T 由使用者声明，运行时只校验服务归属与可用性，不验证 T 的结构。
+     * 应在使用时调用，不在 setup 中缓存结果：optional 依赖的提供者重启、或同一批命令中
+     * 替换同 id 的提供者时，使用者不会重新 setup，缓存的会是已释放的旧实例。
+     */
     get<T>(name: string): T;
-    /** 仅在当前插件 setup 中发布 manifest.provides 声明的服务。 */
+    /** 仅在当前插件 setup 中发布 manifest.provides 声明的服务；事件回调中调用会被拒绝。 */
     provide<T>(name: string, value: T): void;
   };
   readonly intents: {
@@ -59,7 +63,10 @@ export interface PluginContext extends ModuleContext {
     /** 返回当前 global 生命周期中上一轮回执的副本；global reset 后为空。 */
     previous(): readonly IntentReceipt[];
   };
-  /** setup 注册清理函数；停用/卸载时释放订阅，重新启用后重新 setup。 */
+  /**
+   * setup 注册清理函数；停用/卸载时释放订阅，重新启用后重新 setup。
+   * 只能在本插件的 setup 中调用，事件回调中调用会被拒绝（即使发布者正处于 setup）。
+   */
   onDispose(cleanup: () => void): void;
 }
 
