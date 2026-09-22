@@ -1,6 +1,6 @@
 # 提案：通用能力层的定位与提供方式
 
-- 状态：待决策
+- 状态：已采纳——选定方案 C（服务令牌 + 类型化读取，§3-4）；设计文档编写中
 - 提出日期：2026-09-23
 - 范围：roomShortcuts、goto 这类“与 Screeps 强耦合、但为其他业务模块提供通用能力”的模块，如何被定位与消费
 - 导航：[提案索引](./README.md)
@@ -91,6 +91,8 @@ framework.register({
 
 Framework 侧的改动是给 `services.get` 与 `services.provide` 各加一个接受令牌的重载，运行时仍按 `token.name` 查表，现有字符串写法不受影响。`manifest.provides` 与 `requires` 保持现状：前者是服务名，后者是插件 id，两者语义不同，不合并。
 
+这个方案没有解决的一处残留耦合：`requires` 引用插件 id，令牌绑定的是服务名，两者是不同的命名空间，令牌本身不携带“由哪个插件提供”这条信息。上面的例子里 `requires: ['roomShortcuts']` 能配合 `RoomShortcutsService` 正确工作，只是因为插件 id 与服务名目前恰好同名；一旦某个能力模块的插件 id 与它发布的服务名不一致（例如一个插件同时提供多个服务，或者插件改名但保留服务名），令牌能保证 `services.get` 的返回类型正确，却不能帮 `requires` 里的裸字符串防错——写错或漏写插件 id 时类型检查不会报警，只会在运行时表现为服务不可用。这部分“去掉字符串”的目标没有被完全达成，见 §7 待决问题。
+
 ### 4.3 可选依赖的读取
 
 可选依赖目前需要 `try/catch`（提供者不可用时 `get` 抛错）。建议同时补一个 `services.optional(token)`，返回 `T | undefined`，让可选依赖的读取与“使用时读取”的规则自然配合。
@@ -108,10 +110,12 @@ Framework 侧的改动是给 `services.get` 与 `services.provide` 各加一个�
 2. roomShortcuts 发布接口与令牌，`app` 改用令牌注册；使用说明同步。
 3. 文档确立分层与层间规则：在 [Core 架构](../design/core/README.md) 之外新增一份能力层说明，或并入文档总导航的分层描述。
 4. goto 落地时按新分层放置，并评估把 roomShortcuts 一并迁到 `capabilities/`。
+5. 参照 `test/coreDependencyBoundary.test.ts` 与 `test/memoryBoundary.test.ts` 的模式，为 `capabilities` 层补一条自动化边界扫描（`capabilities` 不得导入 `modules` 的具体实现），使这条分层规则具备和 Core、Memory 边界同等的阻断级别检查，而不是只停留在文档约定。
 
 ## 7. 待决问题
 
-1. 目录是否真的迁移，以及迁移时机（现在，还是等 goto 落地）。层级名称用 `capabilities` 还是别的（`platform`、`services`）。
+1. 目录是否真的迁移，以及迁移时机（现在，还是等 goto 落地）。层级名称用 `capabilities` 还是别的（`platform`、`services`）。迁移一旦发生，还需要同步更新 AGENTS.md §6 用 `src/modules/roomShortcuts/` 作的路径映射举例；根规范按 AGENTS.md §1 不能在没有用户明确授权时自行放宽或改写，这处更新需要与目录迁移一起征得用户确认。
 2. 是否引入 `services.optional`。
 3. 跨 tick 任务调度器归属哪一层：它不依赖 Screeps 概念，但服务于业务计算，见[跨 tick 任务框架提案](./cross-tick-tasks.md)。
 4. 令牌是否同时用于 `manifest.provides` 的声明（涉及清单字段的类型变化）。
+5. `requires` 目前仍是与令牌脱钩的裸插件 id 字符串（见 §4.2），是否需要让 `defineService` 携带所属插件 id、或提供额外的静态检查，来弥补这部分残留的字符串耦合。
