@@ -77,7 +77,7 @@ const plugin: LeviathanPlugin = {
 
 编译期检查：路径与值的类型由 `MemoryAccessor<M>` 推导，错误键、错误值、数组方法名（`length`、`push`）、越界元组下标、宽 `string[]` 路径、对静态必填属性的 `remove`（即使类型同时带有索引签名）都会编译失败。`Record<number, X>` 这类数字键记录用字符串段访问，例如 `['byTick', String(tick)]`：JSON 对象键总是字符串，运行时也只接受字符串段；分区根本身是数字键记录时，顶层键重载同样接受字符串键（`get('100')`）。路径类型最多 8 段（`MaxPathDepth`），更深的修改用 `commit(mutator)`。`MemoryAccessor<any>` 是显式的动态入口：放弃编译期路径检查，运行时校验照常执行。
 
-项目当前未开启 `strictNullChecks`，编译期无法拒绝 `commit(key, undefined)`；运行时会以“undefined is not a JSON value”拒绝。删除请用 `remove`。
+`commit(key, undefined)` 在编译期被拒绝（项目开启了 `strict`）；JavaScript 调用方传入时，运行时以“undefined is not a JSON value”拒绝。删除请用 `remove`。
 
 ## 数据约束与引用所有权
 

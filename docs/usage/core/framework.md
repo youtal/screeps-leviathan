@@ -64,7 +64,7 @@ framework.register({
 });
 ```
 
-`requires` 填写提供服务的插件 id；`services.get` 填写服务名。二者允许不同。独占服务必须列入 `manifest.provides`，并在 setup 中通过 `services.provide(name, value)` 发布。
+`requires` 填写提供服务的插件 id；`services.get` 填写服务名。二者允许不同。独占服务必须列入 `manifest.provides`，并在 setup 中通过 `services.provide(name, value)` 发布。查询接口与结果语义见 [RoomShortcuts 使用说明](../modules/roomShortcuts.md)。
 
 ## 插件管理
 
@@ -93,6 +93,31 @@ framework.register({
 - `intents`：提交动作与读取本轮、上一轮回执。
 
 Context 可以跨 tick 保留；停用后不应继续使用，Game 对象不能跨 tick 保存。
+
+### 事件回调
+
+订阅回调以订阅者身份执行，阶段沿用发布者发布时的阶段：执行阶段发布的事件，回调中可以提交意图，意图归属订阅者。`events.subscribe`、`services.provide` 与 `onDispose` 只能在插件自己的 setup 中调用，在任何事件回调中调用都会抛错，即使发布者正处于 setup；错误进入订阅者的错误边界。收到事件后需要的资源应在 setup 中预先建立，回调只更新状态。
+
+### 读取服务
+
+在使用时调用 `services.get`，不要在 setup 中保存返回的服务对象。服务对象属于提供者的某次激活，提供者重新 setup 后，旧对象已经释放：事件订阅已取消，数据不再更新。使用者只在 `requires` 的提供者停用、熔断或卸载时随之挂起并在之后重新 setup；以下情况使用者不会重新 setup，setup 中保存的服务会失效：
+
+- `optional` 依赖的提供者重启（停用后启用、熔断后 recover）；
+- 同一批命令中先 `unregister` 再 `register` 同一 id，替换提供者（`requires` 与 `optional` 均如此）。
+
+提供者不可用或缺失时 `services.get` 抛出 `Unavailable service`；读取可选依赖的服务时需要捕获这一异常。
+
+```ts
+onTickExecute(context) {
+  let stats: StatsService | undefined;
+  try {
+    stats = context.services.get<StatsService>('stats');
+  } catch {
+    // 可选依赖不可用时跳过统计，不影响本插件的主要工作。
+  }
+  stats?.record('observer', context.tick);
+}
+```
 
 ## 持久化边界
 

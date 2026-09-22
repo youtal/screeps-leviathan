@@ -97,7 +97,7 @@ initialize 与 migrate 必须是只依赖输入的确定性函数：不读取 Ga
 
 深度限制仅约束编译期递归，不隐式限制运行时路径深度。不得通过宽泛的默认重载让普通错误调用绕过类型检查。
 
-顶层键重载与单段路径使用同一套规则，数字索引签名的记录以字符串键访问。路径类型采用“按实参逐段校验”，不枚举业务类型的全部路径：参数写作 `P & NoInfer<ValidPath<M, P>>`，P 只从实参推导，非法路径把参数收窄为 never。编译成本与路径长度线性相关，不随键数量膨胀。递归预算为 8 段（`MaxPathDepth`），超出预算的修改使用 `commit(mutator)`。显式动态入口为 `MemoryAccessor<any>`：放弃编译期路径检查，运行时校验不变。宽 `(string | number)[]` 路径在类型层非法，必须显式断言或改用动态入口。未开启 strictNullChecks 时 undefined 可赋给任意类型，`commit(key, undefined)` 由运行时 JSON 校验拒绝。
+顶层键重载与单段路径使用同一套规则，数字索引签名的记录以字符串键访问。路径类型采用“按实参逐段校验”，不枚举业务类型的全部路径：参数写作 `P & NoInfer<ValidPath<M, P>>`，P 只从实参推导，非法路径把参数收窄为 never。编译成本与路径长度线性相关，不随键数量膨胀。递归预算为 8 段（`MaxPathDepth`），超出预算的修改使用 `commit(mutator)`。显式动态入口为 `MemoryAccessor<any>`：放弃编译期路径检查，运行时校验不变。宽 `(string | number)[]` 路径在类型层非法，必须显式断言或改用动态入口。`commit(key, undefined)` 在 strict 类型检查下编译失败，JavaScript 调用方由运行时 JSON 校验拒绝。
 
 ### 4.3 JSON 与引用所有权
 

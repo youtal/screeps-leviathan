@@ -21,6 +21,8 @@ setup(context) {
 - `report(false, label)`：输出单项报告。
 - `report()`：按 selfTime 降序输出累计报告。
 
+报告的标题行与数据行都以 `report` 级别输出，该级别默认开启；关闭 Profiler 作用域的 `report` 等级会隐藏整份报告。`report` 的第一个参数 `detailed` 为预留参数，传入 `true` 与 `false` 的输出相同。
+
 在 Framework 插件中通常直接使用 `context.profiler`，无需自行组装依赖。Runtime 的默认统计器将累计值保存在实例 heap，global reset 后清空，不写入 RawMemory。
 
 独立调用 `createProfiler` 时，通过 `context.env` 提供 `getGame` 和日志，通过 `context.storage` 提供 `getMemory/markDirty`，通过 `context.enable` 提供初始开关。`ProfilerStorage` 是 Profiler 与宿主之间的底层适配器，不是业务 Memory 接口；业务不能使用旧 context.persistence。独立 Profiler 如果不接 Runtime，应把统计留在调用者闭包中。
