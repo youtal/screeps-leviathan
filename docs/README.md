@@ -1,8 +1,8 @@
 # 文档总导航
 
-[项目首页](../README.md) · [开发规范](../AGENTS.md) · [设计索引](./design/README.md) · [使用索引](./usage/README.md) · [测试文档](./testing/README.md) · [更新记录](./changelog/README.md) · [审计报告](./audits/README.md)
+[项目首页](../README.md) · [开发规范](../AGENTS.md) · [设计索引](./design/README.md) · [使用索引](./usage/README.md) · [提案](./proposals/README.md) · [测试文档](./testing/README.md) · [更新记录](./changelog/README.md) · [审计报告](./audits/README.md)
 
-设计记录设计意图和交付状态；使用说明记录公共能力的调用方法；更新记录保存已完成变更的历史。设计中的 API 示例不表示已可调用，使用时查看对应使用说明。
+设计记录设计意图和交付状态；使用说明记录公共能力的调用方法；提案记录尚未决策的方案；更新记录保存已完成变更的历史。设计与提案中的 API 示例都不表示已可调用，使用时查看对应使用说明。
 
 ## 公共契约
 
@@ -36,6 +36,13 @@
 | --- | --- | --- | --- |
 | 控制台格式化、表单和帮助 | [utils/console](../src/utils/console/) | [设计](./design/utils/console.md) | [使用](./usage/utils/console.md) |
 | 优先队列 | [priorityQueue.ts](../src/utils/priorityQueue.ts) | [设计](./design/utils/priorityQueue.md) | [使用](./usage/utils/priorityQueue.md) |
+
+## 提案
+
+尚未决策的技术方案，接口草案不可调用；确认后写入设计与使用说明。
+
+- [跨 tick 高消耗任务框架](./proposals/cross-tick-tasks.md)：把一段高消耗计算分摊到多个 tick 完成。
+- [通用能力层的定位与提供方式](./proposals/capability-layer.md)：与 Screeps 耦合的通用能力如何分层与被消费。
 
 ## 测试环境
 
