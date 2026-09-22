@@ -8,8 +8,10 @@
  * 实现过程：加载时拆出四个模板片段，按模块、函数、内容行逐层填充并着色，
  * 用函数名加 Game.time 生成折叠控件 ID，最后加入样式并去掉换行。
  *
- * 技术要点：模板片段跨 tick 复用，global reset 后重建；生成函数说明时读取 Game.time，
- * 同 tick 同名函数可能产生重复 ID。函数只返回文本，不打印、不执行示例命令，也不缓存渲染结果。
+ * 技术要点：模板片段跨 tick 复用，global reset 后重建；折叠控件 ID 由函数名、Game.time 与
+ * 渲染序号组成，同 tick 渲染同名函数也不会重复。模块名、介绍、标题与参数说明按 HTML 转义，
+ * 函数名按标识符校验（信任边界见 docs/design/utils/console.md）。
+ * 函数只返回文本，不打印、不执行示例命令，也不缓存渲染结果。
  */
 import template from './template.html';
 import style from './style.html';
@@ -19,6 +21,8 @@ import {
   dyeYellow,
   dyeGreen,
   dyeBlue,
+  escapeHtml,
+  assertScriptSafe,
 } from '../utils';
 import { ModuleDescribe, FunctionDescribe } from './types';
 
@@ -35,6 +39,13 @@ const [
   apiContainerTemplate,
   apiLineTemplate,
 ] = template.split(';;');
+
+/**
+ * 本 global 内的渲染序号，与 Game.time 一起构成折叠控件的 DOM id。
+ * 只有 Game.time 时，同一 tick 渲染两次同名 API 会得到相同 id，label 的 for 会指向先出现
+ * 的那一个，点击其中一个会展开另一个。序号从模块加载起单调递增，global reset 后重新计数。
+ */
+let renderSeq = 0;
 
 /**
  * 创建一个或多个模块的帮助信息，并套用统一样式与外层容器。
@@ -63,8 +74,8 @@ export const createHelp = function (...modules: ModuleDescribe[]): string {
  */
 const createModule = function (module: ModuleDescribe): string {
   return replaceHtml(moduleTemplate, {
-    title: dyeYellow(module.name),
-    describe: dyeGreen(module.describe),
+    title: dyeYellow(escapeHtml(module.name)),
+    describe: dyeGreen(escapeHtml(module.describe)),
     functionList: module.api.map(createApiHelp).join(''),
   });
 };
@@ -79,9 +90,9 @@ const createModule = function (module: ModuleDescribe): string {
  * 末尾的统一 map 会再包一次（描述行与调用行只包一次）。这是当前实现的既有行为，
  * 视觉上表现为参数行多一层同名的内边距容器；如需调整应连同模板一起改。
  *
- * checkboxId 由函数名与 Game.time 拼成，同时用于 label 的 for 与 input 的 id：
- * 借助原生 checkbox 的选中态驱动 CSS 展开，无需脚本；加入 tick 可避免不同 tick
- * 打印的同名 API 在 DOM 中互相串扰。
+ * checkboxId 由函数名、Game.time 与渲染序号拼成，同时用于 label 的 for 与 input 的 id：
+ * 借助原生 checkbox 的选中态驱动 CSS 展开，无需脚本；tick 与序号一起保证不同 tick、
+ * 以及同一 tick 内多次渲染的同名 API 都不会在 DOM 中互相串扰。
  *
  * @param func api 的描述信息
  * @returns 绘制完成的字符串
@@ -89,14 +100,16 @@ const createModule = function (module: ModuleDescribe): string {
 const createApiHelp = function (func: FunctionDescribe): string {
   /** contents 保存尚未套用行模板的内容片段，顺序即最终的显示顺序。 */
   const contents: string[] = [];
+  /** 函数名进入折叠控件的 id 与 for 属性，并作为调用示例文本，按标识符校验。 */
+  const functionName = assertScriptSafe('function name', func.functionName);
   /** API 描述可选；存在时作为第一行内容。 */
-  if (func.describe) contents.push(dyeGreen(func.describe));
+  if (func.describe) contents.push(dyeGreen(escapeHtml(func.describe)));
 
   /** 参数列表逐项着色并转换为独立的帮助行。 */
   if (func.params) {
     /** 先生成纯内容，再统一套用 apiLineTemplate；`  - ` 前缀提供视觉缩进。 */
     const describes = func.params.map((param) => {
-      return `  - ${dyeBlue(param.name)}: ${dyeGreen(param.desc)}`;
+      return `  - ${dyeBlue(escapeHtml(param.name))}: ${dyeGreen(escapeHtml(param.desc))}`;
     });
 
     /** 每条参数说明转换成模板片段后拼接。 */
@@ -111,14 +124,14 @@ const createApiHelp = function (func: FunctionDescribe): string {
 
   /** 普通函数展示调用括号和参数；命令型入口只展示可直接执行的名称。 */
   const paramInFunc = func.params
-    ? func.params.map((param) => dyeBlue(param.name)).join(', ')
+    ? func.params.map((param) => dyeBlue(escapeHtml(param.name))).join(', ')
     : '';
   /**
    * commandType 表示控制台属性式命令，因此省略函数调用括号。
    * 无参数且非命令型时 paramInFunc 为空串，仍保留空括号，与真实调用形式一致。
    */
   const funcCall =
-    dyeYellow(func.functionName) + (func.commandType ? '' : `(${paramInFunc})`);
+    dyeYellow(functionName) + (func.commandType ? '' : `(${paramInFunc})`);
 
   /** 将调用示例追加到描述和参数说明之后。 */
   contents.push(funcCall);
@@ -127,7 +140,7 @@ const createApiHelp = function (func: FunctionDescribe): string {
   const content = contents
     .map((content) => replaceHtml(apiLineTemplate, { content }))
     .join('');
-  const checkboxId = `${func.functionName}${Game.time}`;
+  const checkboxId = `${functionName}${Game.time}_${++renderSeq}`;
 
   /**
    * Game.time 参与折叠控件 id，降低多个 tick 的帮助面板发生 DOM 冲突的概率。
@@ -136,6 +149,6 @@ const createApiHelp = function (func: FunctionDescribe): string {
   return replaceHtml(apiContainerTemplate, {
     checkboxId,
     content,
-    title: `${func.title} ${dyeYellow(func.functionName, true)}`,
+    title: `${escapeHtml(func.title)} ${dyeYellow(functionName, true)}`,
   });
 };

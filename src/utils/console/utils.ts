@@ -3,13 +3,17 @@
  *
  * 模块角色：utils/console 的基础文本工具实现，供日志前缀、表单和帮助渲染共用。
  *
- * 主要功能：替换模板占位符、删除换行、生成着色文字和普通链接，以及当前 shard 的房间链接。
+ * 主要功能：替换模板占位符、删除换行、转义外来文本、校验写入脚本的标识符，
+ * 以及生成着色文字、普通链接和当前 shard 的房间链接。
  *
- * 实现过程：replaceHtml 逐键执行全局正则替换，fixRetraction 删除换行字符；着色与链接函数拼接 HTML，
+ * 实现过程：replaceHtml 逐键执行全局正则替换，fixRetraction 删除换行字符；escapeHtml 按字符表
+ * 替换标记字符，assertScriptSafe 用正则拒绝会破坏属性或内联脚本的字符；着色与链接函数拼接 HTML，
  * createRoomLink 调用时读取 Game.shard.name，再委托 createLink 生成链接。
  *
  * 技术要点：没有结果缓存或日志输出；除房间链接需读取 Game 外，结果由传入参数决定。
- * 文本未做 HTML 转义，替换键与值还遵循正则及 String.replace 的规则，调用方需按模板约定提供内容。
+ * replaceHtml 的键按字面量匹配、值按字面量插入（`$` 模式不生效），但不做 HTML 转义：
+ * 控制台按 HTML 渲染输出并执行内联事件处理器，外来文本必须先经 escapeHtml，
+ * 会进入属性或脚本的标识符必须先经 assertScriptSafe。信任边界见 docs/design/utils/console.md。
  */
 /**
  * 占位符名称到替换文本的映射。
@@ -65,6 +69,68 @@ export const replaceHtml = function (
  */
 export const fixRetraction = (html: string): string => {
   return html.replace(/\n/g, '');
+};
+
+/**
+ * HTML 标记字符 → 实体。用对照表而不是链式 replace：`&` 必须与其它字符在同一趟替换中
+ * 处理，否则先替换 `&` 会把后续实体里的 `&` 再转义一次（`<` → `&amp;lt;`）。
+ *
+ * 除了常规的 `& < > " '`，这里还转义花括号：replaceHtml 逐键替换且结果会参与后续键的
+ * 替换，文本中出现 `{content}` 这类占位符时会被下一个键的值顶替。转义为实体后，浏览器
+ * 仍按 `{`、`}` 渲染，但不再与占位符语法碰撞。
+ */
+const HTML_ESCAPES: { [char: string]: string } = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+  '{': '&#123;',
+  '}': '&#125;',
+};
+
+/**
+ * 把外来文本转义为纯文本，供写入元素内容或属性值。
+ *
+ * Screeps 控制台以 HTML 渲染日志并执行内联事件处理器，因此其他玩家可以控制的字符串
+ * （敌方 creep 名称、控制器签名、公开的 saying，以及拼进异常消息的同类文本）在进入
+ * 控制台输出前必须经过这里，否则可能在浏览器会话中执行脚本。
+ *
+ * 只做一次正则替换，成本与文本长度线性相关；不改变非标记字符，也不处理 URL 语义
+ * （链接地址的可信性由调用方保证）。
+ *
+ * @param text 外来文本
+ * @returns 可安全写入元素内容或带引号属性的文本
+ */
+export const escapeHtml = (text: string): string =>
+  text.replace(/[&<>"'{}]/g, (char) => HTML_ESCAPES[char]);
+
+/**
+ * 标识符禁用字符：破坏属性或内联脚本的标记字符、引号、转义符、花括号与控制字符。
+ * 控制字符（含换行）会截断属性或让内联脚本出现新语句，因此一并拒绝。
+ */
+const UNSAFE_TOKEN = /[<&"'`\\{}\u0000-\u001f\u007f]/;
+
+/**
+ * 会被写进属性与内联脚本的标识符（表单名、字段名、命令、帮助的函数名）的字符白名单校验。
+ *
+ * 为什么不转义而是拒绝：这些值同时出现在两种上下文里，例如表单名既在 `name="…"` 属性中，
+ * 又在 `document.forms['…']` 这个位于属性内部的 JS 字符串里。跨上下文转义需要先做 JS
+ * 字符串转义再做 HTML 属性转义，顺序错一次就会留下注入点；而这些值本来就只需要标识符，
+ * 直接拒绝可疑字符更可靠，也让错误在渲染时立刻暴露。
+ *
+ * 拒绝的内容：`< & " ' 反引号 \ { }` 与控制字符。其中 `{` 同时挡住模板字符串的 `${`
+ * 与 replaceHtml 的占位符语法。允许空格与非 ASCII 文本，因此中文表单名仍可使用。
+ *
+ * @param kind 出错信息中的用途名称
+ * @param value 待校验的文本
+ * @returns 原值，便于在表达式中串联使用
+ */
+export const assertScriptSafe = (kind: string, value: string): string => {
+  if (typeof value !== 'string' || value === '' || UNSAFE_TOKEN.test(value)) {
+    throw new Error(`Unsafe ${kind}: ${JSON.stringify(value)}`);
+  }
+  return value;
 };
 
 /**

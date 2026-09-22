@@ -6,7 +6,10 @@
   主要功能：定义表单外层、select、option、input、checkbox、radio 和字段容器七个片段。
 
   实现过程：createForm 按双分号分隔符及固定顺序拆分片段，替换花括号占位符；
-  按钮点击后读取字段值，收集多选值为数组，将数据序列化并通过 Console.sendCommand 调用传入命令。
+  按钮点击后读取字段值，将数据序列化并通过 Console.sendCommand 调用传入命令。
+  取值先把同名控件统一成数组：复选框收集全部选中项，单选框取选中项（未选中为空串），
+  其余控件取自身值。不能只在 RadioNodeList 分支处理选中态——同名控件只有一个时，
+  按名取值得到的是元素本身，而 checkbox 元素的 value 与是否选中无关。
 
   技术要点：片段顺序须与渲染器解构顺序一致，表单名同时用于 DOM 查询。
   构建时 HTML 注释被移除；最终输出会删掉换行，内嵌脚本必须显式写分号并避免单行注释。
@@ -23,12 +26,19 @@
             const form = document.forms['{formName}'];
             let formDatas = {};
             [{elementNames}].map(eleName => {
-                /* 如果是复选框的话需要特殊处理下 */
-                if (form[eleName] instanceof RadioNodeList && form[eleName][0].type === 'checkbox') {
-                    formDatas[eleName] = [];
-                    form[eleName].forEach(el => el.checked && formDatas[eleName].push(el.value));
+                /* 同名控件只有一个时按名取值得到元素本身，多个时才是 RadioNodeList；先统一成数组再按类型取值 */
+                const field = form[eleName];
+                const list = field instanceof RadioNodeList ? Array.from(field) : [field];
+                const type = list[0].type;
+                /* 复选框收集全部选中项；单选框取选中项，没有选中时为空串；其余控件取自身值 */
+                if (type === 'checkbox') {
+                    formDatas[eleName] = list.filter(el => el.checked).map(el => el.value);
                 }
-                else formDatas[eleName] = form[eleName].value;
+                else if (type === 'radio') {
+                    const checked = list.filter(el => el.checked)[0];
+                    formDatas[eleName] = checked ? checked.value : '';
+                }
+                else formDatas[eleName] = field.value;
             });
 
             /* 将表单数据格式化为 JSON 对象在控制台发给指定的命令 */

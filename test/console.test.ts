@@ -16,10 +16,12 @@
  * 与 replaceHtml + fixRetraction，最后只做语法解析（`new Function` 不执行脚本，因此
  * document/angular 等浏览器对象不会真的被访问）。
  *
- * 渲染器冒烟测试：createForm、createHelp 经 test/support/htmlTransform.cjs 导入模板，
+ * 渲染器测试：createForm、createHelp 经 test/support/htmlTransform.cjs 导入模板，
  * 两者都读取 Game.time 生成 DOM 名称，因此用例在 beforeEach 中注入只含 time 的 Game。
- * 这些用例只断言结构（单行、控件与字段、占位符全部替换、按钮脚本可解析、调用形式），
- * 输入全部是不含 HTML 特殊字符的普通文本：是否转义属于尚未决定的 A11，不在此锁定。
+ * 除结构断言（单行、控件与字段、占位符全部替换、按钮脚本可解析、调用形式）外，还覆盖
+ * A11 的信任边界：文本与属性按 HTML 转义、标识符不合法时抛错、同 tick 重复渲染不重名；
+ * 以及 G09：按钮脚本在单个 checkbox/radio 上也按选中态取值。按钮脚本在 Node 中用
+ * document/RadioNodeList/angular 桩执行，不需要浏览器依赖。
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -200,9 +202,10 @@ describe('createForm', () => {
 
     // 控制台按行拆分输出，渲染结果必须是单行。
     expect(html.includes('\n')).toBe(false);
-    // 表单名拼接 Game.time，同一名称同时用于 form 属性与按钮脚本的 DOM 查询。
-    expect(html).toContain('<form name="demo123">');
-    expect(html).toContain("document.forms['demo123']");
+    // 表单名由名称、Game.time 与渲染序号组成，同一名称同时用于 form 属性与按钮脚本的查询。
+    const formName = html.match(/<form name="(demo123_\d+)">/)?.[1];
+    expect(formName).toBeDefined();
+    expect(html).toContain(`document.forms['${formName}']`);
     // 字段名按声明顺序进入按钮脚本的数组字面量。
     expect(html).toContain(
       "['myInput','mySelect','myCheckbox','myRadio'].map("
@@ -249,7 +252,7 @@ describe('createForm', () => {
     const html = createForm('empty', [], { content: 'Go', command: 'run' });
     const script = extractButtonScript(html);
 
-    expect(html).toContain('<form name="empty123">');
+    expect(html).toMatch(/<form name="empty123_\d+">/);
     expect(script).toContain('[].map(');
     expect(() => new Function(script)).not.toThrow();
   });
@@ -294,9 +297,10 @@ describe('createHelp', () => {
     );
     expect(html).toContain(dyeGreen('ModuleA intro'));
 
-    // 折叠控件的 id 由函数名与 Game.time 组成，label 与 input 共用。
-    for (const id of ['doWork123', 'status123']) {
-      expect(html).toContain(`for="${id}"`);
+    // 折叠控件的 id 由函数名、Game.time 与渲染序号组成，label 与 input 共用同一个值。
+    for (const name of ['doWork', 'status']) {
+      const id = html.match(new RegExp(`for="(${name}123_\\d+)"`))?.[1];
+      expect(id).toBeDefined();
       expect(html).toContain(`id="${id}"`);
     }
     expect(html).toContain(`Work ${dyeYellow('doWork', true)}`);
@@ -329,5 +333,250 @@ describe('createHelp', () => {
     });
 
     expect(html).toContain(`${dyeYellow('ping')}()`);
+  });
+});
+
+/**
+ * 用桩在 Node 中执行按钮脚本：浏览器里 `form[name]` 在同名控件只有一个时返回元素本身，
+ * 多个时返回 RadioNodeList，这正是 G09 的根源，因此桩要同时提供这两种形态。
+ */
+class FakeRadioNodeList extends Array<{
+  type: string;
+  value: string;
+  checked?: boolean;
+}> {}
+
+const radioNodeList = (
+  ...items: { type: string; value: string; checked?: boolean }[]
+): FakeRadioNodeList => {
+  const list = new FakeRadioNodeList();
+  list.push(...items);
+  return list;
+};
+
+/** 执行表单按钮的 onclick 脚本，返回它最终交给控制台的命令文本。 */
+const runButtonScript = (
+  html: string,
+  fields: { [name: string]: unknown }
+): string => {
+  const script = extractButtonScript(html);
+  const formName = html.match(/<form name="([^"]+)">/)![1];
+  let sent = '';
+  const angular = {
+    element: () => ({
+      injector: () => ({
+        get: () => ({
+          sendCommand: (text: string) => {
+            sent = text;
+          },
+        }),
+      }),
+    }),
+  };
+  const document = { forms: { [formName]: fields }, body: {} };
+  new Function('document', 'RadioNodeList', 'angular', script)(
+    document,
+    FakeRadioNodeList,
+    angular
+  );
+  return sent;
+};
+
+/** 取出渲染结果中的表单 DOM 名称。 */
+const formNameOf = (html: string): string =>
+  html.match(/<form name="([^"]+)">/)![1];
+
+describe('console form button script', () => {
+  beforeEach(() => {
+    (global as any).Game = { time: 123 };
+  });
+
+  afterEach(() => {
+    delete (global as any).Game;
+  });
+
+  const html = () =>
+    createForm(
+      'pick',
+      [
+        { name: 'text', label: 'T', type: 'input' },
+        {
+          name: 'flags',
+          label: 'F',
+          type: 'checkbox',
+          options: [
+            { value: 'a', label: 'A' },
+            { value: 'b', label: 'B' },
+          ],
+        },
+        {
+          name: 'mode',
+          label: 'M',
+          type: 'radio',
+          options: [
+            { value: 'x', label: 'X' },
+            { value: 'y', label: 'Y' },
+          ],
+        },
+      ],
+      { content: 'Submit', command: 'cmd' }
+    );
+
+  it('collects grouped checkbox and radio values by checked state', () => {
+    const sent = runButtonScript(html(), {
+      text: { type: 'text', value: 'hello' },
+      flags: radioNodeList(
+        { type: 'checkbox', value: 'a', checked: false },
+        { type: 'checkbox', value: 'b', checked: true }
+      ),
+      mode: radioNodeList(
+        { type: 'radio', value: 'x', checked: false },
+        { type: 'radio', value: 'y', checked: true }
+      ),
+    });
+
+    expect(sent).toBe('(cmd)({"text":"hello","flags":["b"],"mode":"y"})');
+  });
+
+  /** G09：单个选项时 form[name] 返回元素本身，旧实现走 .value 分支，未勾选也会提交值。 */
+  it('respects the checked state when a group has a single option', () => {
+    const single = createForm(
+      'one',
+      [
+        {
+          name: 'flag',
+          label: 'F',
+          type: 'checkbox',
+          options: [{ value: 'on', label: 'On' }],
+        },
+        {
+          name: 'mode',
+          label: 'M',
+          type: 'radio',
+          options: [{ value: 'x', label: 'X' }],
+        },
+      ],
+      { content: 'Submit', command: 'cmd' }
+    );
+
+    expect(
+      runButtonScript(single, {
+        flag: { type: 'checkbox', value: 'on', checked: false },
+        mode: { type: 'radio', value: 'x', checked: false },
+      })
+    ).toBe('(cmd)({"flag":[],"mode":""})');
+
+    expect(
+      runButtonScript(single, {
+        flag: { type: 'checkbox', value: 'on', checked: true },
+        mode: { type: 'radio', value: 'x', checked: true },
+      })
+    ).toBe('(cmd)({"flag":["on"],"mode":"x"})');
+  });
+});
+
+/** A11：控制台按 HTML 渲染并执行内联事件处理器，外来文本必须转义、标识符必须受限。 */
+describe('console trust boundary', () => {
+  beforeEach(() => {
+    (global as any).Game = { time: 123 };
+  });
+
+  afterEach(() => {
+    delete (global as any).Game;
+  });
+
+  it('escapes form text and attribute values', () => {
+    const html = createForm(
+      'demo',
+      [
+        {
+          name: 'note',
+          label: '<img src=x onerror=alert(1)>',
+          type: 'input',
+          placeholder: 'a"b',
+        },
+        {
+          name: 'pick',
+          label: 'L',
+          type: 'select',
+          options: [{ value: '<v>', label: '&amp' }],
+        },
+      ],
+      { content: '<b>go</b>', command: 'cmd' }
+    );
+
+    expect(html).not.toContain('<img');
+    expect(html).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    expect(html).toContain('placeholder="a&quot;b"');
+    expect(html).toContain('<option value="&lt;v&gt;">&amp;amp</option>');
+    expect(html).toContain('>&lt;b&gt;go&lt;/b&gt;</button>');
+  });
+
+  /** replaceHtml 逐键替换且结果参与后续替换：文本中的占位符必须先失效。 */
+  it('keeps placeholder-like text out of the replacement cascade', () => {
+    const html = createForm(
+      'demo',
+      [{ name: 'note', label: '{content}', type: 'input' }],
+      { content: 'go', command: 'cmd' }
+    );
+
+    expect(html).toContain('<span>&#123;content&#125;</span>');
+    expect(html).not.toContain('<span><input');
+  });
+
+  it('rejects identifiers that would break the attribute or the inline script', () => {
+    const button = { content: 'go', command: 'cmd' };
+    expect(() => createForm("de'mo", [], button)).toThrow(/Unsafe form name/);
+    expect(() =>
+      createForm('demo', [{ name: 'a"b', label: 'L', type: 'input' }], button)
+    ).toThrow(/Unsafe field name/);
+    expect(() =>
+      createForm('demo', [], { content: 'go', command: 'send(`x`)' })
+    ).toThrow(/Unsafe command/);
+  });
+
+  it('escapes help text and rejects unsafe function names', () => {
+    const html = createHelp({
+      name: '<b>M</b>',
+      describe: 'a&b',
+      api: [
+        {
+          title: '<t>',
+          functionName: 'ok',
+          params: [{ name: '<p>', desc: '"d"' }],
+        },
+      ],
+    });
+
+    expect(html).not.toContain('<b>M</b>');
+    expect(html).toContain('&lt;b&gt;M&lt;/b&gt;');
+    expect(html).toContain('a&amp;b');
+    expect(html).toContain('&lt;t&gt;');
+    expect(html).toContain('&lt;p&gt;');
+    expect(html).toContain('&quot;d&quot;');
+
+    expect(() =>
+      createHelp({
+        name: 'M',
+        describe: 'd',
+        api: [{ title: 't', functionName: "a'b" }],
+      })
+    ).toThrow(/Unsafe function name/);
+  });
+
+  it('keeps dom names unique across renders in the same tick', () => {
+    const button = { content: 'go', command: 'cmd' };
+    expect(formNameOf(createForm('dup', [], button))).not.toBe(
+      formNameOf(createForm('dup', [], button))
+    );
+
+    const module = {
+      name: 'M',
+      describe: 'd',
+      api: [{ title: 't', functionName: 'same' }],
+    };
+    const first = createHelp(module).match(/for="([^"]+)"/)![1];
+    const second = createHelp(module).match(/for="([^"]+)"/)![1];
+    expect(first).not.toBe(second);
   });
 });

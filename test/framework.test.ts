@@ -748,6 +748,24 @@ describe('ErrorMapper', () => {
     expect(load).toHaveBeenCalledTimes(1);
   });
 
+  /** A06：堆栈同时是映射缓存的键，公开入口必须和 capture 一样限长，否则缓存按输入长度增长。 */
+  it('truncates oversized stacks at the public mapStack entry', () => {
+    const mapper = createErrorMapper(createLogging(), {
+      loadSourceMap: () => ({
+        version: 3,
+        names: [],
+        sources: ['src/example.ts'],
+        mappings: 'AAAA',
+      }),
+      report: jest.fn(),
+    });
+
+    const mapped = mapper.mapStack('x'.repeat(20000));
+    expect(mapped.length).toBe(16384);
+    // 截断发生在查缓存之前：同一条超长堆栈重复映射仍命中同一个缓存项。
+    expect(mapper.mapStack('x'.repeat(30000))).toBe(mapped);
+  });
+
   /** 加载 map 与上报日志都抛错时，capture 仍要返回原始失败信息；错误对象的 toString 抛错也不能让 capture 本身抛出。 */
   it('preserves business failure if loading, reporting or string conversion fails', () => {
     const mapper = createErrorMapper(createLogging(), {
@@ -1342,5 +1360,46 @@ describe('Framework memory integration', () => {
     const failures = h.framework.getStatus().failures;
     expect(failures.length).toBeGreaterThan(0);
     expect(failures[0].message).toMatch(/MemoryManager is not assembled/);
+  });
+});
+
+/** G03：服务对象属于提供者的某次激活，使用者的激活必须包含在其中。 */
+describe('Framework service activation', () => {
+  it('releases requires consumers when a provider instance is replaced in the same batch', () => {
+    let providerSetups = 0;
+    const makeProvider = (label: string): LeviathanPlugin => ({
+      manifest: { id: 'p', version: 1, provides: ['svc'] },
+      setup(ctx) {
+        providerSetups++;
+        ctx.services.provide('svc', { label });
+      },
+    });
+    let consumerSetups = 0;
+    let cached: { label: string } | undefined;
+    const seen: string[] = [];
+    const consumer: LeviathanPlugin = {
+      manifest: { id: 'c', version: 1, requires: ['p'] },
+      setup(ctx) {
+        consumerSetups++;
+        cached = ctx.services.get<{ label: string }>('svc');
+      },
+      onTickExecute() {
+        seen.push(cached!.label);
+      },
+    };
+
+    const h = harness([makeProvider('old'), consumer]);
+    h.next();
+    // 同一批命令内替换提供者：提供者仍在启用集合中，级联只能来自“实例被替换”的判定。
+    h.framework.unregister('p');
+    h.framework.register(makeProvider('new'));
+    h.next();
+    h.next();
+
+    expect(providerSetups).toBe(2);
+    expect(consumerSetups).toBe(2);
+    // 替换后使用者立刻改用新实例，不会继续持有已释放的服务对象。
+    expect(seen).toEqual(['old', 'new', 'new']);
+    expect(h.framework.getStatus().failures).toEqual([]);
   });
 });

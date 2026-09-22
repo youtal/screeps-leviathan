@@ -8,12 +8,20 @@
  * 实现过程：capture 捕获异常并整理归属与堆栈；mapStack 首次使用时加载 source map，
  * 借助 @jridgewell/trace-mapping 查询 main/main.js 的位置，再交给报告回调或注入的日志器。
  *
- * 技术要点：拒绝异步返回；捕获入口将消息和堆栈各截到 16KB，映射缓存最多保留 64 条，按插入顺序淘汰。
+ * 技术要点：拒绝异步返回；捕获入口与 mapStack 都把文本截到 16KB，映射缓存最多保留 64 条，按插入顺序淘汰。
  * 加载每实例只尝试一次，映射或报告故障不覆盖原始错误；解析器和缓存跨 tick 复用，global reset 后重建。
  * 默认日志出口按（插件、阶段）去重：同一消息连续失败只记录一次，该插件在该阶段成功一次后重置；
  * 注入的 report 回调不去重，每次故障都会收到。
  */
 import { TraceMap, originalPositionFor } from '@jridgewell/trace-mapping';
+
+/**
+ * 单条诊断文本的长度上限（UTF-16 码元）。
+ *
+ * 堆栈同时用作映射缓存的键：超长文本会放大比较、映射与缓存占用，而定位插件与阶段并不需要
+ * 完整文本。capture 与公开的 mapStack 使用同一上限，避免绕过捕获直接调用时失去这层约束。
+ */
+const MAX_DIAGNOSTIC_LENGTH = 16384;
 import type {
   ExecutionResult,
   LoggerFactory,
@@ -101,7 +109,15 @@ export const createErrorMapper = (
    * 正常命中仅需 Map 查询；未命中需扫描文本并逐帧查询 source map。
    * capture 会将输入截断到 16KB；直接调用此方法时调用者自行控制长度。
    */
-  const mapStack = (stack: string): string => {
+  const mapStack = (input: string): string => {
+    /**
+     * 公开入口同样限长：调用方可以绕过 capture 直接传入任意文本，不截断会让 64 条缓存
+     * 按输入长度无界增长（A06）。截断发生在查缓存之前，键与返回值因此保持一致。
+     */
+    const stack =
+      input.length > MAX_DIAGNOSTIC_LENGTH
+        ? input.slice(0, MAX_DIAGNOSTIC_LENGTH)
+        : input;
     // 非空断言：has 已保证键存在，但 TypeScript 不会跨两次 Map 调用保持收窄结论。
     if (cache.has(stack)) return cache.get(stack)!;
     try {
@@ -170,11 +186,11 @@ export const createErrorMapper = (
       let message = 'Unprintable thrown value';
       let stack = message;
       try {
-        // 16KB 是诊断成本上限：堆栈同时用作映射缓存键，过长文本会放大比较与映射开销。
-        message = String(error).slice(0, 16384);
+        // 与 mapStack 共用 MAX_DIAGNOSTIC_LENGTH：堆栈同时是映射缓存键，过长文本会放大开销。
+        message = String(error).slice(0, MAX_DIAGNOSTIC_LENGTH);
         stack = (
           error instanceof Error ? (error.stack ?? message) : message
-        ).slice(0, 16384);
+        ).slice(0, MAX_DIAGNOSTIC_LENGTH);
       } catch {
         /* 恶意或损坏的 toString/getter 不能击穿故障边界。 */
       }

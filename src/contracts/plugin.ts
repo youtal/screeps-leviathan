@@ -17,7 +17,11 @@ import type { PluginFailure } from './errorMapper';
 import type { ApplyMemoryAccessor } from './memory';
 /** 注册描述；依赖字段引用插件 ID，provides 字段声明服务名，两者并非同一命名空间。 */
 export interface PluginManifest {
-  /** 插件和诊断的归属键；注册后保持稳定。 */
+  /**
+   * 插件和诊断的归属键；注册后保持稳定。
+   * 健康记录与 Profiler 包装器按 id 建表并在实例存续期间保留，因此 id 必须是有限的固定
+   * 集合，不能按房间、任务等动态数据生成。
+   */
   id: string;
   /** 正整数插件协议版本；不触发持久化迁移。 */
   version: number;
@@ -48,8 +52,9 @@ export interface PluginContext extends ModuleContext {
   readonly services: {
     /**
      * T 由使用者声明，运行时只校验服务归属与可用性，不验证 T 的结构。
-     * 应在使用时调用，不在 setup 中缓存结果：optional 依赖的提供者重启、或同一批命令中
-     * 替换同 id 的提供者时，使用者不会重新 setup，缓存的会是已释放的旧实例。
+     * 应在使用时调用，不在 setup 中缓存结果：optional 依赖的提供者重启时使用者不会重新
+     * setup，缓存的会是已释放的旧实例。requires 的使用者会随提供者停用、熔断、卸载或被
+     * 替换而重新 setup，但同样按使用时读取，以免依赖这一时序细节。
      */
     get<T>(name: string): T;
     /** 仅在当前插件 setup 中发布 manifest.provides 声明的服务；事件回调中调用会被拒绝。 */

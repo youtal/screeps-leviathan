@@ -399,9 +399,30 @@ export const createFramework = (options: FrameworkOptions): Framework => {
         if (plugin.manifest.critical && health(plugin.manifest.id).circuitOpen)
           safeMode = true;
       }
-      for (const id of [...initialized.keys()].reverse()) {
+      /**
+       * 本 tick 结束激活的插件：不在启用集合中，或注册表中的实例已被替换（同一批命令里
+       * 先 unregister 再 register 同一个 id）。
+       *
+       * 替换不改变启用集合，上面按 enabled 做的级联挂起覆盖不到它；但替换同样会释放提供者
+       * 的激活实例，使用者在 setup 中取得的服务对象随之失效（订阅已取消、数据不再更新）。
+       * 这里按 requires 逐级补齐，使“使用者的激活包含在提供者的激活之内”这条 requires 语义
+       * 在替换路径上同样成立。ordered 是拓扑序（提供者在前），一次正向遍历即可传递到多级
+       * 使用者。optional 不参与：可选依赖本就允许提供者缺席，使用者按“使用时读取服务”的
+       * 规则自行处理，不因提供者重启而重建。
+       */
+      const releasing = new Set<string>();
+      for (const id of initialized.keys()) {
         if (!enabled.has(id) || byId.get(id) !== initialized.get(id)?.plugin)
-          dispose(id);
+          releasing.add(id);
+      }
+      for (const { plugin } of ordered) {
+        const id = plugin.manifest.id;
+        if (!initialized.has(id) || releasing.has(id)) continue;
+        if ((plugin.manifest.requires ?? []).some((dep) => releasing.has(dep)))
+          releasing.add(id);
+      }
+      for (const id of [...initialized.keys()].reverse()) {
+        if (releasing.has(id)) dispose(id);
       }
       for (const { plugin } of ordered) {
         if (safeMode) break;

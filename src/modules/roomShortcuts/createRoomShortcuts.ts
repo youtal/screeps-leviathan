@@ -9,6 +9,8 @@
  * 还原对象。建造事件补入 ID，拆除事件核验废墟后移除 ID，无法核验时让整个房间索引失效。
  *
  * 技术要点：只跨 tick 保存 ID 和建立时间，不保存游戏对象；失去视野会清理索引，租期到后按查询重建。
+ * 定期清扫按租约淘汰不再被查询的房间索引与无视野告警标记，因此容量随“最近一个租约内查询过的
+ * 房间数”收敛，不另设上限。
  * 单对象查询缺失返回 undefined，列表查询返回数组；工厂创建时订阅事件，global reset 后需重新创建。
  * 缓存不写持久存储，放入 Framework 插件时由框架管理订阅释放。
  */
@@ -30,15 +32,21 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
   /** Runtime 提供共享总线；env 提供可替换的 Game 查询和模块日志。 */
   const { bus } = opt;
   const { getGame, getRoom, getObjectById, log } = opt.env;
-  const { forceReInit = false, cacheLeaseTicks = 5000 } = opt;
+  const {
+    forceReInit = false,
+    cacheLeaseTicks = 5000,
+    sweepIntervalTicks = 500,
+  } = opt;
   /**
-   * 租约长度归一化：默认 5000 tick，表示“缓存最多陈旧这么久”。
-   * NaN/Infinity/0/负数/小数都会破坏 `time - initializedAt >= lease` 的比较语义
-   * （比较恒为 false 将永不刷新，反之则每 tick 重扫），因此统一收敛为不小于 1 的整数。
+   * tick 长度归一化：NaN/Infinity/0/负数/小数都会破坏 `now - 起点 >= 长度` 的比较语义
+   * （比较恒为 false 会让判定永不触发，反之则每 tick 触发），统一收敛为不小于 1 的整数。
    */
-  const normalizedCacheLeaseTicks = Number.isFinite(cacheLeaseTicks)
-    ? Math.max(1, Math.floor(cacheLeaseTicks))
-    : 5000;
+  const normalizeTicks = (value: number, fallback: number): number =>
+    Number.isFinite(value) ? Math.max(1, Math.floor(value)) : fallback;
+  /** 租约长度：缓存最多陈旧这么久，同时也是清扫的淘汰门限。 */
+  const normalizedCacheLeaseTicks = normalizeTicks(cacheLeaseTicks, 5000);
+  /** 清扫间隔：每隔这么多 tick 检查一次全部房间，回收已超过租约的索引与告警标记。 */
+  const normalizedSweepIntervalTicks = normalizeTicks(sweepIntervalTicks, 500);
 
   /**
    * 三个对象以 roomName 使用同一索引：初始化标记控制快速判断，时间戳用于
@@ -52,12 +60,15 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
   const initializedAt: { [roomName: string]: number } = {};
   const shortcutsCache: ShortcutsCache = {};
   /**
-   * 已就“失去视野”告警过的房间。首次无视野调用记录一条 warn，之后同一房间的
-   * 重复调用静默返回空值，直到该房间再次有视野时清除标记，下一次失去视野会重新告警。
+   * 已就“失去视野”告警过的房间 → 最近一次无视野查询的 tick。
+   *
+   * 首次无视野调用记录一条 warn，之后同一房间的重复调用静默返回空值，直到该房间再次
+   * 有视野时清除标记，下一次失去视野会重新告警。保存 tick 而不是布尔值，是为了让清扫
+   * 能回收长期不再被查询的标记（闲置超过一个租约即删除，该房间之后再被查询时重新告警一次）。
    * 生命周期与上面三个容器相同：只在当前 global 内有效，reset 后最多多告警一次。
    * 目的：循环里查询多个无视野房间时不刷屏，也不反复触发 error 通知策略。
    */
-  const visionWarned: { [roomName: string]: boolean } = {};
+  const visionWarned: { [roomName: string]: number } = {};
 
   const invalidate = (roomName: string): void => {
     /**
@@ -72,6 +83,24 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
     delete initedRooms[roomName];
     delete initializedAt[roomName];
     log.info(`Room ${roomName} shortcuts invalidated.`);
+  };
+
+  /**
+   * 判断房间索引是否仍在租约内，是租约判定与清扫共用的唯一口径。
+   *
+   * 除了正常的“扫描至今不足一个租约”，这里还挡住两类异常起点：起点不是有限数（容器被
+   * 外部写坏），以及起点晚于当前 tick（私服回档使 Game.time 倒退）。两者都按已过期处理，
+   * 让下一次查询重新扫描，而不是让该房间的缓存永远不再刷新。
+   *
+   * @param roomName 房间名
+   * @param now 当前 tick
+   */
+  const isFresh = (roomName: string, now: number): boolean => {
+    if (!initedRooms[roomName]) return false;
+    const at = initializedAt[roomName];
+    return (
+      Number.isFinite(at) && at <= now && now - at < normalizedCacheLeaseTicks
+    );
   };
 
   /**
@@ -93,8 +122,11 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
     /**
      * 双 id 协议用 `ruinId` 找到废墟中的原建筑类型，再用 `structureId` 校验
      * 消息指向同一对象。任何无法验证的情况都整房失效，防止误删其他缓存项。
+     *
+     * 已超过租约的索引不再维护：它不会再被读取（下一次查询必定重扫），继续校验废墟
+     * 只会白白支付一次 getObjectById，并可能把已失效的索引留到清扫时才回收。
      */
-    if (!initedRooms[roomName]) return;
+    if (!isFresh(roomName, getGame().time)) return;
 
     const ruin = getObjectById(ruinId);
     if (!ruin) {
@@ -234,8 +266,10 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
    * 避免整个房间重扫；这条路径每个建成事件只发生一次，远低于 FIND 的成本。
    */
   const updateStructure = (roomName: string, id: Id<Structure>) => {
-    if (!initedRooms[roomName]) {
-      log.info(`Room ${roomName} not initialized, cannot update shortcuts.`);
+    if (!isFresh(roomName, getGame().time)) {
+      log.info(
+        `Room ${roomName} not initialized or expired, skipping incremental update.`
+      );
       return;
     }
 
@@ -295,25 +329,26 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
   ): CachedObject<K> | CachedObject<K>[] | undefined => {
     /** 无视野时缓存无法验证：立即失效，并按查询形态返回空值。 */
     if (!getRoom(roomName)) {
-      if (!visionWarned[roomName]) {
-        visionWarned[roomName] = true;
+      if (visionWarned[roomName] === undefined) {
         log.warn(
           `no visual on Room ${roomName}, structure shortcuts unavailable.`
         );
       }
+      /** 记录最近一次无视野查询的 tick，清扫据此回收长期不再被查询的告警标记。 */
+      visionWarned[roomName] = getGame().time;
       invalidate(roomName);
       return isSingle ? undefined : [];
     }
     delete visionWarned[roomName];
     /**
-     * 租约判断：以完整初始化时刻为起点，差值与 normalizedCacheLeaseTicks 比较。
-     * forceReInit 时短路为 false，让下面的分支统一走“强制刷新”路径。
-     * initializedAt 仅对已初始化房间有效，因此先判断 initedRooms。
+     * 租约判断统一走 isFresh：除了正常到期，异常起点（非有限数、晚于当前 tick）同样
+     * 按到期处理。forceReInit 时短路为 false，让下面的分支统一走“强制刷新”路径。
+     * isFresh 内部已先判断 initedRooms，未初始化的房间不会读到无效起点。
      */
     const leaseExpired =
       !forceReInit &&
       initedRooms[roomName] &&
-      getGame().time - initializedAt[roomName] >= normalizedCacheLeaseTicks;
+      !isFresh(roomName, getGame().time);
 
     /**
      * 缓存缺失、显式强制刷新或租约到期都会进入同一初始化路径。
@@ -361,6 +396,57 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
   };
 
   /**
+   * 上一次清扫的 tick；undefined 表示本 global 还没有清扫过。
+   * 只存在于 heap：global reset 后缓存本身也是空的，不需要补扫。
+   */
+  let lastSweepAt: number | undefined;
+
+  /**
+   * 回收不再被查询的房间索引与无视野告警标记。
+   *
+   * 为什么需要：索引只在被查询时才会重建或删除，只查询过一次的房间会一直留在 heap 中。
+   * 超过租约的索引不会再被读取（下一次查询必定重扫），因此按租约淘汰即可，不另设容量
+   * 上限；heap 占用随之收敛到“最近一个租约内查询过的房间数”。告警标记同理，闲置一个
+   * 租约后回收，该房间之后再被查询时会重新告警一次。
+   *
+   * 调用约定：由 roomShortcuts 插件在自己的 onTickBegin 中调用，耗时与失败都归属本模块。
+   * 未到间隔直接返回 0；首次调用只登记起点（reset 后缓存为空，没有可回收的条目）。
+   * tick 倒退（私服回档）时立即清扫，配合 isFresh 让全部索引重建。
+   * 成本是一次全表数值比较，房间数在数百量级时可以忽略。
+   *
+   * @param tick 当前 tick
+   * @returns 本次删除的房间索引数量
+   */
+  const sweep = (tick: number): number => {
+    if (lastSweepAt === undefined) {
+      lastSweepAt = tick;
+      return 0;
+    }
+    const elapsed = tick - lastSweepAt;
+    if (elapsed >= 0 && elapsed < normalizedSweepIntervalTicks) return 0;
+    lastSweepAt = tick;
+
+    let removed = 0;
+    /** Object.keys 先取键快照，循环内删除不影响本次遍历。 */
+    for (const roomName of Object.keys(initedRooms)) {
+      if (isFresh(roomName, tick)) continue;
+      invalidate(roomName);
+      removed++;
+    }
+    for (const roomName of Object.keys(visionWarned)) {
+      const idle = tick - visionWarned[roomName];
+      if (idle >= 0 && idle < normalizedCacheLeaseTicks) continue;
+      delete visionWarned[roomName];
+    }
+    if (removed > 0) {
+      log.info(
+        () => `Swept ${removed} expired room shortcuts at tick ${tick}.`
+      );
+    }
+    return removed;
+  };
+
+  /**
    * 模块是全局缓存管理器，因此仅在创建时各订阅一次全局建筑事件；事件中的
    * roomName 决定具体更新哪个房间，避免为每个已访问房间重复注册监听器。
    *
@@ -391,6 +477,11 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
    * 这些函数不增加缓存维度，同一房间同一类别的多次调用共享同一份 id 数组。
    */
   return {
+    /**
+     * 缓存回收入口，由 roomShortcuts 插件每 tick 调用；未到间隔时是一次比较。
+     * 业务模块不需要调用它，查询接口自身已经按租约刷新。
+     */
+    sweep,
     getSpawn: (roomName: string) =>
       createGetter(STRUCTURE_SPAWN, roomName) as StructureSpawn[],
     getExtension: (roomName: string) =>

@@ -50,7 +50,8 @@ export interface HasWrap {
  * 这里没有暴露内部 memory accessor，调用方只能通过这些受控方法操作统计器。
  *
  * wrap 复用 runtime 的 HasWrap 协议，因此只依赖“能包裹函数”的调用方无需引入完整
- * Profiler 类型；report 的 detailed 参数目前是占位，filter 为空串时输出全量报告。
+ * Profiler 类型；report 的 detailed 为 true 时在每行追加平均自身时间与自身时间占比，
+ * filter 为空串时输出全量报告。
  */
 export interface Profiler extends HasWrap {
   enable(): void;
