@@ -6,7 +6,13 @@
 
 ```ts
 // 文本工具经入口导出（也可从 '@/utils' 导入）。
-import { dyeRed, createRoomLink, replaceHtml, fixRetraction } from '@/utils/console';
+import {
+  dyeRed,
+  createRoomLink,
+  replaceHtml,
+  fixRetraction,
+  escapeHtml,
+} from '@/utils/console';
 // 表单与帮助渲染器尚未经入口导出，从实现文件导入。
 import { createForm } from '@/utils/console/form/createForm';
 import { createHelp } from '@/utils/console/help/createHelp';
@@ -24,6 +30,8 @@ console.log(dyeRed('能量不足', true) + ' ' + createRoomLink('W1N1'));
 | `dyeGreen`、`dyeRed`、`dyeBlue`、`dyeYellow`、`dyeCyan`、`dyeMagenta`、`dyeViolet`、`dyeOrange` | `dyeText` 的固定颜色版本，第二个参数为是否加粗 |
 | `createLink(content, url, newTab = true)` | 返回 `<a>` 链接，默认在新标签页打开 |
 | `createRoomLink(roomName)` | 链接到官方服务器（screeps.com）上当前 shard 的该房间，在当前标签页打开；调用时读取 `Game.shard.name` |
+| `escapeHtml(text)` | 把外来文本转义为纯文本（`& < > " '` 与花括号），供写入元素内容或属性 |
+| `assertScriptSafe(kind, value)` | 校验会写进属性与内联脚本的标识符，不合法时抛错 |
 
 ## 模板工具
 
@@ -61,7 +69,7 @@ const html = createForm(
 console.log(html);
 ```
 
-在输入框填入 W1N1、保持默认选项并勾选“强化”后点击按钮，控制台执行 `(setSpawnConfig)({"room":"W1N1","role":"harvester","flags":["boost"]})`。`command` 必须是在控制台中求值为函数的表达式，例如一个全局函数名。参数对象以字段名为键；checkbox 的值是选中项的数组，其余控件是字符串。
+在输入框填入 W1N1、保持默认选项并勾选“强化”后点击按钮，控制台执行 `(setSpawnConfig)({"room":"W1N1","role":"harvester","flags":["boost"]})`。`command` 必须是在控制台中求值为函数的表达式，例如一个全局函数名。参数对象以字段名为键：checkbox 是选中项的数组（没有勾选时为空数组），radio 是选中项的值（没有选中时为空串），其余控件是字符串。
 
 控件类型为 `input`、`select`、`checkbox`、`radio`；`select`、`checkbox`、`radio` 需要 `options`。
 
@@ -89,10 +97,10 @@ console.log(
 
 ## 注意事项
 
-- **文本不做任何转义**。标签、选项、描述、占位文本会作为 HTML 插入，只传入可信文本；需要显示 `<`、`&` 等字符时由调用方自行转义。
-- 表单名与字段名会进入 HTML 属性和脚本中的单引号字符串，只能使用不含引号、反斜杠和换行的文本。`command` 会进入脚本中的模板字符串，不能含双引号、反引号、反斜杠、换行或 `${`。
-- checkbox 与 radio 至少提供两个选项。只有一个选项时，浏览器不把它当作分组，提交的是该选项的值，与是否选中无关。
-- 表单名与帮助面板的折叠 id 都拼接了 `Game.time`：同一 tick 内打印两个同名表单，或两个同名函数的帮助，会相互干扰。
+- **标签、选项、描述、占位文本、按钮文字由渲染器自动转义**，可以直接传入外来文本。想要在这些位置插入 HTML 是不支持的。
+- **表单名、字段名、`command` 与帮助的 `functionName` 按标识符校验**：不能包含 `< & " ' 反引号 \ { }` 与控制字符（空格和中文可以使用），不合法时渲染直接抛错。`command` 是代码，只能由开发者定义。
+- `dyeText`、`createLink` 系列与 Logger 的日志正文都按 HTML 渲染，**不会**自动转义：拼接敌方 creep 名称、控制器签名等外来文本时，先用 `escapeHtml` 处理。
+- 表单名与帮助面板的折叠 id 由名称、`Game.time` 与渲染序号组成，同一 tick 内重复渲染不会相互干扰。
 - `createForm`、`createHelp` 读取 `Game.time`，`createRoomLink` 读取 `Game.shard.name`；在测试中调用时需要注入相应的 `Game`。
 - 表单按钮依赖游戏网页客户端的内部接口，只能在网页客户端的控制台中使用。
 - 这些工具用于人工交互，不要在每 tick 的热路径中调用。
