@@ -1,6 +1,6 @@
 # 文档总导航
 
-[项目首页](../README.md) · [开发规范](../AGENTS.md) · [设计索引](./design/README.md) · [使用索引](./usage/README.md) · [测试文档](./testing/README.md) · [更新记录](./changelog/README.md) · [审计报告](./audits/README.md) · [设计提案](./proposals/README.md)
+[项目首页](../README.md) · [开发规范](../AGENTS.md) · [设计索引](./design/README.md) · [使用索引](./usage/README.md) · [测试文档](./testing/README.md) · [更新记录](./changelog/README.md) · [审计报告](./audits/README.md)
 
 设计记录设计意图和交付状态；使用说明记录公共能力的调用方法；更新记录保存已完成变更的历史。设计中的 API 示例不表示已可调用，使用时查看对应使用说明。
 
@@ -20,7 +20,7 @@
 | EventBus | [core/eventBus](../src/core/eventBus/) | 独立文档待补充；分类见 Core 架构 | 待补充 |
 | ErrorMapper | [core/errorMapper](../src/core/errorMapper/) | [设计](./design/core/errorMapper.md) | [使用](./usage/core/errorMapper.md) |
 | Logger | [core/logger](../src/core/logger/) | [设计](./design/core/logger.md) | [使用](./usage/core/logger.md) |
-| MemoryManager | [core/memoryManager](../src/core/memoryManager/) | [目标设计（未交付）](./design/core/memoryManager.md) | [使用](./usage/core/memoryManager.md) |
+| MemoryManager | [core/memoryManager](../src/core/memoryManager/) | [设计](./design/core/memoryManager.md) | [使用](./usage/core/memoryManager.md) |
 
 ## 业务模块与应用
 

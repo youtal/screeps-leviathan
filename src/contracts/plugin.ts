@@ -36,8 +36,8 @@ export interface PluginManifest {
 /**
  * 生命周期上下文在激活时创建，跨 tick 复用；tick 动态读取。
  *
- * memory 是框架按 pluginId 绑定好的申请入口：未装配 MemoryManager 时 apply 直接
- * 抛配置错误，而不是返回永远 pending 的句柄；申请成功与否由返回的 Accessor 表达。
+ * memory 是框架按 pluginId 绑定好的申请入口：申请同步完成，成功返回在本 global 内长期
+ * 有效的访问器，失败（配置错误、装载故障、初始化或迁移失败）直接抛错，进入插件错误边界。
  */
 export interface PluginContext extends ModuleContext {
   readonly pluginId: string;
@@ -93,8 +93,11 @@ export interface FrameworkOptions {
 }
 /** 诊断快照不允许修改框架内部状态；tick 在首次 loop 前为 undefined。 */
 export interface FrameworkStatus {
-  /** 主 Memory 最近一次整串写入失败；成功后清空，独立于插件故障和 safeMode。 */
-  memory: { rawWriteError: string | null };
+  /**
+   * Memory 宿主诊断投影：loadError 为装载故障（对应安全模式）；rawWriteError 为最近一次
+   * 整串提交失败，成功后清空，独立于插件故障和 safeMode。
+   */
+  memory: { loadError: string | null; rawWriteError: string | null };
   safeMode: boolean;
   tick: number | undefined;
   failures: PluginFailure[];

@@ -1,2544 +1,1247 @@
 /**
- * 文件摘要：验证 MemoryManager 的申请协议、分配窗口、双后端提交与可恢复迁移。
+ * 文件摘要：验证 MemoryManager 的同步申请、长期访问器、深路径读写、分区片段提交、兼容装载与生命周期恢复。
  *
- * 覆盖模块：`src/core/memoryManager`（createMemoryManager）与其契约
- * `src/contracts/memory.ts`。覆盖边界：
- * 1. 申请语义——重复声明复用、冲突/非法配置抛错、ready 后读写与强制提交；
- * 2. 提交策略——critical 当 tick 写、checkpoint 按首次 dirty 起算、clean tick 不写；
- * 3. 启动窗口——priority 排名只取固定页数、落选者留 Raw、deferStartupWindow 延后封存；
- * 4. Segment 后端——目标页未激活时 pending、写入后回读校验再切换目录、跨 global 恢复；
- * 5. 迁移恢复——journal 在 global reset 之后继续推进且数据不丢；
- * 6. 数据安全——未知 schema 拒绝覆盖、旧 leviathan 一次性导入且不改写、外部根字段保留；
- * 7. 失败语义——写入失败保留 dirty 与诊断、pending 只影响本分区。
+ * 覆盖模块：`src/core/memoryManager` 与契约 `src/contracts/memory.ts`，对应设计 §10 的验收清单：
+ * 1. 申请与身份——多 owner/localId、迟到申请、重复/冲突声明、初始化与业务迁移、失败缓存；
+ * 2. 提交——只编码脏分区、同 tick 合并、clean tick 零工作、失败保留脏集合并合并重试、容量；
+ * 3. 深路径——读取、写入边界、JSON 校验、祖先引用、remove、回调语义与重入；
+ * 4. 收尾校验——needsFullValidation 的置位/保留/清除，非法数据阻断整体写盘；
+ * 5. 兼容——schemaVersion 2/1、旧 leviathan 导入、Segment 身份忽略、历史 payload 保留、dataVersion 0；
+ * 6. 生命周期——tick 校验、重复 begin/end、遗漏 end、硬终止（vm 超时跳过 finally）后的恢复。
  *
- * 替代实现：假平台模拟 RawMemory 的整串读写与 Segment 的"请求激活后下一 tick 可见"，
- * 因此不需要 Screeps 全局对象；用例通过手动推进 tick 精确控制可见性与到期时机。
+ * 替代实现：假平台提供主存储文本、当前 tick 与写入/读取计数，不需要 Screeps 全局对象。
+ * 硬终止用 `vm.runInNewContext` 的 timeout 模拟：V8 终止执行时不运行 catch/finally，
+ * 与引擎 CPU 硬终止后 heap 保留的情形一致。
  *
  * 运行方式：npm test（ts-jest，testEnvironment=node）；不读写真实游戏存储。
  */
+import { runInNewContext } from 'node:vm';
 import {
   createMemoryManager as createCoreMemoryManager,
-  type MemoryManagerOptions,
+  type MemoryManager,
+  type MemoryPlatform,
 } from '@/core/memoryManager';
 import { createLogging } from '@/core/logger';
-import type { MemoryAccessor, DeepReadonly } from '@/contracts/memory';
-import type { LogOptions, LoggerFactory } from '@/contracts/logging';
-import type { MemoryPlatform } from '@/core/memoryManager/types';
+import type { MemoryAccessor, MemoryApplicationOptions } from '@/contracts/memory';
 
-type TestMemoryManagerOptions = Omit<MemoryManagerOptions, 'logging'> & {
-  logging?: LoggerFactory;
-};
-
-/** 测试装配器显式补齐 Logger；被测 MemoryManager 本身不再持有同级模块兜底依赖。 */
-const createMemoryManager = (options: TestMemoryManagerOptions) =>
-  createCoreMemoryManager({
-    ...options,
-    logging: options.logging ?? createLogging(),
-  });
-
-/** 假平台：raw 整串 + 持久化的 Segment 内容 + 一 tick 延迟的可见性。 */
-const createPlatform = () => {
-  let raw = '{}';
-  const content: Record<number, string> = {};
-  let visible: number[] = [];
-  let requested: number[] = [];
-  let failWrite: Error | null = null;
+/** 假平台：整串 raw、可控 tick、写入失败注入与调用计数。 */
+const createPlatform = (initial = '') => {
+  const state = {
+    raw: initial,
+    tick: 1,
+    writes: 0,
+    reads: 0,
+    failWrite: null as Error | null,
+    onWrite: null as (() => void) | null,
+  };
   const platform: MemoryPlatform = {
-    readRaw: () => raw,
+    readRaw: () => {
+      state.reads++;
+      return state.raw;
+    },
     writeRaw: (value) => {
-      if (failWrite) {
-        const error = failWrite;
-        failWrite = null;
-        throw error;
-      }
-      raw = value;
+      state.onWrite?.();
+      if (state.failWrite) throw state.failWrite;
+      state.writes++;
+      state.raw = value;
     },
-    readSegments: () =>
-      Object.fromEntries(visible.map((id) => [id, content[id] ?? ''])),
-    writeSegment: (id, value) => {
-      content[id] = value;
-    },
-    activeSegments: () => [...visible],
-    activateSegments: (ids) => {
-      requested = [...ids];
-    },
+    getTick: () => state.tick,
   };
-  return {
-    platform,
-    raw: () => raw,
-    setRaw: (value: string) => {
-      raw = value;
-    },
-    content: () => content,
-    failNextWrite: (error: Error) => {
-      failWrite = error;
-    },
-    /** 结束当前 tick：本 tick 请求激活的页在下一 tick 可见。 */
-    nextTick: () => {
-      visible = [...requested];
-    },
-    /** 立即清空可见集合，复现"已分配页在本 tick 不可见"的窗口。 */
-    hideSegments: () => {
-      requested = [];
-      visible = [];
-    },
-  };
+  return { platform, state };
 };
 
-/** 组合管理器与 tick 推进；run 回调相当于"插件阶段"，在其中申请与读写。 */
-const createHarness = (
-  options: {
-    segmentIds?: readonly number[];
-    getHostMemory?: () => Record<string, unknown> | undefined;
-    maxStartupDeferrals?: number;
-    maxObservationTicks?: number;
-    logging?: LoggerFactory;
-  } = {}
-) => {
-  const plat = createPlatform();
-  const manager = createMemoryManager({
-    platform: plat.platform,
-    segmentIds: options.segmentIds,
-    getHostMemory: options.getHostMemory,
-    maxStartupDeferrals: options.maxStartupDeferrals,
-    maxObservationTicks: options.maxObservationTicks,
-    logging: options.logging,
-  });
-  let tick = 1;
-  return {
-    plat,
-    manager,
-    tick: () => tick,
-    run: (fn?: (tick: number) => void) => {
-      manager.begin(tick);
-      fn?.(tick);
-      manager.end(tick);
-      plat.nextTick();
-      tick++;
-    },
-    /** 推进到启动窗口封存且所有搬迁结束；用于 Segment 相关断言。 */
-    settle: (max = 12) => {
-      for (let i = 0; i < max; i++) {
-        manager.begin(tick);
-        manager.end(tick);
-        plat.nextTick();
-        tick++;
-        const status = manager.getStatus();
-        if (!status.startupWindowOpen && status.migration === null) return;
-      }
-      throw new Error('migration did not settle');
-    },
-  };
-};
-
-/** 读取主 Memory 里的 MemoryManager 命名空间。 */
-const namespaceOf = (raw: string) => JSON.parse(raw).memoryManager;
-
-/** 断言 access 处于 ready 并返回其数据视图。 */
-const readyData = <M extends object>(accessor: MemoryAccessor<M>): M => {
-  const access = accessor.access();
-  expect(access.status).toBe('ready');
-  if (access.status !== 'ready') throw new Error('unreachable');
-  return access.query() as M;
-};
-
-/** 共享平台的多 global 时间线：run/settle 手动推进 tick，便于模拟 global reset。 */
-const sessions = () => {
-  const plat = createPlatform();
-  let tick = 1;
-  const run = (
-    manager: ReturnType<typeof createMemoryManager>,
-    fn?: () => void
-  ) => {
-    manager.begin(tick);
-    fn?.();
-    manager.end(tick);
-    plat.nextTick();
-    tick++;
-  };
-  const settle = (
-    manager: ReturnType<typeof createMemoryManager>,
-    max = 16
-  ) => {
-    for (let i = 0; i < max; i++) {
-      run(manager);
-      const status = manager.getStatus();
-      if (
-        !status.startupWindowOpen &&
-        status.migration === null &&
-        status.allocations.every((allocation) => allocation.pending === null)
-      )
-        return;
-    }
-    throw new Error('memory manager did not settle');
-  };
-  return { plat, run, settle };
-};
-
-/** 收集日志文本的工厂；levels 缺省时只开 warn/error/report（与项目默认一致）。 */
-const collecting = (levels?: LogOptions) => {
+/** 日志收集器：用于断言告警只出现一次等行为。 */
+const createLogs = () => {
   const lines: string[] = [];
   const logging = createLogging({
-    levels,
-    output: { write: (line) => lines.push(line), notify: () => {} },
+    levels: { debug: true, info: true },
+    output: { write: (line) => lines.push(line), notify: () => undefined },
   });
-  return {
-    logging,
-    lines,
-    text: () => lines.map((line) => line.replace(/<[^>]+>/g, '')).join('\n'),
-  };
+  return { logging, lines };
 };
 
-describe('MemoryManager', () => {
-  it('commits a new critical partition and skips clean ticks', () => {
-    const h = createHarness();
-    let accessor!: MemoryAccessor<{ count: number }>;
+type Plat = ReturnType<typeof createPlatform>;
 
-    h.run(() => {
-      accessor = h.manager.bind('alpha')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ count: 0 }),
-      });
-      const access = accessor.access();
-      if (access.status === 'ready')
-        access.commit((memory) => (memory.count = 5));
+const setup = (initial = '') => {
+  const plat = createPlatform(initial);
+  const logs = createLogs();
+  const manager = createCoreMemoryManager({ logging: logs.logging, platform: plat.platform });
+  /** 开启 tick：设置真实 tick 并 begin。 */
+  const begin = (tick = plat.state.tick) => {
+    plat.state.tick = tick;
+    manager.begin(tick);
+  };
+  const end = () => manager.end(plat.state.tick);
+  /** 完整跑一个 tick：begin → body → end，然后推进 tick。 */
+  const tick = (body: () => void = () => undefined) => {
+    begin();
+    try {
+      body();
+    } finally {
+      end();
+      plat.state.tick++;
+    }
+  };
+  return { plat, logs, manager, begin, end, tick, bind: manager.bind };
+};
+
+/** 读取已写出的命名空间。 */
+const stored = (plat: Plat) => JSON.parse(plat.state.raw);
+const partitionOf = (plat: Plat, owner: string, localId: string) =>
+  stored(plat).memoryManager.partitions[owner][localId];
+
+/** 以当前 raw 模拟 global reset：新管理器、同一平台状态。 */
+const reset = (plat: Plat) => {
+  const logs = createLogs();
+  const manager = createCoreMemoryManager({ logging: logs.logging, platform: plat.platform });
+  return { manager, logs };
+};
+
+interface Counter {
+  count: number;
+  tags?: Record<string, { level: number; note?: string }>;
+  list?: number[];
+  nested?: { deep: { value: number } };
+}
+const counterInit = () => ({ count: 0 }) as Counter;
+const counterOptions: MemoryApplicationOptions<Counter> = {
+  version: 1,
+  initialize: counterInit,
+};
+
+describe('MemoryManager application', () => {
+  it('initializes, persists and restores partitions across a global reset', () => {
+    const t = setup();
+    let accessor!: MemoryAccessor<Counter>;
+    t.tick(() => {
+      accessor = t.bind('alpha')('main', counterOptions);
+      accessor.commit('count', 3);
     });
-
-    const stored = namespaceOf(h.plat.raw()).rawPartitions.alpha.main;
-    expect(stored).toEqual({ dataVersion: 1, payload: { count: 5 } });
-
-    // 没有变化时整串保持原样，说明 clean tick 不产生写入。
-    const before = h.plat.raw();
-    h.run();
-    expect(h.plat.raw()).toBe(before);
-  });
-
-  it('delays checkpoint partitions until the interval elapses', () => {
-    const h = createHarness();
-    let accessor!: MemoryAccessor<{ n: number }>;
-    h.run(() => {
-      accessor = h.manager.bind('beta')('main', {
-        version: 1,
-        layer: 'checkpoint',
-        checkpointInterval: 5,
-        initialize: () => ({ n: 0 }),
-      });
-    });
-
-    // 初始化带强制提交，首次写入发生在第 1 tick 结束。
-    expect(namespaceOf(h.plat.raw()).rawPartitions.beta.main.payload).toEqual({
-      n: 0,
-    });
-
-    h.run(() => {
-      const access = accessor.access();
-      if (access.status === 'ready') access.commit((memory) => (memory.n = 1));
-    });
-    // dirtySince = 2，interval 5 → 到 tick 6 才到期。
-    h.run();
-    h.run();
-    h.run();
-    expect(namespaceOf(h.plat.raw()).rawPartitions.beta.main.payload).toEqual({
-      n: 0,
-    });
-    h.run();
-    expect(namespaceOf(h.plat.raw()).rawPartitions.beta.main.payload).toEqual({
-      n: 1,
-    });
-  });
-
-  it('reuses identical applications and rejects conflicts or invalid options', () => {
-    const h = createHarness();
-    const initialize = () => ({ n: 0 });
-    h.run(() => {
-      const apply = h.manager.bind('gamma');
-      const first = apply('main', {
-        version: 1,
-        layer: 'critical',
-        initialize,
-      });
-      const second = apply('main', {
-        version: 1,
-        layer: 'critical',
-        initialize,
-      });
-      expect(second).toBe(first);
-
-      expect(() =>
-        apply('main', { version: 2, layer: 'critical', initialize })
-      ).toThrow(/conflicting declaration/);
-      expect(() =>
-        apply('bad id', { version: 1, layer: 'critical', initialize })
-      ).toThrow(/invalid localId/);
-      expect(() =>
-        apply('v0', { version: 0, layer: 'critical', initialize })
-      ).toThrow(/positive integer/);
-      expect(() =>
-        apply('i0', {
-          version: 1,
-          layer: 'checkpoint',
-          checkpointInterval: 0,
-          initialize,
-        })
-      ).toThrow(/positive integer/);
-      expect(() =>
-        apply('ic', {
-          version: 1,
-          layer: 'critical',
-          checkpointInterval: 3,
-          initialize,
-        })
-      ).toThrow(/only valid for checkpoint/);
-      expect(() =>
-        apply('pf', {
-          version: 1,
-          layer: 'critical',
-          priority: Infinity,
-          initialize,
-        })
-      ).toThrow(/finite/);
-    });
-  });
-
-  it('allocates fixed segments by priority and keeps losers on raw memory', () => {
-    const h = createHarness({ segmentIds: [0, 1] });
-    let low!: MemoryAccessor<{ n: number }>;
-    h.run(() => {
-      h.manager.bind('p20')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 20,
-        initialize: () => ({ n: 20 }),
-      });
-      h.manager.bind('p10')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 10,
-        initialize: () => ({ n: 10 }),
-      });
-      low = h.manager.bind('p5')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 5,
-        initialize: () => ({ n: 5 }),
-      });
-    });
-
-    // 窗口封存后进入迁移：写目标页 → 下一 tick 回读校验 → 再切换目录。
-    h.settle();
-
-    const namespace = namespaceOf(h.plat.raw());
-    expect(namespace.allocations.p20.main.backend).toBe('segment');
-    expect(namespace.allocations.p10.main.backend).toBe('segment');
-    expect(namespace.allocations.p20.main.segmentId).not.toBe(
-      namespace.allocations.p10.main.segmentId
-    );
-    expect(namespace.allocations.p5.main).toEqual({
-      backend: 'raw',
-      generation: 0,
-    });
-    // 落选者仍可正常读写，不做惩罚。
-    expect(readyData(low)).toEqual({ n: 5 });
-    // 搬入 Segment 的分区不再占用 Raw 分区表。
-    expect(namespace.rawPartitions.p20).toBeUndefined();
-  });
-
-  it('restores segment data across a new manager instance', () => {
-    const plat = createPlatform();
-    let tick = 1;
-    let accessor!: MemoryAccessor<{ n: number }>;
-    const first = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0, 1],
-    });
-
-    const runWith = (
-      manager: ReturnType<typeof createMemoryManager>,
-      fn?: () => void
-    ) => {
-      manager.begin(tick);
-      fn?.();
-      manager.end(tick);
-      plat.nextTick();
-      tick++;
-    };
-
-    runWith(first, () => {
-      accessor = first.bind('delta')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 0 }),
-      });
-      const access = accessor.access();
-      if (access.status === 'ready') access.commit((memory) => (memory.n = 42));
-    });
-    for (let i = 0; i < 6; i++) runWith(first);
-    expect(namespaceOf(plat.raw()).allocations.delta.main.backend).toBe(
-      'segment'
-    );
-    expect(plat.content()[0]).toContain('"n":42');
-
-    // 新实例（模拟 global reset）从 Segment 恢复，而不是重新初始化。
-    const second = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0, 1],
-    });
-    let restored!: MemoryAccessor<{ n: number }>;
-    runWith(second, () => {
-      restored = second.bind('delta')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: -1 }),
-      });
-      // 页已激活并可见时应当直接 ready。
-      expect(restored.access().status).toBe('ready');
-    });
-    expect(readyData(restored)).toEqual({ n: 42 });
-  });
-
-  it('resumes an interrupted migration after a global reset', () => {
-    const plat = createPlatform();
-    let tick = 1;
-    const first = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
-    });
-    const runWith = (
-      manager: ReturnType<typeof createMemoryManager>,
-      fn?: () => void
-    ) => {
-      manager.begin(tick);
-      fn?.();
-      manager.end(tick);
-      plat.nextTick();
-      tick++;
-    };
-
-    let accessor!: MemoryAccessor<{ n: number }>;
-    runWith(first, () => {
-      accessor = first.bind('epsilon')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 7 }),
-      });
-    });
-    // 观察页需要一 tick，规划搬迁再一 tick；第三次 end 完成 copy 后 journal 停在 verify。
-    runWith(first);
-    runWith(first);
-    const interrupted = namespaceOf(plat.raw());
-    expect(interrupted.allocations.epsilon.main.backend).toBe('raw');
-    expect(interrupted.migration).not.toBeNull();
-    expect(interrupted.migration.phase).toBe('verify');
-
-    // global reset：新实例继续推进同一个 journal。
-    const second = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
-    });
-    let restored!: MemoryAccessor<{ n: number }>;
-    runWith(second, () => {
-      restored = second.bind('epsilon')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: -1 }),
-      });
-    });
-    // verify → switch → cleanup 各一步：cleanup 确认目录落盘后才清空旧页。
-    runWith(second);
-    runWith(second);
-
-    expect(readyData(restored)).toEqual({ n: 7 });
-    expect(namespaceOf(plat.raw()).allocations.epsilon.main.backend).toBe(
-      'segment'
-    );
-    expect(namespaceOf(plat.raw()).migration).toBeNull();
-  });
-
-  it('keeps the startup window open when the framework defers it', () => {
-    const h = createHarness({ segmentIds: [0] });
-    h.run(() => {
-      h.manager.bind('late')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 100,
-        initialize: () => ({ n: 0 }),
-      });
-      h.manager.deferStartupWindow();
-    });
-    expect(h.manager.getStatus().startupWindowOpen).toBe(true);
-
-    h.run();
-    expect(h.manager.getStatus().startupWindowOpen).toBe(false);
-  });
-
-  it('refuses to overwrite an unknown namespace schema', () => {
-    const h = createHarness();
-    h.plat.setRaw(
-      JSON.stringify({
-        memoryManager: {
-          schemaVersion: 99,
-          allocations: {},
-          rawPartitions: {},
-        },
-      })
-    );
-    let accessor!: MemoryAccessor<{ n: number }>;
-    h.run(() => {
-      accessor = h.manager.bind('zeta')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 1 }),
-      });
-    });
-
-    expect(h.manager.getStatus().fault).toMatch(
-      /Unsupported MemoryManager schema/
-    );
-    expect(accessor.access().status).toBe('pending');
-    // 拒绝写入：原始文本保持不变。
-    expect(namespaceOf(h.plat.raw()).schemaVersion).toBe(99);
-  });
-
-  it('imports the legacy leviathan layout once and preserves both namespaces', () => {
-    const h = createHarness();
-    h.plat.setRaw(
-      JSON.stringify({
-        leviathan: {
-          schemaVersion: 1,
-          framework: {
-            pluginVersions: { old: 1 },
-            pluginHealth: {},
-            intentReceipts: [],
-            profiler: {},
-          },
-          plugins: { old: { count: 7 } },
-        },
-        otherTool: { keep: true },
-      })
-    );
-
-    let accessor!: MemoryAccessor<{ count: number }>;
-    h.run(() => {
-      accessor = h.manager.bind('old')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ count: 0 }),
-      });
-      expect(readyData(accessor)).toEqual({ count: 7 });
-      const access = accessor.access();
-      if (access.status === 'ready')
-        access.commit((memory) => (memory.count = 8));
-    });
-
-    const root = JSON.parse(h.plat.raw());
-    expect(root.leviathan.plugins.old).toEqual({ count: 7 });
-    expect(root.otherTool).toEqual({ keep: true });
-    expect(root.memoryManager.rawPartitions.old.main.payload).toEqual({
-      count: 8,
-    });
-  });
-
-  it('merges root fields written by other code in the same global', () => {
-    const host: Record<string, unknown> = { other: { a: 1 } };
-    const h = createHarness({ getHostMemory: () => host });
-    h.plat.setRaw(JSON.stringify({ other: { a: 1 } }));
-
-    const initialize = () => ({ n: 0 });
-    h.run(() => {
-      h.manager.bind('eta')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize,
-      });
-    });
-
-    // 其他代码在本 global 内替换/新增根字段：写回时必须合并而不是覆盖。
-    host.other = { a: 2 };
-    host.added = { b: 1 };
-    h.run(() => {
-      const accessor = h.manager.bind('eta')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize,
-      });
-      const access = accessor.access();
-      if (access.status === 'ready') access.commit((memory) => (memory.n = 1));
-    });
-
-    const root = JSON.parse(h.plat.raw());
-    expect(root.other).toEqual({ a: 2 });
-    expect(root.added).toEqual({ b: 1 });
-  });
-
-  it('keeps partitions dirty when the raw write fails', () => {
-    const h = createHarness();
-    let accessor!: MemoryAccessor<{ n: number }>;
-    h.run(() => {
-      accessor = h.manager.bind('theta')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 0 }),
-      });
-    });
-    const before = h.plat.raw();
-
-    h.plat.failNextWrite(new Error('memory quota'));
-    h.run(() => {
-      const access = accessor.access();
-      if (access.status === 'ready') access.commit((memory) => (memory.n = 3));
-    });
-
-    expect(h.plat.raw()).toBe(before);
-    const status = h.manager.getStatus();
-    expect(status.allocations[0].dirty).toBe(true);
-    expect(status.allocations[0].writeError).toMatch(/memory quota/);
-
-    // 下一 tick 重试成功并清掉 dirty。
-    h.run();
-    expect(namespaceOf(h.plat.raw()).rawPartitions.theta.main.payload).toEqual({
-      n: 3,
-    });
-    expect(h.manager.getStatus().allocations[0].dirty).toBe(false);
-  });
-
-  it('upgrades data versions through migrate and rejects downgrades', () => {
-    const plat = createPlatform();
-    let tick = 1;
-    const first = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
-    });
-    const runWith = (
-      manager: ReturnType<typeof createMemoryManager>,
-      fn?: () => void
-    ) => {
-      manager.begin(tick);
-      fn?.();
-      manager.end(tick);
-      plat.nextTick();
-      tick++;
-    };
-
-    runWith(first, () => {
-      const accessor = first.bind('iota')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ count: 1 }),
-      });
-      const access = accessor.access();
-      if (access.status === 'ready')
-        access.commit((memory) => (memory.count = 2));
-    });
-
-    // 版本 2：提供 migrate，把旧数据搬运到新形状。
-    const second = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
-    });
-    let upgraded!: MemoryAccessor<{ total: number }>;
-    runWith(second, () => {
-      upgraded = second.bind('iota')('main', {
-        version: 2,
-        layer: 'critical',
-        initialize: () => ({ total: 0 }),
-        migrate: (memory) => ({
-          total: (memory as { count: number }).count + 10,
-        }),
-      });
-    });
-    expect(readyData(upgraded)).toEqual({ total: 12 });
-    expect(namespaceOf(plat.raw()).rawPartitions.iota.main.dataVersion).toBe(2);
-
-    // 版本 3：缺少 migrate 时拒绝，并给出诊断。
-    const third = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
-    });
-    let blocked!: MemoryAccessor<{ total: number }>;
-    runWith(third, () => {
-      blocked = third.bind('iota')('main', {
-        version: 3,
-        layer: 'critical',
-        initialize: () => ({ total: 0 }),
-      });
-      expect(blocked.access().status).toBe('pending');
-    });
-    expect(third.getStatus().allocations[0].writeError).toMatch(
-      /missing migrate/
-    );
-  });
-
-  it('rejects oversized segment payloads and keeps the old data', () => {
-    const h = createHarness({ segmentIds: [0] });
-    let accessor!: MemoryAccessor<{ blob: string }>;
-    h.run(() => {
-      accessor = h.manager.bind('big')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ blob: '' }),
-      });
-    });
-    h.settle();
-    expect(namespaceOf(h.plat.raw()).allocations.big.main.backend).toBe(
-      'segment'
-    );
-    const before = h.plat.content()[0];
-
-    // 超过单页容量：拒绝写入、保留旧信封，并把 dirty 留给后续重试或缩容。
-    h.run(() => {
-      const access = accessor.access();
-      if (access.status === 'ready')
-        access.commit((memory) => (memory.blob = 'x'.repeat(100_001)));
-    });
-
-    const status = h.manager.getStatus();
-    expect(status.allocations[0].writeError).toMatch(/exceeds capacity/);
-    expect(status.allocations[0].dirty).toBe(true);
-    expect(h.plat.content()[0]).toBe(before);
-  });
-
-  it('keeps pending limited to the affected partition', () => {
-    const plat = createPlatform();
-    let tick = 1;
-    const runWith = (
-      manager: ReturnType<typeof createMemoryManager>,
-      fn?: () => void
-    ) => {
-      manager.begin(tick);
-      fn?.();
-      manager.end(tick);
-      plat.nextTick();
-      tick++;
-    };
-
-    const first = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
-    });
-    runWith(first, () => {
-      first.bind('seg')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 1 }),
-      });
-      first.bind('plain')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 2 }),
-      });
-    });
-    for (let i = 0; i < 6; i++) runWith(first);
-    expect(namespaceOf(plat.raw()).allocations.seg.main.backend).toBe(
-      'segment'
-    );
-
-    // 新 global 启动瞬间：页不可见，segment 分区 pending，raw 分区照常可用。
-    const second = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
-    });
-    plat.platform.activateSegments([]);
-    plat.nextTick();
-    second.begin(tick);
-    const segment = second.bind('seg')('main', {
-      version: 1,
-      layer: 'critical',
-      priority: 1,
-      initialize: () => ({ n: -1 }),
-    });
-    const plain = second.bind('plain')('main', {
-      version: 1,
-      layer: 'critical',
-      initialize: () => ({ n: -1 }),
-    });
-    expect(segment.access().status).toBe('pending');
-    expect(readyData(plain)).toEqual({ n: 2 });
-    second.end(tick);
-    plat.nextTick();
-    tick++;
-
-    // 下一 tick 页可见后，begin 会自动重试恢复，无需重新申请。
-    second.begin(tick);
-    expect(segment.access().status).toBe('ready');
-    expect(readyData(segment)).toEqual({ n: 1 });
-    second.end(tick);
-  });
-});
-
-/**
- * 评审修复回归：页所有权、ready 句柄时效、安静 tick、代际单调、无模块恢复、
- * 窗口强制封存与精确激活集合。
- */
-describe('MemoryManager review fixes', () => {
-  it('never writes a segment page that holds foreign data', () => {
-    const h = createHarness({ segmentIds: [0, 1] });
-    h.plat.setRaw('{}');
-    h.plat.platform.writeSegment(1, '{"tool":"other"}');
-
-    h.run(() => {
-      h.manager.bind('p1')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 1 }),
-      });
-    });
-    h.settle();
-
-    const namespace = namespaceOf(h.plat.raw());
-    expect(namespace.allocations.p1.main.segmentId).toBe(0);
-    expect(h.plat.content()[1]).toBe('{"tool":"other"}');
-    expect(h.manager.getStatus().reservedSegments).toEqual([
-      { segmentId: 1, reason: 'foreign content' },
-    ]);
-  });
-
-  it('reserves an unclaimed envelope instead of overwriting it', () => {
-    const h = createHarness({ segmentIds: [0, 1] });
-    const orphan = JSON.stringify({
-      schemaVersion: 1,
-      owner: { pluginId: 'ghost', localId: 'main' },
-      generation: 7,
+    expect(partitionOf(t.plat, 'alpha', 'main')).toEqual({
       dataVersion: 1,
-      payload: { n: 9 },
+      payload: { count: 3 },
     });
-    h.plat.platform.writeSegment(0, orphan);
+    // 访问器跨 tick 直接可用，不需要重新 access。
+    t.tick(() => accessor.commit('count', accessor.get('count')! + 1));
+    expect(partitionOf(t.plat, 'alpha', 'main').payload.count).toBe(4);
 
-    h.run(() => {
-      h.manager.bind('p1')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 1 }),
-      });
-    });
-    h.settle();
-
-    expect(namespaceOf(h.plat.raw()).allocations.p1.main.segmentId).toBe(1);
-    expect(h.plat.content()[0]).toBe(orphan);
-    expect(h.manager.getStatus().reservedSegments[0].reason).toMatch(
-      /unclaimed envelope ghost\/main/
-    );
+    const { manager } = reset(t.plat);
+    manager.begin(t.plat.state.tick);
+    const initialize = jest.fn(counterInit);
+    const restored = manager.bind('alpha')('main', { version: 1, initialize });
+    expect(restored.query().count).toBe(4);
+    expect(initialize).not.toHaveBeenCalled();
   });
 
-  it('keeps pages owned by modules that did not apply this global', () => {
-    const s1 = sessions();
-    const first = createMemoryManager({
-      platform: s1.plat.platform,
-      segmentIds: [0, 1],
+  it('keeps owners and localIds independent, allows late applications and keeps unapplied history', () => {
+    const t = setup();
+    t.tick(() => {
+      t.bind('a')('x', counterOptions).commit('count', 1);
+      t.bind('a')('y', counterOptions).commit('count', 2);
+      t.bind('b')('x', counterOptions).commit('count', 3);
     });
-    s1.run(first, () => {
-      first.bind('kept')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 10,
-        initialize: () => ({ n: 1 }),
-      });
-      first.bind('other')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 9,
-        initialize: () => ({ n: 2 }),
-      });
-    });
-    s1.settle(first);
-    const before = namespaceOf(s1.plat.raw());
-    const keptPage = before.allocations.kept.main.segmentId;
-    const envelope = s1.plat.content()[keptPage];
-
-    // 新 global：kept 未申请，另一个高优先级模块申请；kept 的页必须保持不变。
-    const second = createMemoryManager({
-      platform: s1.plat.platform,
-      segmentIds: [0, 1],
-    });
-    s1.run(second, () => {
-      second.bind('newcomer')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 100,
-        initialize: () => ({ n: 3 }),
-      });
-    });
-    s1.settle(second);
-
-    const after = namespaceOf(s1.plat.raw());
-    expect(after.allocations.newcomer.main.backend).toBe('raw');
-    expect(s1.plat.content()[keptPage]).toBe(envelope);
+    const { manager } = reset(t.plat);
+    const plat = t.plat;
+    // 新 global 只申请 a/x；a/y 与 b/x 的历史片段必须原样参与输出。
+    plat.state.tick = 10;
+    manager.begin(10);
+    manager.bind('a')('x', counterOptions).commit('count', 9);
+    manager.end(10);
+    // 迟到申请：几个 tick 后才申请 b/x。
+    for (let tick = 11; tick < 14; tick++) {
+      plat.state.tick = tick;
+      manager.begin(tick);
+      manager.end(tick);
+    }
+    plat.state.tick = 14;
+    manager.begin(14);
+    expect(manager.bind('b')('x', counterOptions).query().count).toBe(3);
+    manager.end(14);
+    const partitions = stored(plat).memoryManager.partitions;
+    expect(partitions.a.x.payload.count).toBe(9);
+    expect(partitions.a.y.payload.count).toBe(2);
+    expect(partitions.b.x.payload.count).toBe(3);
   });
 
-  it('expires ready handles across ticks so they cannot bypass a freeze', () => {
-    const h = createHarness({ segmentIds: [0] });
-    let accessor!: MemoryAccessor<{ n: number }>;
-    let stale: {
-      query: () => unknown;
-      commit: (fn: (m: { n: number }) => void) => void;
-    };
-    h.run(() => {
-      accessor = h.manager.bind('edge')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 0 }),
-      });
-    });
-    h.run(() => {
-      const access = accessor.access();
-      if (access.status === 'ready') stale = access;
-    });
-
-    // 下一 tick：句柄已过期（随后分区还会进入迁移冻结），必须抛协议错误。
-    h.run(() => {
-      expect(() => stale.query()).toThrow(/cannot be used at tick/);
-      expect(() => stale.commit((memory) => (memory.n = 99))).toThrow(
-        /cannot be used at tick/
+  it('returns the same accessor for the same declaration and rejects conflicts', () => {
+    const t = setup();
+    t.tick(() => {
+      const first = t.bind('a')('main', counterOptions);
+      expect(t.bind('a')('main', counterOptions)).toBe(first);
+      expect(() => t.bind('a')('main', { version: 2, initialize: counterInit })).toThrow(
+        /conflicting declaration/
+      );
+      expect(() => t.bind('a')('main', { version: 1, initialize: () => ({ count: 0 }) })).toThrow(
+        /conflicting declaration/
       );
     });
   });
 
-  it('does not write raw memory on a clean tick even with a host Memory object', () => {
-    const host: Record<string, unknown> = { other: { keep: true } };
-    const h = createHarness({ getHostMemory: () => host });
-    h.plat.setRaw(JSON.stringify({ other: { keep: true } }));
-
-    h.run(() => {
-      h.manager.bind('quiet')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 0 }),
-      });
-    });
-    const afterFirstWrite = h.plat.raw();
-    h.run();
-    h.run();
-    expect(h.plat.raw()).toBe(afterFirstWrite);
-
-    // 外部替换根字段时必须合并写回，不能覆盖或丢失。
-    host.other = { keep: false };
-    host.added = { b: 1 };
-    h.run();
-    const root = JSON.parse(h.plat.raw());
-    expect(root.other).toEqual({ keep: false });
-    expect(root.added).toEqual({ b: 1 });
-  });
-
-  it('preempts a lower priority owner and keeps generations monotonic', () => {
-    const s = sessions();
-    const first = createMemoryManager({
-      platform: s.plat.platform,
-      segmentIds: [0],
-    });
-    s.run(first, () => {
-      first.bind('old')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 10,
-        initialize: () => ({ n: 1 }),
-      });
-    });
-    s.settle(first);
-    const before = namespaceOf(s.plat.raw());
-    const firstGeneration = before.allocations.old.main.generation;
-    expect(before.allocations.old.main.backend).toBe('segment');
-
-    // 新 global：更高优先级的申请抢占唯一页，旧所有者搬回 Raw。
-    const second = createMemoryManager({
-      platform: s.plat.platform,
-      segmentIds: [0],
-    });
-    s.run(second, () => {
-      second.bind('old')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 10,
-        initialize: () => ({ n: 1 }),
-      });
-      second.bind('urgent')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 100,
-        initialize: () => ({ n: 2 }),
-      });
-    });
-    s.settle(second);
-
-    const after = namespaceOf(s.plat.raw());
-    expect(after.allocations.urgent.main.backend).toBe('segment');
-    expect(after.allocations.old.main.backend).toBe('raw');
-    expect(after.generationCounter).toBeGreaterThan(firstGeneration);
-    expect(after.allocations.urgent.main.generation).toBe(
-      after.generationCounter
-    );
-  });
-
-  it('completes a journal without the owning module applying again', () => {
-    const s = sessions();
-    const first = createMemoryManager({
-      platform: s.plat.platform,
-      segmentIds: [0],
-    });
-    s.run(first, () => {
-      first.bind('solo')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 5 }),
-      });
-    });
-    // 观察一 tick、规划一 tick、copy 一 tick，然后中断（不 switch）。
-    s.run(first);
-    s.run(first);
-    const interrupted = namespaceOf(s.plat.raw());
-    expect(interrupted.migration).not.toBeNull();
-    expect(interrupted.allocations.solo.main.backend).toBe('raw');
-
-    // 新 global：模块完全不申请，恢复仍要按 journal 完成搬迁。
-    const second = createMemoryManager({
-      platform: s.plat.platform,
-      segmentIds: [0],
-    });
-    s.settle(second);
-
-    const after = namespaceOf(s.plat.raw());
-    expect(after.allocations.solo.main.backend).toBe('segment');
-    expect(after.migration).toBeNull();
-    expect(s.plat.content()[after.allocations.solo.main.segmentId]).toContain(
-      '"n":5'
-    );
-  });
-
-  it('force-seals the startup window after the deferral bound', () => {
-    const h = createHarness({
-      segmentIds: [0],
-      maxStartupDeferrals: 2,
-    });
-    h.run(() => {
-      h.manager.bind('late')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 0 }),
-      });
-      h.manager.deferStartupWindow();
-    });
-    for (let i = 0; i < 4; i++) h.run(() => h.manager.deferStartupWindow());
-
-    const status = h.manager.getStatus();
-    expect(status.startupWindowOpen).toBe(false);
-    expect(status.startupWindowForced).toBe(true);
-    expect(status.startupDeferrals).toBe(2);
-  });
-
-  it('requests exactly the fixed segment set instead of unioning foreign pages', () => {
-    const plat = createPlatform();
-    const requests: number[][] = [];
-    const platform: MemoryPlatform = {
-      ...plat.platform,
-      activateSegments: (ids) => {
-        requests.push([...ids]);
-        plat.platform.activateSegments(ids);
-      },
-    };
-    const manager = createMemoryManager({ platform, segmentIds: [0, 1, 2] });
-    manager.begin(1);
-    expect(requests[0]).toEqual([0, 1, 2]);
-    expect(requests[0].length).toBeLessThanOrEqual(10);
-  });
-});
-
-/**
- * Logger 接入规范回归：只在状态迁移与故障上输出、同一事件只记一次、
- * 提交热路径（clean tick）不产生日志、输出端口异常不影响存储流程。
- */
-describe('MemoryManager logging', () => {
-  it('logs a load failure exactly once even when the tick repeats', () => {
-    const sink = collecting();
-    const h = createHarness({ logging: sink.logging });
-    h.plat.setRaw(JSON.stringify({ memoryManager: { schemaVersion: 99 } }));
-    h.run(() => {
-      h.manager.bind('broken')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 0 }),
-      });
-    });
-    h.run();
-    h.run();
-
-    const matches = sink
-      .text()
-      .split('\n')
-      .filter((line) => line.includes('storage load failed'));
-    expect(matches).toHaveLength(1);
-  });
-
-  it('stays silent on clean ticks and reports migration transitions at info', () => {
-    const quiet = collecting();
-    const h = createHarness({ segmentIds: [0], logging: quiet.logging });
-    h.run(() => {
-      h.manager.bind('silent')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 0 }),
-      });
-    });
-    h.settle();
-    // 默认等级下正常路径不输出：迁移只走 info（默认关闭）。
-    expect(quiet.lines).toEqual([]);
-
-    const verbose = collecting({ info: true });
-    const h2 = createHarness({ segmentIds: [0], logging: verbose.logging });
-    h2.run(() => {
-      h2.manager.bind('talky')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 0 }),
-      });
-    });
-    h2.settle();
-    const text = verbose.text();
-    expect(text).toContain('migration 1 start');
-    expect(text).toContain('copied; awaiting verification');
-    expect(text).toContain('verified; switching directory');
-    expect(text).toContain('migration 1 switched');
-
-    // clean tick 不产生任何新日志。
-    const before = verbose.lines.length;
-    h2.run();
-    h2.run();
-    expect(verbose.lines.length).toBe(before);
-  });
-
-  it('warns about a reserved page once, not every tick', () => {
-    const sink = collecting();
-    const h = createHarness({ segmentIds: [0, 1], logging: sink.logging });
-    h.plat.platform.writeSegment(1, '{"tool":"other"}');
-    h.run(() => {
-      h.manager.bind('p1')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 1 }),
-      });
-    });
-    h.settle();
-    h.run();
-    h.run();
-
-    const matches = sink
-      .text()
-      .split('\n')
-      .filter((line) => line.includes('segment 1 reserved: foreign content'));
-    expect(matches).toHaveLength(1);
-  });
-
-  it('warns once per write failure message while keeping retry behaviour', () => {
-    const sink = collecting();
-    const h = createHarness({ logging: sink.logging });
-    let accessor!: MemoryAccessor<{ n: number }>;
-    h.run(() => {
-      accessor = h.manager.bind('retry')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 0 }),
-      });
-    });
-    h.plat.failNextWrite(new Error('memory quota'));
-    h.run(() => {
-      const access = accessor.access();
-      if (access.status === 'ready') access.commit((memory) => (memory.n = 1));
-    });
-    h.plat.failNextWrite(new Error('memory quota'));
-    h.run();
-
-    const matches = sink
-      .text()
-      .split('\n')
-      .filter((line) => line.includes('raw write failed'));
-    expect(matches).toHaveLength(1);
-
-    // 失败期间业务仍可读；恢复后写入成功且不再产生新告警。
-    h.run();
-    expect(namespaceOf(h.plat.raw()).rawPartitions.retry.main.payload).toEqual({
-      n: 1,
-    });
-    expect(
-      sink
-        .text()
-        .split('\n')
-        .filter((line) => line.includes('raw write failed'))
-    ).toHaveLength(1);
-  });
-
-  it('keeps working when the log output port throws', () => {
-    const logging = createLogging({
-      output: {
-        write: () => {
-          throw new Error('console down');
-        },
-        notify: () => {
-          throw new Error('mail down');
-        },
-      },
-    });
-    const h = createHarness({ logging });
-    h.plat.setRaw(JSON.stringify({ memoryManager: { schemaVersion: 99 } }));
-    expect(() =>
-      h.run(() => {
-        h.manager.bind('boom')('main', {
-          version: 1,
-          layer: 'critical',
-          initialize: () => ({ n: 0 }),
-        });
-      })
-    ).not.toThrow();
-    expect(h.manager.getStatus().fault).toMatch(
-      /Unsupported MemoryManager schema/
-    );
-  });
-});
-
-/**
- * 数据安全回归（历史处理记录见 docs/changelog/2026-09-12.md）。
- *
- * 覆盖的不变量：脏数据不被旧信封覆盖、switch 后不出现"无 pending 且无数据"、
- * 旧布局版本 0 不被当作新安装、腾退页清理失败不阻断目录切换、未装载分区不参与
- * 搬迁，以及外部根字段删除传播、原型键拒绝、initialize/migrate 返回值校验、
- * 非托管页诊断。
- */
-describe('MemoryManager audit closure', () => {
-  const envelopeOf = (
-    pluginId: string,
-    localId: string,
-    generation: number,
-    dataVersion: number,
-    payload: unknown
-  ) =>
-    JSON.stringify({
-      schemaVersion: 1,
-      owner: { pluginId, localId },
-      generation,
-      dataVersion,
-      payload,
-    });
-
-  it('keeps dirty heap data when the segment page is temporarily invisible (P1-1)', () => {
-    const s = sessions();
-    const first = createMemoryManager({
-      platform: s.plat.platform,
-      segmentIds: [0],
-    });
-    s.run(first, () => {
-      first.bind('dirty')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 1 }),
-      });
-    });
-    s.settle(first);
-    expect(namespaceOf(s.plat.raw()).allocations.dirty.main.backend).toBe(
-      'segment'
-    );
-
-    // 新 global：分区 ready 后提交 n=2，并在本 tick 内让页不可见（提交只能保留 dirty）。
-    const second = createMemoryManager({
-      platform: s.plat.platform,
-      segmentIds: [0],
-    });
-    let accessor!: MemoryAccessor<{ n: number }>;
-    s.run(second, () => {
-      accessor = second.bind('dirty')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 0 }),
-      });
-      const access = accessor.access();
-      expect(access.status).toBe('ready');
-      if (access.status === 'ready') access.commit((memory) => (memory.n = 2));
-      s.plat.hideSegments();
-    });
-    expect(second.getStatus().allocations[0].pending).toBe(
-      'segment-activating'
-    );
-    expect(second.getStatus().allocations[0].dirty).toBe(true);
-
-    // 下一 tick 页恢复可见：必须把 n=2 落盘，而不是被旧信封回退成 n=1。
-    s.run(second);
-    const page = namespaceOf(s.plat.raw()).allocations.dirty.main.segmentId;
-    expect(s.plat.content()[page]).toContain('"n":2');
-  });
-
-  it('recovers a partition whose data never loaded when a journal switches it (P1-2, P2-3)', () => {
-    const plat = createPlatform();
-    const raw = JSON.stringify({
-      memoryManager: {
-        schemaVersion: 1,
-        generationCounter: 2,
-        allocations: {
-          solo: { main: { backend: 'segment', segmentId: 0, generation: 1 } },
-        },
-        rawPartitions: {},
-        migration: {
-          generation: 2,
-          phase: 'switch',
-          reason: 'allocation',
-          moves: [
-            {
-              pluginId: 'solo',
-              localId: 'main',
-              dataVersion: 1,
-              from: 'segment',
-              fromSegmentId: 0,
-              to: 'raw',
-            },
-          ],
-          staged: { 'solo/main': { n: 7 } },
-        },
-      },
-    });
-    plat.setRaw(raw);
-    plat.platform.writeSegment(0, envelopeOf('solo', 'main', 1, 1, { n: 7 }));
-    plat.platform.activateSegments([]);
-    plat.nextTick();
-
-    const manager = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
-    });
-    let tick = 1;
-    manager.begin(tick);
-    const accessor = manager.bind('solo')('main', {
-      version: 1,
-      layer: 'critical',
-      priority: 1,
-      initialize: () => ({ n: -1 }),
-    });
-    expect(accessor.access().status).toBe('pending');
-    manager.end(tick);
-    plat.nextTick();
-    tick++;
-
-    // switch 之后不能留下"无 pending 且无数据"的失真状态：诊断必须是 loading；
-    // journal 进入 cleanup（等目录落盘后再清页），不是直接消失。
-    const statusAfterSwitch = manager.getStatus();
-    expect(statusAfterSwitch.migration?.phase).toBe('cleanup');
-    expect(statusAfterSwitch.allocations[0].pending).toBe('loading');
-
-    // 下一 tick：从 switch 后的 Raw 分区装载，必须 ready，而不是永久 loading。
-    manager.begin(tick);
-    const access = accessor.access();
-    expect(access.status).toBe('ready');
-    if (access.status === 'ready') expect(access.query()).toEqual({ n: 7 });
-    manager.end(tick);
-    expect(manager.getStatus().allocations[0].pending).toBeNull();
-  });
-
-  it('skips unrecoverable partitions when planning allocation (P2-3)', () => {
-    const h = createHarness({ segmentIds: [0] });
-    // 页上是别人的信封：恢复必然失败，分区停在 recovery 且没有数据。
-    h.plat.platform.writeSegment(
-      0,
-      envelopeOf('ghost', 'main', 1, 1, { n: 1 })
-    );
-    h.plat.setRaw(
-      JSON.stringify({
-        memoryManager: {
-          schemaVersion: 1,
-          generationCounter: 1,
-          allocations: {
-            broken: {
-              main: { backend: 'segment', segmentId: 0, generation: 1 },
-            },
-          },
-          rawPartitions: {},
-          migration: null,
-        },
-      })
-    );
-    h.run(() => {
-      h.manager.bind('broken')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 0 }),
-      });
-    });
-    h.run();
-
-    const status = h.manager.getStatus();
-    expect(status.allocations[0].pending).toBe('recovery');
-    expect(status.allocationSkipped).toContainEqual({
-      pluginId: 'broken',
-      localId: 'main',
-      reason: 'recovery',
-    });
-  });
-
-  it('refuses to treat a version 0 payload as a fresh install (P2-1)', () => {
-    const h = createHarness();
-    h.plat.setRaw(
-      JSON.stringify({
-        leviathan: {
-          schemaVersion: 1,
-          framework: {
-            pluginVersions: {},
-            pluginHealth: {},
-            intentReceipts: [],
-            profiler: {},
-          },
-          plugins: { legacy: { n: 42 } },
-        },
-      })
-    );
-
-    let accessor!: MemoryAccessor<{ n: number }>;
-    h.run(() => {
-      accessor = h.manager.bind('legacy')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 0 }),
-      });
-    });
-
-    // 缺少 migrate：拒绝而不是用 {n:0} 覆盖导入的真实 payload。
-    expect(accessor.access().status).toBe('pending');
-    expect(h.manager.getStatus().allocations[0].writeError).toMatch(
-      /missing migrate for stored dataVersion 0/
-    );
-  });
-
-  it('keeps the directory switch when clearing the vacated page fails (P2-2)', () => {
-    const sink = collecting();
-    const plat = createPlatform();
-    const platform: MemoryPlatform = {
-      ...plat.platform,
-      writeSegment: (id, value) => {
-        if (value === '') throw new Error('segment write refused');
-        plat.platform.writeSegment(id, value);
-      },
-    };
-    plat.setRaw(
-      JSON.stringify({
-        memoryManager: {
-          schemaVersion: 1,
-          generationCounter: 2,
-          allocations: {
-            solo: { main: { backend: 'segment', segmentId: 0, generation: 1 } },
-          },
-          rawPartitions: {},
-          migration: {
-            generation: 2,
-            phase: 'switch',
-            reason: 'allocation',
-            moves: [
-              {
-                pluginId: 'solo',
-                localId: 'main',
-                dataVersion: 1,
-                from: 'segment',
-                fromSegmentId: 0,
-                to: 'raw',
-              },
-            ],
-            staged: { 'solo/main': { n: 7 } },
-          },
-        },
-      })
-    );
-    plat.platform.writeSegment(0, envelopeOf('solo', 'main', 1, 1, { n: 7 }));
-    plat.nextTick();
-
-    const manager = createMemoryManager({
-      platform,
-      segmentIds: [0],
-      logging: sink.logging,
-    });
-    manager.begin(1);
-    manager.bind('solo')('main', {
-      version: 1,
-      layer: 'critical',
-      priority: 1,
-      initialize: () => ({ n: -1 }),
-    });
-    expect(() => manager.end(1)).not.toThrow();
-
-    // 清页失败：目录切换照常完成，journal 停在 cleanup 重试，页内容保持有效副本。
-    const afterSwitch = JSON.parse(plat.raw()).memoryManager;
-    expect(afterSwitch.allocations.solo.main.backend).toBe('raw');
-    expect(afterSwitch.migration?.phase).toBe('cleanup');
-    expect(manager.getStatus().allocations[0].backend).toBe('raw');
-    expect(plat.content()[0]).toContain('"n":7');
-
-    // 清理重试到上限后放弃并记录诊断，页保持"保留页"状态而不是被误回收。
-    for (let tick = 2; tick <= 5; tick++) {
-      manager.begin(tick);
-      manager.end(tick);
-      plat.nextTick();
-    }
-    expect(JSON.parse(plat.raw()).memoryManager.migration).toBeNull();
-
-    // 同一代际的清理失败只在首次尝试告警（重试静默），放弃时再记一条。
-    const lines = sink.text().split('\n');
-    expect(
-      lines.filter((line) =>
-        /not visible for cleanup|cleanup failed/.test(line)
-      )
-    ).toHaveLength(1);
-    expect(
-      lines.filter((line) => line.includes('cleanup gave up'))
-    ).toHaveLength(1);
-  });
-
-  it('propagates deletion of external root fields (P3-1)', () => {
-    const host: Record<string, unknown> = { other: { keep: true } };
-    const h = createHarness({ getHostMemory: () => host });
-    h.plat.setRaw(JSON.stringify({ other: { keep: true } }));
-
-    h.run(() => {
-      h.manager.bind('cleaner')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 0 }),
-      });
-    });
-    delete host.other;
-    h.run();
-
-    expect(JSON.parse(h.plat.raw()).other).toBeUndefined();
-  });
-
-  it('rejects prototype keys in the stored namespace (P3-2)', () => {
-    const h = createHarness();
-    h.plat.setRaw(
-      '{"memoryManager":{"schemaVersion":1,"generationCounter":0,' +
-        '"allocations":{"__proto__":{"main":{"backend":"raw","generation":0}}},' +
-        '"rawPartitions":{},"migration":null}}'
-    );
-    h.run(() => {
-      h.manager.bind('proto')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 1 }),
-      });
-    });
-
-    expect(h.manager.getStatus().fault).toMatch(/Invalid allocation key/);
-  });
-
-  it('rejects non-object data returned by initialize or migrate (P3-3)', () => {
-    const h = createHarness();
-    h.run(() => {
+  it('rejects invalid identities, options and application outside the write phase', () => {
+    const t = setup();
+    expect(() => t.bind('a')('main', counterOptions)).toThrow(/between a successful begin/);
+    t.tick(() => {
+      expect(() => t.bind('bad owner')('main', counterOptions)).toThrow(/invalid owner/);
+      expect(() => t.bind('a')('__proto__', counterOptions)).toThrow(/invalid localId/);
+      expect(() => t.bind('a')('main', { version: 0, initialize: counterInit })).toThrow(
+        /positive integer/
+      );
       expect(() =>
-        h.manager.bind('array')('main', {
-          version: 1,
-          layer: 'critical',
-          initialize: () => [] as unknown as Record<string, never>,
-        })
-      ).toThrow(/must return a key-value object/);
+        t.bind('a')('main', { version: 1, layer: 'critical', initialize: counterInit } as any)
+      ).toThrow(/layer is no longer supported/);
+      expect(() => t.bind('a')('main', { version: 1 } as any)).toThrow(/initialize must be a function/);
     });
+    expect(() => t.bind('a')('late', counterOptions)).toThrow(/between a successful begin/);
   });
 
-  it('diagnoses pages outside the managed set instead of waiting forever (P3-5)', () => {
-    const h = createHarness({ segmentIds: [0] });
-    h.plat.setRaw(
-      JSON.stringify({
-        memoryManager: {
-          schemaVersion: 1,
-          generationCounter: 1,
-          allocations: {
-            stray: {
-              main: { backend: 'segment', segmentId: 9, generation: 1 },
-            },
-          },
-          rawPartitions: {},
-          migration: null,
-        },
-      })
-    );
-    let accessor!: MemoryAccessor<{ n: number }>;
-    h.run(() => {
-      accessor = h.manager.bind('stray')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 0 }),
-      });
-    });
-
-    const status = h.manager.getStatus();
-    expect(status.allocations[0].pending).toBe('recovery');
-    expect(status.allocations[0].writeError).toMatch(/not managed/);
-    expect(accessor.access().status).toBe('pending');
-  });
-
-  it('treats an explicit priority 0 as a real priority and breaks ties by identity', () => {
-    const h = createHarness({ segmentIds: [0] });
-    h.run(() => {
-      h.manager.bind('zero')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 0,
-        initialize: () => ({ n: 0 }),
-      });
-      h.manager.bind('none')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 0 }),
-      });
-    });
-    h.settle();
-    expect(namespaceOf(h.plat.raw()).allocations.zero.main.backend).toBe(
-      'segment'
-    );
-    expect(namespaceOf(h.plat.raw()).allocations.none.main.backend).toBe('raw');
-
-    const tie = createHarness({ segmentIds: [0] });
-    tie.run(() => {
-      tie.manager.bind('bbb')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 5,
-        initialize: () => ({ n: 0 }),
-      });
-      tie.manager.bind('aaa')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 5,
-        initialize: () => ({ n: 0 }),
-      });
-    });
-    tie.settle();
-    const allocations = namespaceOf(tie.plat.raw()).allocations;
-    expect(allocations.aaa.main.backend).toBe('segment');
-    expect(allocations.bbb.main.backend).toBe('raw');
-  });
-
-  it('does not rebuild the main memory when only a segment partition changes', () => {
-    const h = createHarness({ segmentIds: [0] });
-    let accessor!: MemoryAccessor<{ n: number }>;
-    h.run(() => {
-      accessor = h.manager.bind('page')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 0 }),
-      });
-    });
-    h.settle();
-    const rawBefore = h.plat.raw();
-
-    h.run(() => {
-      const access = accessor.access();
-      if (access.status === 'ready') access.commit((memory) => (memory.n = 5));
-    });
-
-    expect(h.plat.raw()).toBe(rawBefore);
-    const page = namespaceOf(rawBefore).allocations.page.main.segmentId;
-    expect(h.plat.content()[page]).toContain('"n":5');
-  });
-
-  it('aborts a migration whose payload exceeds page capacity and keeps raw data', () => {
-    const h = createHarness({ segmentIds: [0] });
-    let accessor!: MemoryAccessor<{ blob: string }>;
-    h.run(() => {
-      accessor = h.manager.bind('huge')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ blob: 'x'.repeat(100_001) }),
-      });
-    });
-    h.settle();
-
-    const namespace = namespaceOf(h.plat.raw());
-    expect(namespace.allocations.huge.main.backend).toBe('raw');
-    expect(namespace.rawPartitions.huge.main.payload.blob).toHaveLength(100001);
-    const status = h.manager.getStatus();
-    expect(status.allocations[0].writeError).toMatch(/exceeds capacity/);
-    expect(status.allocations[0].pending).toBeNull();
-    expect(accessor.access().status).toBe('ready');
-  });
-});
-
-/** 第 2 轮审计新增发现的回归：迁移冻结、旧布局原型键、超页数分配、switch 失败注入。 */
-describe('MemoryManager round-2 audit closure', () => {
-  const envelopeOf = (
-    pluginId: string,
-    localId: string,
-    generation: number,
-    dataVersion: number,
-    payload: unknown
-  ) =>
-    JSON.stringify({
-      schemaVersion: 1,
-      owner: { pluginId, localId },
-      generation,
-      dataVersion,
-      payload,
-    });
-
-  it('keeps priority partitions frozen for the whole migration (P1-F)', () => {
-    const s = sessions();
-    const manager = createMemoryManager({
-      platform: s.plat.platform,
-      segmentIds: [0],
-    });
-    let accessor!: MemoryAccessor<{ n: number }>;
-    s.run(manager, () => {
-      accessor = manager.bind('frozen')('main', {
-        version: 1,
-        layer: 'checkpoint',
-        checkpointInterval: 100,
-        priority: 1,
-        initialize: () => ({ n: 0 }),
-      });
-    });
-    // checkpoint 层让分区在搬迁期间保持 dirty：冻结必须把提交挡在外面，
-    // 否则 switch 会用旧快照落盘，冻结后的提交被静默丢弃。
-    s.run(manager, () => {
-      const access = accessor.access();
-      if (access.status === 'ready') access.commit((memory) => (memory.n = 1));
-    });
-    expect(manager.getStatus().migration).not.toBeNull();
-
-    for (let i = 0; i < 8; i++) {
-      s.run(manager, () => {
-        const status = manager.getStatus();
-        // cleanup 阶段的目录已经切换，分区不再冻结；冻结断言只覆盖 copy/verify/switch。
-        if (status.migration === null || status.migration.phase === 'cleanup')
-          return;
-        const access = accessor.access();
-        expect(access.status).toBe('pending');
-        if (access.status === 'pending')
-          expect(['migration', 'verification']).toContain(access.reason);
-      });
-    }
-    s.settle(manager, 20);
-
-    const page = namespaceOf(s.plat.raw()).allocations.frozen.main.segmentId;
-    expect(s.plat.content()[page]).toContain('"n":1');
-  });
-
-  it('ignores prototype keys when importing the legacy layout (P3-A)', () => {
-    const sink = collecting();
-    const h = createHarness({ logging: sink.logging });
-    h.plat.setRaw(
-      '{"leviathan":{"schemaVersion":1,"framework":{"pluginVersions":{"ok":1}},' +
-        '"plugins":{"__proto__":{"n":1},"ok":{"n":2}}}}'
-    );
-    h.run(() => {
-      const accessor = h.manager.bind('ok')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 0 }),
-      });
-      expect(readyData(accessor)).toEqual({ n: 2 });
-      const access = accessor.access();
-      if (access.status === 'ready') access.commit((memory) => (memory.n = 3));
-    });
-
-    const namespace = namespaceOf(h.plat.raw());
-    // 只有安全键被导入；序列化结果里不存在 __proto__ 记录。
-    expect(Object.keys(namespace.allocations)).toEqual(['ok']);
-    expect(JSON.stringify(namespace.allocations)).not.toContain('__proto__');
-    expect(sink.text()).toContain(
-      'legacy import skipped unsafe key: __proto__'
-    );
-  });
-
-  it('ranks more than ten applications and keeps the rest on raw memory', () => {
-    const h = createHarness();
-    const ids = Array.from(
-      { length: 12 },
-      (_, index) => 'p' + String(index).padStart(2, '0')
-    );
-    h.run(() => {
-      ids.forEach((id, index) => {
-        h.manager.bind(id)('main', {
-          version: 1,
-          layer: 'critical',
-          priority: 100 - index,
-          initialize: () => ({ n: index }),
-        });
-      });
-    });
-    h.settle(120);
-
-    const allocations = namespaceOf(h.plat.raw()).allocations;
-    const onSegment = ids.filter(
-      (id) => allocations[id].main.backend === 'segment'
-    );
-    const onRaw = ids.filter((id) => allocations[id].main.backend === 'raw');
-    expect(onSegment).toHaveLength(10);
-    expect(onRaw).toEqual(['p10', 'p11']);
-  });
-
-  it('keeps a valid copy when the directory write fails during switch', () => {
-    const plat = createPlatform();
-    plat.setRaw(
-      JSON.stringify({
-        memoryManager: {
-          schemaVersion: 1,
-          generationCounter: 2,
-          allocations: {
-            solo: { main: { backend: 'segment', segmentId: 0, generation: 1 } },
-          },
-          rawPartitions: {},
-          migration: {
-            generation: 2,
-            phase: 'switch',
-            reason: 'allocation',
-            moves: [
-              {
-                pluginId: 'solo',
-                localId: 'main',
-                dataVersion: 1,
-                from: 'segment',
-                fromSegmentId: 0,
-                to: 'raw',
-              },
-            ],
-            staged: { 'solo/main': { n: 7 } },
-          },
-        },
-      })
-    );
-    plat.platform.writeSegment(0, envelopeOf('solo', 'main', 1, 1, { n: 7 }));
-    // 让页在切换 tick 可见：旧实现会立刻清空它，新实现必须等目录落盘后才清。
-    plat.platform.activateSegments([0]);
-    plat.nextTick();
-
-    const manager = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
-    });
-    manager.begin(1);
-    manager.bind('solo')('main', {
-      version: 1,
-      layer: 'critical',
-      priority: 1,
-      initialize: () => ({ n: -1 }),
-    });
-    plat.failNextWrite(new Error('memory full'));
-    expect(() => manager.end(1)).not.toThrow();
-
-    // 主 Memory 未落盘：存储仍是旧目录，且页里的有效信封没有被提前清空。
-    const stored = JSON.parse(plat.raw()).memoryManager;
-    expect(stored.allocations.solo.main.backend).toBe('segment');
-    expect(plat.content()[0]).toContain('"n":7');
-
-    // 下一 tick 重试写入：目录切换为 raw 且主 Memory 持有 payload，之后才进入清理。
-    manager.begin(2);
-    manager.end(2);
-    plat.nextTick();
-    const after = JSON.parse(plat.raw()).memoryManager;
-    expect(after.allocations.solo.main.backend).toBe('raw');
-    expect(after.rawPartitions.solo.main.payload).toEqual({ n: 7 });
-  });
-});
-
-/** 审计 A01/A02：从真实持久 journal 恢复，检查页面写入归属及业务访问冻结。 */
-describe('audit P1 migration recovery', () => {
-  const envelopeOf = (
-    pluginId: string,
-    localId: string,
-    generation: number,
-    dataVersion: number,
-    payload: object
-  ): string =>
-    JSON.stringify({
-      schemaVersion: 1,
-      owner: { pluginId, localId },
-      generation,
-      dataVersion,
-      payload,
-    });
-  const seeded = (phase: 'copy' | 'verify' | 'switch', target = 0) => ({
-    memoryManager: {
-      schemaVersion: 1,
-      generationCounter: 2,
-      allocations: { worker: { main: { backend: 'raw', generation: 1 } } },
-      rawPartitions: {
-        worker: { main: { dataVersion: 1, payload: { n: 1 } } },
-      },
-      migration: {
-        generation: 2,
-        phase,
-        reason: 'allocation',
-        moves: [
-          {
-            pluginId: 'worker',
-            localId: 'main',
-            dataVersion: 1,
-            from: 'raw',
-            to: 'segment',
-            toSegmentId: target,
-          },
-        ],
-        staged: phase === 'copy' ? {} : { 'worker/main': { n: 1 } },
-      },
-    },
-  });
-
-  it.each([
-    ['copy', 0, 'foreign-data'],
-    ['copy', 99, 'foreign-data'],
-    ['verify', 0, envelopeOf('other', 'main', 2, 1, { n: 9 })],
-    ['verify', 0, envelopeOf('worker', 'main', 99, 1, { n: 9 })],
-    ['verify', 0, envelopeOf('worker', 'main', 2, 9, { n: 9 })],
-    ['verify', 99, envelopeOf('worker', 'main', 2, 1, { n: 1 })],
-    ['switch', 0, 'replaced-after-verification'],
-  ] as const)(
-    'preserves unowned target in %s on page %s',
-    (phase, target, text) => {
-      const plat = createPlatform();
-      plat.setRaw(JSON.stringify(seeded(phase, target)));
-      plat.platform.writeSegment(target, text);
-      plat.platform.activateSegments([target]);
-      plat.nextTick();
-      const write = jest.fn(plat.platform.writeSegment);
-      const manager = createMemoryManager({
-        platform: { ...plat.platform, writeSegment: write },
-        segmentIds: [0],
-      });
-      manager.begin(1);
-      manager.end(1);
-      expect(write).not.toHaveBeenCalled();
-      expect(plat.content()[target]).toBe(text);
-      expect(namespaceOf(plat.raw()).allocations.worker.main.backend).toBe(
-        'raw'
-      );
-      expect(namespaceOf(plat.raw()).rawPartitions.worker.main.payload).toEqual(
-        { n: 1 }
-      );
-    }
-  );
-
-  it('reclaims only its own abandoned target copy', () => {
-    const plat = createPlatform();
-    // 重启看到 copy journal，但目标写入已完成：中止时可以回收这一代的副本。
-    plat.setRaw(JSON.stringify(seeded('copy')));
-    plat.platform.writeSegment(0, envelopeOf('worker', 'main', 2, 1, { n: 1 }));
-    plat.platform.activateSegments([0]);
-    plat.nextTick();
-    const write = jest.fn(plat.platform.writeSegment);
-    const manager = createMemoryManager({
-      platform: { ...plat.platform, writeSegment: write },
-      segmentIds: [0],
-    });
-    manager.begin(1);
-    manager.end(1);
-    expect(write).toHaveBeenCalledWith(0, '');
-    expect(namespaceOf(plat.raw()).allocations.worker.main.backend).toBe('raw');
-  });
-
-  it.each([
-    ['foreign-data', 1, 0],
-    [envelopeOf('other', 'main', 1, 1, { n: 8 }), 1, 0],
-    [envelopeOf('worker', 'main', 7, 1, { n: 8 }), 1, 0],
-    [envelopeOf('worker', 'main', 1, 1, { n: 1 }), undefined, 0],
-    [envelopeOf('worker', 'main', 1, 1, { n: 1 }), 1, 99],
-  ] as const)(
-    'does not clear an unverifiable cleanup source %#',
-    (text, fromGeneration, source) => {
-      const plat = createPlatform();
-      const snapshot = seeded('switch');
-      const ns: any = snapshot.memoryManager;
-      ns.migration.phase = 'cleanup';
-      ns.allocations.worker.main.generation = 2;
-      ns.migration.moves = [
-        {
-          pluginId: 'worker',
-          localId: 'main',
-          dataVersion: 1,
-          from: 'segment',
-          fromSegmentId: source,
-          fromGeneration,
-          to: 'raw',
-        },
+  it('validates initialize results and rejects asynchronous callbacks', () => {
+    const t = setup();
+    t.tick(() => {
+      const cases: [string, () => unknown, RegExp][] = [
+        ['array', () => [], /plain object/],
+        ['undef', () => ({ a: undefined }), /undefined is not a JSON value/],
+        ['nan', () => ({ a: NaN }), /non-finite/],
+        ['map', () => ({ a: new Map() }), /non-plain object/],
+        ['date', () => ({ a: new Date() }), /non-plain object/],
+        ['fn', () => ({ a: () => 1 }), /function is not a JSON value/],
+        ['sparse', () => ({ a: [1, , 3] }), /sparse/],
+        ['getter', () => ({ get a() { return 1; } }), /accessor property/],
+        ['reserved', () => JSON.parse('{"__proto__":{}}'), /reserved key/],
+        ['async', () => Promise.resolve({}), /synchronous/],
       ];
-      plat.setRaw(JSON.stringify(snapshot));
-      plat.platform.writeSegment(source, text);
-      plat.platform.activateSegments([source]);
-      plat.nextTick();
-      const write = jest.fn(plat.platform.writeSegment);
-      const manager = createMemoryManager({
-        platform: { ...plat.platform, writeSegment: write },
-        segmentIds: [0],
-      });
-      for (let tick = 1; tick <= 4; tick++) {
-        manager.begin(tick);
-        manager.end(tick);
-      }
-      expect(write).not.toHaveBeenCalled();
-      expect(plat.content()[source]).toBe(text);
-    }
-  );
-
-  it.each([false, true])(
-    'checks all directory references before cleanup (referenced=%s)',
-    (referenced) => {
-      const plat = createPlatform();
-      const snapshot: any = seeded('switch');
-      const ns = snapshot.memoryManager;
-      ns.migration.phase = 'cleanup';
-      ns.allocations.worker.main.generation = 2;
-      ns.migration.moves = [
-        {
-          pluginId: 'worker',
-          localId: 'main',
-          dataVersion: 1,
-          from: 'segment',
-          fromSegmentId: 0,
-          fromGeneration: 1,
-          to: 'raw',
-        },
-      ];
-      if (referenced)
-        ns.allocations.other = {
-          main: { backend: 'segment', segmentId: 0, generation: 1 },
-        };
-      plat.setRaw(JSON.stringify(snapshot));
-      const text = envelopeOf('worker', 'main', 1, 1, { n: 1 });
-      plat.platform.writeSegment(0, text);
-      plat.platform.activateSegments([0]);
-      plat.nextTick();
-      const write = jest.fn(plat.platform.writeSegment);
-      const manager = createMemoryManager({
-        platform: { ...plat.platform, writeSegment: write },
-        segmentIds: [0],
-      });
-      manager.begin(1);
-      manager.end(1);
-      if (referenced) {
-        expect(write).not.toHaveBeenCalled();
-        expect(plat.content()[0]).toBe(text);
-      } else {
-        expect(write).toHaveBeenCalledWith(0, '');
-        expect(plat.content()[0]).toBe('');
-      }
-    }
-  );
-
-  it.each(['copy', 'verify', 'switch'] as const)(
-    'freezes restored %s access, then persists edits after thaw across reset',
-    (phase) => {
-      const plat = createPlatform();
-      plat.setRaw(JSON.stringify(seeded(phase)));
-      if (phase !== 'copy')
-        plat.platform.writeSegment(
-          0,
-          envelopeOf('worker', 'main', 2, 1, { n: 1 })
-        );
-      plat.platform.activateSegments([0]);
-      plat.nextTick();
-      const manager = createMemoryManager({
-        platform: plat.platform,
-        segmentIds: [0],
-      });
-      manager.begin(1);
-      const accessor = manager.bind('worker')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 0 }),
-      });
-      expect(accessor.access().status).toBe('pending');
-      manager.end(1);
-      plat.nextTick();
-      let edited = false;
-      for (let tick = 2; tick <= 10; tick++) {
-        manager.begin(tick);
-        const access = accessor.access();
-        const migration = manager.getStatus().migration;
-        if (migration && migration.phase !== 'cleanup')
-          expect(access.status).toBe('pending');
-        if (access.status === 'ready' && !edited) {
-          access.commit((data) => {
-            data.n = 2;
-          });
-          edited = true;
-        }
-        manager.end(tick);
-        plat.nextTick();
-      }
-      expect(edited).toBe(true);
-      const restored = createMemoryManager({
-        platform: plat.platform,
-        segmentIds: [0],
-      });
-      restored.begin(11);
+      for (const [id, initialize, error] of cases)
+        expect(() => t.bind('a')(id, { version: 1, initialize: initialize as any })).toThrow(error);
+      const cyclic: any = { a: {} };
+      cyclic.a.self = cyclic;
+      expect(() => t.bind('a')('cycle', { version: 1, initialize: () => cyclic })).toThrow(
+        /circular/
+      );
+      const shared = { v: 1 };
       expect(
-        readyData(
-          restored.bind('worker')('main', {
-            version: 1,
-            layer: 'critical',
-            initialize: () => ({ n: 0 }),
-          })
-        )
-      ).toEqual({ n: 2 });
-    }
-  );
+        t.bind('a')('shared', { version: 1, initialize: () => ({ x: shared, y: shared }) }).query()
+      ).toEqual({ x: { v: 1 }, y: { v: 1 } });
+    });
+    expect(t.manager.getStatus().partitions.map((p) => p.localId)).toEqual(['shared']);
+  });
 
-  it('defers a late schema upgrade until a hidden target is verified and switched', () => {
-    const plat = createPlatform();
-    plat.setRaw(JSON.stringify(seeded('verify')));
-    plat.platform.writeSegment(0, envelopeOf('worker', 'main', 2, 1, { n: 1 }));
-    const manager = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
+  it('migrates isolated copies, retries failed callbacks and never falls back to initialize', () => {
+    const t = setup();
+    t.tick(() => t.bind('a')('main', counterOptions).commit('count', 5));
+    const before = t.plat.state.raw;
+
+    const { manager } = reset(t.plat);
+    const plat = t.plat;
+    manager.begin(plat.state.tick);
+    const initialize = jest.fn(counterInit);
+    // 缺少 migrate：拒绝，不初始化为空。
+    expect(() => manager.bind('a')('main', { version: 2, initialize })).toThrow(
+      /missing migrate for stored dataVersion 1/
+    );
+    // migrate 修改收到的副本后抛错：历史片段不受污染；回调失败不缓存，相同声明再次申请会
+    // 重新运行，且每次都收到未被上一次修改污染的新副本。
+    const received: number[] = [];
+    const failing = jest.fn((memory: any) => {
+      received.push(memory.count);
+      memory.count = -1;
+      throw new Error('boom');
     });
-    manager.begin(1);
-    manager.end(1); // 页不可见，不应解除 verification 冻结。
-    const migrate = jest.fn((data: any) => ({ n: data.n + 10 }));
-    manager.begin(2);
-    const accessor = manager.bind('worker')('main', {
-      version: 2,
-      layer: 'critical',
-      initialize: () => ({ n: 0 }),
-      migrate,
+    const failingOptions = { version: 2, initialize, migrate: failing };
+    expect(() => manager.bind('a')('main', failingOptions)).toThrow(/boom/);
+    expect(() => manager.bind('a')('main', failingOptions)).toThrow(/boom/);
+    expect(failing).toHaveBeenCalledTimes(2);
+    expect(received).toEqual([5, 5]);
+    manager.end(plat.state.tick);
+    expect(plat.state.raw).toBe(before);
+
+    // 修复后的声明可重新申请；降级同样要求显式 migrate。
+    plat.state.tick++;
+    manager.begin(plat.state.tick);
+    const migrate = jest.fn((memory: any, from: number) => ({ count: memory.count * 10 + from }));
+    const migrated = manager.bind('a')('main', { version: 2, initialize, migrate });
+    expect(migrated.query().count).toBe(51);
+    expect(initialize).not.toHaveBeenCalled();
+    manager.end(plat.state.tick);
+    expect(partitionOf(plat, 'a', 'main')).toEqual({ dataVersion: 2, payload: { count: 51 } });
+  });
+
+  it('rejects same-version stored data that is not managed and repairs it through migrate', () => {
+    const history = JSON.stringify({
+      memoryManager: {
+        schemaVersion: 2,
+        partitions: { a: { list: { dataVersion: 1, payload: [1, 2] }, nul: { dataVersion: 1, payload: null } } },
+      },
     });
-    expect(accessor.access().status).toBe('pending');
-    expect(migrate).not.toHaveBeenCalled();
-    manager.end(2);
-    plat.nextTick();
-    for (let tick = 3; tick <= 8; tick++) {
-      manager.begin(tick);
-      manager.end(tick);
-      plat.nextTick();
-    }
-    expect(migrate).toHaveBeenCalledTimes(1);
-    expect(readyData(accessor)).toEqual({ n: 11 });
-    const restored = createMemoryManager({
-      platform: plat.platform,
-      segmentIds: [0],
+    const t = setup(history);
+    t.tick(() => {
+      expect(() => t.bind('a')('list', counterOptions)).toThrow(/not managed data/);
+      expect(() => t.bind('a')('nul', counterOptions)).toThrow(/not managed data/);
+      const repaired = t.bind('a')('list', {
+        version: 2,
+        initialize: counterInit,
+        migrate: (memory) => ({ count: (memory as number[]).length }),
+      });
+      expect(repaired.query()).toEqual({ count: 2 });
     });
-    restored.begin(9);
-    expect(
-      readyData(
-        restored.bind('worker')('main', {
-          version: 2,
-          layer: 'critical',
-          initialize: () => ({ n: 0 }),
-        })
-      )
-    ).toEqual({ n: 11 });
+    const partitions = stored(t.plat).memoryManager.partitions;
+    expect(partitions.a.list).toEqual({ dataVersion: 2, payload: { count: 2 } });
+    expect(partitions.a.nul).toEqual({ dataVersion: 1, payload: null });
   });
 });
 
-describe('MemoryManager audit remediation 2026-09-20', () => {
-  it('R4: refreshes cached page ownership after text changes and clearing', () => {
-    const h = createHarness({ segmentIds: [0] });
-    const foreign = (owner: string) =>
-      JSON.stringify({
-        schemaVersion: 1,
-        owner: { pluginId: owner, localId: 'main' },
-        generation: 1,
-        dataVersion: 1,
-        payload: { blob: 'x'.repeat(64_000) },
-      });
-    h.plat.content()[0] = foreign('first');
-    h.run();
-    h.run();
-    expect(JSON.stringify(h.manager.getStatus().reservedSegments)).toContain(
-      'first/main'
-    );
-    const parse = jest.spyOn(JSON, 'parse');
-    try {
-      h.run();
-      h.run();
-      expect(parse).not.toHaveBeenCalled();
-      h.plat.content()[0] = foreign('second');
-      h.run();
-      expect(parse).toHaveBeenCalledTimes(1);
-      expect(JSON.stringify(h.manager.getStatus().reservedSegments)).toContain(
-        'second/main'
-      );
-      h.plat.content()[0] = '';
-      h.run();
-      expect(h.manager.getStatus().reservedSegments).toEqual([]);
-      h.plat.content()[0] = foreign('first');
-      h.run();
-      expect(parse).toHaveBeenCalledTimes(2);
-      expect(JSON.stringify(h.manager.getStatus().reservedSegments)).toContain(
-        'first/main'
-      );
-    } finally {
-      parse.mockRestore();
-    }
-  });
-
-  it.each(['汉', '😀'])(
-    'R2: checks the exact UTF-16 boundary with %s content',
-    (character) => {
-      const host = { blob: '' };
-      const h = createHarness({ segmentIds: [], getHostMemory: () => host });
-      h.run();
-      h.run();
-      const overhead = h.plat.raw().length;
-      const available = 2_097_152 - overhead;
-      host.blob =
-        character.repeat(Math.floor(available / character.length)) +
-        'x'.repeat(available % character.length);
-      const writes = jest.spyOn(h.plat.platform, 'writeRaw');
-      h.run();
-      expect(writes).toHaveBeenCalledTimes(1);
-      expect(h.plat.raw().length).toBe(2_097_152);
-      expect(h.manager.getStatus().rawWriteError).toBeNull();
-      host.blob += 'x';
-      h.run();
-      expect(writes).toHaveBeenCalledTimes(1);
-      expect(h.manager.getStatus().rawWriteError).toContain(
-        '2097153 chars exceeds 2097152'
-      );
-    }
-  );
-
-  it('F1: does not re-parse an unchanged segment page on idle ticks', () => {
-    const h = createHarness({ segmentIds: [0] });
-    h.run(() => {
-      h.manager.bind('cache')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 1 }),
-      });
+describe('MemoryManager commit', () => {
+  it('encodes only dirty partitions, merges commits and does nothing on clean ticks', () => {
+    const t = setup();
+    let a!: MemoryAccessor<Counter>;
+    let b!: MemoryAccessor<Counter>;
+    t.tick(() => {
+      a = t.bind('owner')('a', counterOptions);
+      b = t.bind('owner')('b', counterOptions);
     });
-    h.settle();
-    const page = h.plat.content()[0];
-    expect(page).toContain('"n":1');
-
-    const parse = jest.spyOn(JSON, 'parse');
-    try {
-      for (let i = 0; i < 5; i++) h.run();
-      // 页文本未变：观察阶段只允许命中缓存，不再对该页执行 JSON.parse。
-      const pageParses = parse.mock.calls.filter(([text]) => text === page);
-      expect(pageParses.length).toBeLessThanOrEqual(1);
-    } finally {
-      parse.mockRestore();
-    }
-  });
-
-  it('F2: serializes preserved root fields once across repeated raw writes', () => {
-    const h = createHarness();
-    const creeps = { a: { id: 1 } };
-    h.plat.setRaw(JSON.stringify({ creeps }));
-    let accessor!: MemoryAccessor<{ n: number }>;
-    h.run(() => {
-      accessor = h.manager.bind('f2')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 0 }),
-      });
-    });
-    h.settle();
-
     const stringify = jest.spyOn(JSON, 'stringify');
+    const parse = jest.spyOn(JSON, 'parse');
     try {
-      for (let i = 1; i <= 5; i++)
-        h.run(() => {
-          const access = accessor.access();
-          if (access.status === 'ready')
-            access.commit((memory) => (memory.n = i));
-        });
-      const creepSerializations = stringify.mock.calls.filter(
-        ([value]) => value !== null && typeof value === 'object' && 'a' in value
-      );
-      expect(creepSerializations.length).toBeLessThanOrEqual(1);
+      t.tick(() => {
+        a.commit('count', 1);
+        a.commit('count', 2);
+        a.commit((memory) => void (memory.count += 1));
+      });
+      const encodedData = stringify.mock.calls.map((call) => call[0]);
+      expect(encodedData.filter((value) => value === a.query())).toHaveLength(1);
+      expect(encodedData.filter((value) => value === b.query())).toHaveLength(0);
+      expect(partitionOf(t.plat, 'owner', 'a').payload.count).toBe(3);
+
+      stringify.mockClear();
+      parse.mockClear();
+      const writes = t.plat.state.writes;
+      t.tick();
+      t.tick();
+      expect(stringify).not.toHaveBeenCalled();
+      expect(parse).not.toHaveBeenCalled();
+      expect(t.plat.state.writes).toBe(writes);
     } finally {
       stringify.mockRestore();
+      parse.mockRestore();
     }
-    // 缓存不影响输出：保留字段仍完整写回，分区数据是最新值。
-    const raw = JSON.parse(h.plat.raw());
-    expect(raw.creeps).toEqual(creeps);
-    expect(raw.memoryManager.rawPartitions.f2.main.payload).toEqual({ n: 5 });
   });
 
-  it.each([
-    ['number', 5],
-    ['string', 'str'],
-    ['array', [1]],
-    ['null', null],
-  ])(
-    'F3: raw payload %s is reported as recovery instead of ready/loading',
-    (_name, payload) => {
-      const h = createHarness();
-      h.plat.setRaw(
-        JSON.stringify({
-          memoryManager: {
-            schemaVersion: 1,
-            generationCounter: 0,
-            allocations: { bad: { main: { backend: 'raw', generation: 0 } } },
-            rawPartitions: { bad: { main: { dataVersion: 1, payload } } },
-            migration: null,
-          },
+  it('commits initialization together with same-tick modifications', () => {
+    const t = setup();
+    t.tick(() => {
+      const accessor = t.bind('a')('main', counterOptions);
+      accessor.commit('count', 7);
+    });
+    expect(t.plat.state.writes).toBe(1);
+    expect(partitionOf(t.plat, 'a', 'main').payload.count).toBe(7);
+  });
+
+  it('keeps dirty state on platform failure and merges retries with new modifications', () => {
+    const t = setup();
+    let a!: MemoryAccessor<Counter>;
+    t.tick(() => {
+      a = t.bind('o')('a', counterOptions);
+    });
+    const committed = t.plat.state.raw;
+    t.plat.state.failWrite = new Error('disk full');
+    t.tick(() => a.commit('count', 1));
+    expect(t.plat.state.raw).toBe(committed);
+    let status = t.manager.getStatus();
+    expect(status.rawWriteError).toBe('platform: disk full');
+    expect(status.writeFailure).toMatchObject({ stage: 'platform' });
+    expect(status.dirty).toEqual([{ owner: 'o', localId: 'a' }]);
+
+    t.plat.state.failWrite = null;
+    let b!: MemoryAccessor<Counter>;
+    t.tick(() => {
+      a.commit('count', 2);
+      b = t.bind('o')('b', counterOptions);
+      b.commit('count', 5);
+    });
+    status = t.manager.getStatus();
+    expect(status.rawWriteError).toBeNull();
+    expect(status.dirty).toEqual([]);
+    expect(partitionOf(t.plat, 'o', 'a').payload.count).toBe(2);
+    expect(partitionOf(t.plat, 'o', 'b').payload.count).toBe(5);
+    expect(t.logs.lines.filter((line) => line.includes('memory commit failed'))).toHaveLength(1);
+  });
+
+  it('rejects oversized text as a whole and recovers after shrinking', () => {
+    const t = setup();
+    let a!: MemoryAccessor<{ blob: string }>;
+    let b!: MemoryAccessor<Counter>;
+    t.tick(() => {
+      a = t.bind('o')('a', { version: 1, initialize: () => ({ blob: '' }) });
+      b = t.bind('o')('b', counterOptions);
+    });
+    const committed = t.plat.state.raw;
+    t.tick(() => {
+      a.commit('blob', 'x'.repeat(2_200_000));
+      b.commit('count', 1);
+    });
+    expect(t.plat.state.raw).toBe(committed);
+    const failure = t.manager.getStatus().writeFailure!;
+    expect(failure.stage).toBe('capacity');
+    expect(failure.owner).toBeUndefined();
+    t.tick(() => a.commit('blob', 'small'));
+    expect(partitionOf(t.plat, 'o', 'a').payload.blob).toBe('small');
+    expect(partitionOf(t.plat, 'o', 'b').payload.count).toBe(1);
+  });
+
+  it('escapes owner, localId and record keys in the assembled text', () => {
+    const t = setup(JSON.stringify({ 'quote"key': { 'x\ny': 1 } }));
+    t.tick(() => {
+      t.bind('a.b-c')('main_1', {
+        version: 1,
+        initialize: () => ({ 'dotted.key': 1, 'quo"te': ' ' }),
+      });
+    });
+    const root = stored(t.plat);
+    expect(root['quote"key']).toEqual({ 'x\ny': 1 });
+    expect(root.memoryManager.partitions['a.b-c'].main_1.payload).toEqual({
+      'dotted.key': 1,
+      'quo"te': ' ',
+    });
+  });
+});
+
+describe('MemoryManager deep paths', () => {
+  const withState = (body: (accessor: MemoryAccessor<Counter>, t: ReturnType<typeof setup>) => void) => {
+    const t = setup();
+    t.tick(() => {
+      const accessor = t.bind('o')('main', {
+        version: 1,
+        initialize: () => ({
+          count: 0,
+          tags: { W1N1: { level: 1 } },
+          list: [1, 2, 3],
+          nested: { deep: { value: 1 } },
+        }),
+      });
+      body(accessor, t);
+    });
+    return t;
+  };
+
+  it('reads keys and paths with missing and mismatch semantics', () => {
+    withState((m) => {
+      const anyM = m as MemoryAccessor<any>;
+      expect(m.get('count')).toBe(0);
+      expect(m.get(['tags', 'W1N1', 'level'])).toBe(1);
+      expect(m.get(['tags', 'W2N2', 'level'])).toBeUndefined();
+      expect(m.get(['list', 7])).toBeUndefined();
+      expect(() => anyM.get(['count', 'x'])).toThrow(/cannot traverse number/);
+      expect(() => anyM.get(['list', 'length'])).toThrow(/numeric index/);
+      expect(() => anyM.get(['tags', 0])).toThrow(/string key/);
+      expect(() => anyM.get([])).toThrow(/non-empty/);
+      expect(() => anyM.get(['tags', '__proto__'])).toThrow(/reserved key/);
+      expect(() => anyM.get(['list', -1])).toThrow(/not a key or index/);
+      expect(() => anyM.get(['list', 1.5])).toThrow(/not a key or index/);
+    });
+  });
+
+  it('writes complete values, requires existing containers and leaves no partial writes', () => {
+    const t = withState((m, tt) => {
+      const anyM = m as MemoryAccessor<any>;
+      tt.manager.end(tt.plat.state.tick); // 先提交初始化，之后检查预检失败不标脏
+      tt.plat.state.tick++;
+      tt.manager.begin(tt.plat.state.tick);
+      const snapshot = JSON.stringify(m.query());
+      const failures: [(string | number)[], unknown, RegExp][] = [
+        [['nested', 'missing', 'value'], 1, /missing intermediate/],
+        [['count', 'x'], 1, /cannot traverse number/],
+        [['list', 3], 4, /out of range/],
+        [['list', 'length'], 0, /numeric index/],
+        [['tags', 'W1N1'], undefined, /undefined is not a JSON value/],
+        [['tags', 'W2N2'], { level: NaN }, /non-finite/],
+        [['nested', 'deep'], m.query(), /ancestor/],
+        [['tags', 'W2N2'], { back: m.query().tags }, /ancestor/],
+      ];
+      for (const [path, value, error] of failures)
+        expect(() => anyM.commit(path as [string], value)).toThrow(error);
+      expect(JSON.stringify(m.query())).toBe(snapshot);
+      expect(tt.manager.getStatus().dirty).toEqual([]);
+
+      m.commit(['tags', 'W2N2'], { level: 2 });
+      m.commit(['tags', 'W1N1', 'note'], 'dotted.name ok');
+      m.commit(['list', 0], 9);
+      m.commit('nested', { deep: { value: 5 } });
+      const shared = { v: 1 };
+      anyM.commit(['tags', 'W3N3'], { level: 3, a: shared, b: shared });
+      expect(tt.manager.getStatus().dirty).toHaveLength(1);
+    });
+    const payload = partitionOf(t.plat, 'o', 'main').payload;
+    expect(payload.tags.W2N2).toEqual({ level: 2 });
+    expect(payload.tags.W1N1.note).toBe('dotted.name ok');
+    expect(payload.list).toEqual([9, 2, 3]);
+    expect(payload.nested.deep.value).toBe(5);
+  });
+
+  it('removes object properties only and reports whether anything was removed', () => {
+    const t = withState((m, tt) => {
+      const anyM = m as MemoryAccessor<any>;
+      tt.manager.end(tt.plat.state.tick);
+      tt.plat.state.tick++;
+      tt.manager.begin(tt.plat.state.tick);
+      expect(anyM.remove(['tags', 'W9N9'])).toBe(false);
+      expect(anyM.remove(['missing', 'x'])).toBe(false);
+      expect(tt.manager.getStatus().dirty).toEqual([]);
+      expect(() => anyM.remove(['list', 0])).toThrow(/cannot be removed by path/);
+      expect(() => anyM.remove(['count', 'x'])).toThrow(/cannot traverse/);
+      expect(anyM.remove(['tags', 'W1N1'])).toBe(true);
+      expect(anyM.remove('nested')).toBe(true);
+      expect(tt.manager.getStatus().dirty).toHaveLength(1);
+    });
+    const payload = partitionOf(t.plat, 'o', 'main').payload;
+    expect(payload.tags).toEqual({});
+    expect('nested' in payload).toBe(false);
+  });
+
+  it('applies callback semantics: always dirty, no rollback, synchronous and non-reentrant', () => {
+    const t = setup();
+    let a!: MemoryAccessor<Counter>;
+    let b!: MemoryAccessor<Counter>;
+    t.tick(() => {
+      a = t.bind('o')('a', counterOptions);
+      b = t.bind('o')('b', counterOptions);
+    });
+    t.tick(() => {
+      expect(a.commit(() => 'noop')).toBe('noop');
+      expect(t.manager.getStatus().dirty).toEqual([{ owner: 'o', localId: 'a' }]);
+    });
+    t.tick(() => {
+      expect(() =>
+        a.commit((memory) => {
+          memory.count = 42;
+          throw new Error('late failure');
         })
-      );
-      let accessor!: MemoryAccessor<{ n: number }>;
-      h.run(() => {
-        accessor = h.manager.bind('bad')('main', {
-          version: 1,
-          layer: 'critical',
-          initialize: () => ({ n: 0 }),
-        });
+      ).toThrow(/late failure/);
+      expect(() => a.commit(async () => undefined)).toThrow(/synchronous/);
+      a.commit(() => {
+        expect(() => a.commit('count', 1)).toThrow(/being modified/);
+        expect(() => a.commit(() => undefined)).toThrow(/being modified/);
+        b.commit('count', 7); // 其他分区可以修改
+        expect(() => t.manager.end(t.plat.state.tick)).toThrow(/reentrantly/);
+        expect(() => t.manager.begin(t.plat.state.tick)).toThrow(/reentrantly/);
       });
-      h.run();
-      const access = accessor.access();
-      expect(access.status).toBe('pending');
-      if (access.status === 'pending') expect(access.reason).toBe('recovery');
+    });
+    expect(partitionOf(t.plat, 'o', 'a').payload.count).toBe(42);
+    expect(partitionOf(t.plat, 'o', 'b').payload.count).toBe(7);
+  });
+
+  it('rejects modifications after end but keeps reads available', () => {
+    const t = setup();
+    let a!: MemoryAccessor<Counter>;
+    t.tick(() => {
+      a = t.bind('o')('a', counterOptions);
+    });
+    expect(a.get('count')).toBe(0);
+    expect(() => a.commit('count', 1)).toThrow(/between begin and end/);
+    expect(() => a.remove('count' as never)).toThrow(/between begin and end/);
+  });
+});
+
+describe('MemoryManager commit-time validation', () => {
+  const twoPartitions = () => {
+    const t = setup();
+    let a!: MemoryAccessor<any>;
+    let b!: MemoryAccessor<Counter>;
+    t.tick(() => {
+      a = t.bind('o')('a', { version: 1, initialize: () => ({ v: 0, box: { n: 1 } }) });
+      b = t.bind('o')('b', counterOptions);
+    });
+    return { t, a, b };
+  };
+
+  it('skips full validation for path-only partitions', () => {
+    const { t, a } = twoPartitions();
+    t.tick(() => {
+      a.commit('v', 1);
+      // 协议违规：通过别名写入 NaN。未经回调修改的分区不做完整校验，原生 stringify 转成 null。
+      (a.query() as any).box.n = NaN;
+    });
+    expect(partitionOf(t.plat, 'o', 'a').payload).toEqual({ v: 1, box: { n: null } });
+  });
+
+  it('blocks every partition when a callback-modified partition is invalid, then recovers', () => {
+    const { t, a, b } = twoPartitions();
+    const committed = t.plat.state.raw;
+    t.tick(() => {
+      a.commit((memory) => {
+        memory.box.n = NaN;
+      });
+      a.commit('v', 3); // 回调后的路径写入不清除完整校验标记
+      b.commit('count', 9);
+    });
+    expect(t.plat.state.raw).toBe(committed);
+    const failure = t.manager.getStatus().writeFailure!;
+    expect(failure).toMatchObject({ stage: 'validate', owner: 'o', localId: 'a' });
+    expect(failure.message).toMatch(/\$\.box\.n: non-finite/);
+
+    t.tick(() => a.commit(['box', 'n'], 2));
+    expect(partitionOf(t.plat, 'o', 'a').payload).toEqual({ v: 3, box: { n: 2 } });
+    expect(partitionOf(t.plat, 'o', 'b').payload.count).toBe(9);
+  });
+
+  it('keeps the validation flag across platform failures and clears it after success', () => {
+    const { t, a } = twoPartitions();
+    t.plat.state.failWrite = new Error('busy');
+    t.tick(() => a.commit((memory) => void (memory.v = 1)));
+    t.plat.state.failWrite = null;
+    t.tick(() => {
+      (a.query() as any).box.n = undefined; // 别名写入：标记仍在，收尾应拒绝
+    });
+    expect(t.manager.getStatus().writeFailure).toMatchObject({ stage: 'validate' });
+    t.tick(() => a.commit(['box', 'n'], 1));
+    expect(t.manager.getStatus().writeFailure).toBeNull();
+    // 成功后标记清除：之后的别名 NaN 在仅路径写入时不再被完整校验。
+    t.tick(() => {
+      a.commit('v', 5);
+      (a.query() as any).box.n = NaN;
+    });
+    expect(partitionOf(t.plat, 'o', 'a').payload.box.n).toBeNull();
+  });
+
+  it('lets stringify reject cycles created in callbacks and terminates on shared objects', () => {
+    const { t, a } = twoPartitions();
+    t.tick(() =>
+      a.commit((memory) => {
+        const shared = { s: 1 };
+        memory.x = shared;
+        memory.y = shared;
+        memory.box.self = memory.box;
+      })
+    );
+    expect(t.manager.getStatus().writeFailure).toMatchObject({
+      stage: 'encode',
+      owner: 'o',
+      localId: 'a',
+    });
+    t.tick(() => a.commit((memory) => void delete memory.box.self));
+    expect(partitionOf(t.plat, 'o', 'a').payload.y).toEqual({ s: 1 });
+  });
+});
+
+describe('MemoryManager loading and compatibility', () => {
+  it('locks load failures, never writes and reports them on every begin', () => {
+    for (const [raw, error] of [
+      ['{bad json', /JSON/],
+      ['[1]', /not an object/],
+      [JSON.stringify({ memoryManager: { schemaVersion: 99 } }), /Unsupported MemoryManager schema: 99/],
+      [JSON.stringify({ memoryManager: { schemaVersion: 2, partitions: { a: { b: { payload: 1 } } } } }), /dataVersion/],
+      [JSON.stringify({ memoryManager: { schemaVersion: 2, partitions: {}, extra: 1 } }), /Unknown MemoryManager namespace field/],
+    ] as const) {
+      const t = setup(raw);
+      expect(() => t.begin()).toThrow(error);
+      expect(() => t.bind('a')('main', counterOptions)).toThrow(/storage load failed/);
+      t.end();
+      t.plat.state.tick++;
+      expect(() => t.begin()).toThrow(error);
+      t.end();
+      expect(t.plat.state.reads).toBe(1);
+      expect(t.plat.state.writes).toBe(0);
+      expect(t.plat.state.raw).toBe(raw);
+      expect(t.manager.getStatus().loadError).toMatch(error);
+      expect(t.logs.lines.filter((line) => line.includes('storage load failed'))).toHaveLength(1);
     }
-  );
-
-  it('F3: a segment envelope with a non-object payload is reported as recovery', () => {
-    const h = createHarness({ segmentIds: [0] });
-    h.run(() => {
-      h.manager.bind('seg')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 1 }),
-      });
-    });
-    h.settle();
-    const envelope = JSON.parse(h.plat.content()[0]);
-    envelope.payload = [1];
-    h.plat.content()[0] = JSON.stringify(envelope);
-
-    const second = createMemoryManager({
-      platform: h.plat.platform,
-      segmentIds: [0],
-    });
-    let accessor!: MemoryAccessor<{ n: number }>;
-    for (let tick = 100; tick < 106; tick++) {
-      second.begin(tick);
-      accessor ??= second.bind('seg')('main', {
-        version: 1,
-        layer: 'critical',
-        priority: 1,
-        initialize: () => ({ n: 1 }),
-      });
-      second.end(tick);
-      h.plat.nextTick();
-    }
-    const access = accessor.access();
-    expect(access.status).toBe('pending');
-    if (access.status === 'pending') expect(access.reason).toBe('recovery');
   });
 
-  it('F3b: refuses to hand an oversized Memory text to the engine', () => {
-    const h = createHarness();
-    const writes = jest.spyOn(h.plat.platform, 'writeRaw');
-    let accessor!: MemoryAccessor<{ blob: string }>;
-    h.run(() => {
-      accessor = h.manager.bind('big')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ blob: '' }),
-      });
-    });
-    const before = writes.mock.calls.length;
-    h.run(() => {
-      const access = accessor.access();
-      if (access.status === 'ready')
-        access.commit((memory) => (memory.blob = 'x'.repeat(2_200_000)));
-    });
-    expect(writes.mock.calls.length).toBe(before);
-    expect(JSON.stringify(h.manager.getStatus())).toContain('exceeds');
+  it('does not write for an empty store without applications', () => {
+    const t = setup('');
+    t.tick();
+    t.tick();
+    expect(t.plat.state.writes).toBe(0);
   });
 
-  /** F3b 复审：失败不依赖待提交分区——只有宿主根字段超限时也必须有管理器级诊断。 */
-  it('F3b: reports an oversized write caused only by host root fields', () => {
-    const sink = collecting();
-    const host: Record<string, unknown> = { creeps: {} };
-    const h = createHarness({
-      logging: sink.logging,
-      getHostMemory: () => host,
+  it('preserves historical payloads of any JSON shape and dataVersion 0 across reloads', () => {
+    const history = {
+      memoryManager: {
+        schemaVersion: 2,
+        partitions: {
+          a: {
+            arr: { dataVersion: 1, payload: [1, 2] },
+            nul: { dataVersion: 3, payload: null },
+            num: { dataVersion: 1, payload: 5 },
+            zero: { dataVersion: 0, payload: { legacy: true } },
+          },
+        },
+      },
+      external: { keep: [1, 2, 3] },
+    };
+    const t = setup(JSON.stringify(history));
+    t.tick(() => t.bind('b')('main', counterOptions));
+    const first = stored(t.plat);
+    expect(first.memoryManager.partitions.a).toEqual(history.memoryManager.partitions.a);
+    expect(first.external).toEqual(history.external);
+
+    const { manager } = reset(t.plat);
+    t.plat.state.tick++;
+    manager.begin(t.plat.state.tick);
+    const upgraded = manager.bind('a')('zero', {
+      version: 1,
+      initialize: counterInit,
+      migrate: (memory) => ({ count: (memory as { legacy: boolean }).legacy ? 1 : 0 }),
     });
-    const writes = jest.spyOn(h.plat.platform, 'writeRaw');
-    h.run();
-    h.run();
-    expect(h.manager.getStatus().rawWriteError).toBeNull();
-
-    const before = writes.mock.calls.length;
-    host.creeps = { blob: 'x'.repeat(2_200_000) };
-    h.run();
-    h.run();
-
-    expect(writes.mock.calls.length).toBe(before);
-    expect(h.manager.getStatus().rawWriteError).toContain('exceeds');
-    expect(h.manager.getStatus().fault).toBeNull();
-    const warns = sink
-      .text()
-      .split('\n')
-      .filter((line) => line.includes('raw memory write failed'));
-    expect(warns).toHaveLength(1);
-
-    // 缩小后下一 tick 自动重试成功，诊断清空。
-    host.creeps = {};
-    h.run();
-    expect(h.manager.getStatus().rawWriteError).toBeNull();
-    expect(writes.mock.calls.length).toBeGreaterThan(before);
+    expect(upgraded.query()).toEqual({ count: 1 });
+    manager.end(t.plat.state.tick);
+    expect(partitionOf(t.plat, 'a', 'zero')).toEqual({ dataVersion: 1, payload: { count: 1 } });
   });
 
-  /** S01a：switch journal 缺少 staged 项时不得写出缺值 Raw 记录，也不得清空有效 Segment 源。 */
-  it('S01: aborts a switch-to-raw move whose staged payload is missing and keeps the source', () => {
-    const h = createHarness({ segmentIds: [0] });
-    const source = JSON.stringify({
-      schemaVersion: 1,
-      owner: { pluginId: 'owner', localId: 'main' },
-      generation: 1,
-      dataVersion: 1,
-      payload: { n: 42 },
+  it('converts schemaVersion 1, ignoring segment identities and orphan records', () => {
+    const v1 = {
+      memoryManager: {
+        schemaVersion: 1,
+        generationCounter: 7,
+        allocations: {
+          a: { main: { backend: 'raw', generation: 2 }, seg: { backend: 'segment', segmentId: 3, generation: 4 } },
+        },
+        rawPartitions: {
+          a: {
+            main: { dataVersion: 1, payload: { count: 4 } },
+            seg: { dataVersion: 1, payload: { count: 99 } },
+            orphan: { dataVersion: 1, payload: { count: 5 } },
+          },
+        },
+        migration: { generation: 7, phase: 'copy', reason: 'allocation', moves: [], staged: {} },
+      },
+    };
+    const t = setup(JSON.stringify(v1));
+    t.tick(); // 没有业务修改，格式转换也要写出
+    expect(stored(t.plat).memoryManager).toEqual({
+      schemaVersion: 2,
+      partitions: { a: { main: { dataVersion: 1, payload: { count: 4 } } } },
     });
-    h.plat.content()[0] = source;
-    h.plat.setRaw(
+    expect(t.manager.getStatus().ignoredSegmentPartitions).toEqual([{ owner: 'a', localId: 'seg' }]);
+    expect(t.logs.lines.filter((line) => line.includes('ignored segment partitions: a/seg'))).toHaveLength(1);
+
+    const { manager } = reset(t.plat);
+    manager.begin(t.plat.state.tick);
+    const initialize = jest.fn(counterInit);
+    expect(manager.bind('a')('seg', { version: 1, initialize }).query()).toEqual({ count: 0 });
+    expect(initialize).toHaveBeenCalledTimes(1);
+    expect(manager.bind('a')('main', counterOptions).query()).toEqual({ count: 4 });
+  });
+
+  it('repeats the conversion when its write fails', () => {
+    const v1 = JSON.stringify({
+      memoryManager: {
+        schemaVersion: 1,
+        allocations: { a: { main: { backend: 'raw', generation: 0 } } },
+        rawPartitions: { a: { main: { dataVersion: 1, payload: { count: 1 } } } },
+      },
+    });
+    const t = setup(v1);
+    t.plat.state.failWrite = new Error('nope');
+    t.tick();
+    expect(t.plat.state.raw).toBe(v1);
+    t.plat.state.failWrite = null;
+    const { manager } = reset(t.plat); // global reset 后重新转换
+    manager.begin(t.plat.state.tick);
+    manager.end(t.plat.state.tick);
+    expect(stored(t.plat).memoryManager.schemaVersion).toBe(2);
+  });
+
+  it('reports schemaVersion 1 raw allocations without records as load errors', () => {
+    const t = setup(
       JSON.stringify({
         memoryManager: {
           schemaVersion: 1,
-          generationCounter: 2,
-          allocations: {
-            owner: {
-              main: { backend: 'segment', segmentId: 0, generation: 1 },
-            },
-          },
+          allocations: { a: { main: { backend: 'raw', generation: 0 } } },
           rawPartitions: {},
-          migration: {
-            generation: 2,
-            phase: 'switch',
-            reason: 'preemption',
-            moves: [
-              {
-                pluginId: 'owner',
-                localId: 'main',
-                dataVersion: 1,
-                from: 'segment',
-                fromSegmentId: 0,
-                fromGeneration: 1,
-                to: 'raw',
-              },
-            ],
-            staged: {},
-          },
         },
       })
     );
-    for (let i = 0; i < 4; i++) h.run();
-    const namespace = namespaceOf(h.plat.raw());
-    expect(h.plat.content()[0]).toBe(source);
-    expect(namespace.migration).toBeNull();
-    expect(namespace.allocations.owner.main.backend).toBe('segment');
-    expect(namespace.rawPartitions.owner).toBeUndefined();
-
-    const second = createMemoryManager({
-      platform: h.plat.platform,
-      segmentIds: [0],
-    });
-    let accessor!: MemoryAccessor<{ n: number }>;
-    for (let tick = 100; tick < 104; tick++) {
-      second.begin(tick);
-      accessor ??= second.bind('owner')('main', {
-        version: 1,
-        layer: 'critical',
-        initialize: () => ({ n: 0 }),
-      });
-      second.end(tick);
-      h.plat.nextTick();
-    }
-    expect(readyData(accessor)).toEqual({ n: 42 });
+    expect(() => t.begin()).toThrow(/Missing raw partition/);
   });
 
-  /** S01b：verify 阶段目标信封头完好但 payload 被改坏，不得删除有效 Raw 源。 */
-  it('S01: keeps the valid raw source when the verify target payload is corrupted', () => {
-    const h = createHarness({ segmentIds: [0] });
-    // 同一身份的重复申请要求声明引用稳定，选项必须在循环外创建一次。
-    const options = {
-      version: 1,
-      layer: 'critical' as const,
-      priority: 1,
-      initialize: () => ({ n: 0 }),
+  it('imports the legacy leviathan layout without sharing objects with the preserved field', () => {
+    const legacy = {
+      plugins: { probe: { value: 42 }, versioned: { n: 1 }, notObject: 5 },
+      framework: { pluginVersions: { versioned: 3 } },
     };
-    for (let i = 0; i < 8; i++) {
-      h.run(() => {
-        h.manager.bind('owner')('main', options);
-      });
-      if (h.manager.getStatus().migration?.phase === 'verify') break;
-    }
-    expect(h.manager.getStatus().migration?.phase).toBe('verify');
-    const corrupted = JSON.parse(h.plat.content()[0]);
-    corrupted.payload = null;
-    h.plat.content()[0] = JSON.stringify(corrupted);
-    for (let i = 0; i < 4; i++) h.run();
+    const t = setup(JSON.stringify({ leviathan: legacy, other: 'x' }));
+    t.tick(() => {
+      expect(() => t.bind('probe')('main', { version: 1, initialize: () => ({}) })).toThrow(
+        /missing migrate for stored dataVersion 0/
+      );
+      const versioned = t.bind('versioned')('main', { version: 3, initialize: () => ({ n: 0 }) });
+      versioned.commit('n', 2);
+    });
+    const root = stored(t.plat);
+    expect(root.leviathan).toEqual(legacy);
+    expect(root.other).toBe('x');
+    expect(root.memoryManager.partitions.probe.main).toEqual({ dataVersion: 0, payload: { value: 42 } });
+    expect(root.memoryManager.partitions.versioned.main).toEqual({ dataVersion: 3, payload: { n: 2 } });
+    expect(root.memoryManager.partitions.notObject).toBeUndefined();
+  });
+});
 
-    const namespace = namespaceOf(h.plat.raw());
-    expect(namespace.migration).toBeNull();
-    expect(namespace.allocations.owner.main.backend).toBe('raw');
-    expect(namespace.rawPartitions.owner.main.payload).toEqual({ n: 0 });
+describe('MemoryManager lifecycle', () => {
+  it('validates ticks, rejects end without begin and does not reopen a finished tick', () => {
+    const t = setup();
+    expect(() => t.manager.begin(2)).toThrow(/does not match current tick 1/);
+    expect(() => t.manager.end(1)).toThrow(/without begin/);
+    t.begin();
+    const a = t.bind('o')('a', counterOptions);
+    t.end();
+    const writes = t.plat.state.writes;
+    t.manager.end(1); // 重复 end 不重复提交
+    t.manager.begin(1); // 同 tick 重复 begin 不重开写入阶段
+    expect(() => a.commit('count', 1)).toThrow(/between begin and end/);
+    expect(t.plat.state.writes).toBe(writes);
+    t.plat.state.tick = 3;
+    t.begin(3);
+    t.end();
+    t.plat.state.tick = 2;
+    expect(() => t.manager.begin(2)).toThrow(/older/);
   });
 
-  /** S03：不可表示的宿主根字段按原生对象序列化语义省略，输出必须仍是合法 JSON。 */
-  it.each([
-    ['undefined', () => undefined],
-    ['function', () => () => 1],
-    ['symbol', () => Symbol('x')],
-    ['toJSON undefined', () => ({ toJSON: () => undefined })],
-  ])(
-    'S03: omits a host root field holding %s and stays loadable',
-    (_name, make) => {
-      const host: Record<string, unknown> = { optional: make(), rooms: {} };
-      const h = createHarness({ getHostMemory: () => host });
-      const options = {
-        version: 1,
-        layer: 'critical' as const,
-        initialize: () => ({ n: 0 }),
-      };
-      h.run(() => {
-        h.manager.bind('owner')('main', options);
-      });
-      h.run();
-      const parsed = JSON.parse(h.plat.raw());
-      expect(parsed.rooms).toEqual({});
-      expect('optional' in parsed).toBe(false);
-      expect(h.manager.getStatus().rawWriteError).toBeNull();
+  it('recovers a missed end on the next real tick and keeps dirty data', () => {
+    const t = setup();
+    let a!: MemoryAccessor<Counter>;
+    t.begin();
+    a = t.bind('o')('a', counterOptions);
+    a.commit('count', 1);
+    // 没有 end：下一个真实 tick 的 begin 终结旧阶段。
+    t.plat.state.tick = 2;
+    t.begin(2);
+    a.commit('count', 2);
+    t.end();
+    expect(partitionOf(t.plat, 'o', 'a').payload.count).toBe(2);
+  });
 
-      const restarted = createMemoryManager({ platform: h.plat.platform });
-      restarted.begin(100);
-      expect(restarted.getStatus().fault).toBeNull();
-    }
-  );
+  it('recovers from a hard termination inside a commit callback', () => {
+    const t = setup();
+    let a!: MemoryAccessor<Counter>;
+    t.tick(() => {
+      a = t.bind('o')('a', counterOptions);
+    });
+    t.begin();
+    expect(() =>
+      runInNewContext('run()', {
+        run: () =>
+          a.commit((memory) => {
+            memory.count = 5;
+            for (;;);
+          }),
+      }, { timeout: 50 })
+    ).toThrow(/timed out/);
+    // 同一 tick 内锁仍在（回调的 finally 没有执行），同步重入仍被拒绝。
+    expect(() => a.commit('count', 1)).toThrow(/being modified/);
+    t.plat.state.tick++;
+    t.begin();
+    a.commit((memory) => void (memory.count += 1));
+    t.end();
+    expect(partitionOf(t.plat, 'o', 'a').payload.count).toBe(6);
+  });
 
-  /** S03：真正无法序列化（循环引用、BigInt）时报告写入失败，并保留最后一次有效文本。 */
-  it.each([
-    [
-      'circular',
-      () => {
-        const c: Record<string, unknown> = {};
-        c.self = c;
-        return c;
-      },
-    ],
-    ['bigint', () => BigInt(1)],
-  ])(
-    'S03: keeps the last valid raw text when a host field is %s',
-    (_name, make) => {
-      const host: Record<string, unknown> = { rooms: {} };
-      const h = createHarness({ getHostMemory: () => host });
-      h.run();
-      h.run();
-      const valid = h.plat.raw();
-      host.bad = make();
-      h.run();
-      expect(h.plat.raw()).toBe(valid);
-      expect(h.manager.getStatus().rawWriteError).not.toBeNull();
-      delete host.bad;
-      h.run();
-      expect(h.manager.getStatus().rawWriteError).toBeNull();
-    }
-  );
+  it('retries a commit interrupted inside the platform write or the baseline update', () => {
+    const t = setup();
+    let a!: MemoryAccessor<Counter>;
+    t.tick(() => {
+      a = t.bind('o')('a', counterOptions);
+    });
+    // 中断发生在平台接受文本之前。
+    t.plat.state.onWrite = () => {
+      for (;;);
+    };
+    t.begin();
+    a.commit('count', 1);
+    expect(() =>
+      runInNewContext('run()', { run: () => t.end() }, { timeout: 50 })
+    ).toThrow(/timed out/);
+    t.plat.state.onWrite = null;
+    expect(t.manager.getStatus().dirty).toHaveLength(1);
+    t.plat.state.tick++;
+    t.tick();
+    expect(partitionOf(t.plat, 'o', 'a').payload.count).toBe(1);
+    expect(t.manager.getStatus().dirty).toEqual([]);
+  });
+
+  it('does not publish an application interrupted during initialize', () => {
+    const t = setup();
+    t.begin();
+    let hang = true;
+    const initialize = () => {
+      if (hang) for (;;);
+      return { count: 1 };
+    };
+    expect(() =>
+      runInNewContext('run()', {
+        run: () => t.bind('o')('a', { version: 1, initialize }),
+      }, { timeout: 50 })
+    ).toThrow(/timed out/);
+    expect(t.manager.getStatus().partitions).toEqual([]);
+    hang = false;
+    t.plat.state.tick++;
+    t.begin();
+    expect(t.bind('o')('a', { version: 1, initialize }).query()).toEqual({ count: 1 });
+    t.end();
+  });
 });
+
+/** 2026-09-22 模块审计的回归用例（M1、M3、M6、M7）。 */
+describe('MemoryManager audit regressions', () => {
+  it('M1: isolates initialize and migrate results from shared or frozen objects', () => {
+    const t = setup();
+    const DEFAULT = { n: 0 };
+    const FROZEN = Object.freeze({ n: 0 });
+    const shared = { version: 1, initialize: () => DEFAULT };
+    let x!: MemoryAccessor<{ n: number }>;
+    let y!: MemoryAccessor<{ n: number }>;
+    let frozen!: MemoryAccessor<{ n: number }>;
+    t.tick(() => {
+      x = t.bind('p')('x', shared);
+      y = t.bind('p')('y', shared);
+      frozen = t.bind('p')('frozen', { version: 1, initialize: () => FROZEN });
+    });
+    t.tick(() => {
+      x.commit('n', 5);
+      frozen.commit('n', 1); // 冻结常量被复制，写入不会抛错
+    });
+    expect(y.get('n')).toBe(0);
+    expect(DEFAULT.n).toBe(0);
+    expect(FROZEN.n).toBe(0);
+    expect(partitionOf(t.plat, 'p', 'y').payload.n).toBe(0);
+    expect(partitionOf(t.plat, 'p', 'frozen').payload.n).toBe(1);
+
+    const { manager } = reset(t.plat);
+    manager.begin(t.plat.state.tick);
+    const MIGRATED = { n: 9 };
+    const migrated = manager.bind('p')('x', {
+      version: 2,
+      initialize: () => ({ n: 0 }),
+      migrate: () => MIGRATED,
+    });
+    migrated.commit('n', 10);
+    expect(MIGRATED.n).toBe(9);
+  });
+
+  it('M3: rejects symbol-keyed properties at publish and at commit time', () => {
+    const t = setup();
+    const marker = Symbol('marker');
+    let a!: MemoryAccessor<any>;
+    t.tick(() => {
+      expect(() =>
+        t.bind('p')('bad', { version: 1, initialize: () => ({ list: Object.assign([1], { [marker]: 1 }) }) })
+      ).toThrow(/\$\.list: symbol-keyed property/);
+      a = t.bind('p')('a', { version: 1, initialize: () => ({ box: {} }) });
+      expect(() => a.commit('box', { [marker]: true })).toThrow(/symbol-keyed property/);
+    });
+    const committed = t.plat.state.raw;
+    t.tick(() => a.commit((memory) => void (memory.box[marker] = 1)));
+    expect(t.plat.state.raw).toBe(committed);
+    expect(t.manager.getStatus().writeFailure).toMatchObject({
+      stage: 'validate',
+      owner: 'p',
+      localId: 'a',
+    });
+    expect(t.manager.getStatus().writeFailure!.message).toMatch(/\$\.box: symbol-keyed property/);
+  });
+
+  it('M6: addresses numeric-keyed records with string segments', () => {
+    const t = setup();
+    t.tick(() => {
+      const history = t.bind('p')('history', {
+        version: 1,
+        initialize: () => ({ byTick: {} as Record<number, { cpu: number }> }),
+      });
+      history.commit(['byTick', String(100)], { cpu: 3 });
+      expect(history.get(['byTick', '100', 'cpu'])).toBe(3);
+      expect(() => (history as MemoryAccessor<any>).get(['byTick', 100])).toThrow(/string key/);
+      expect(history.remove(['byTick', '100'])).toBe(true);
+    });
+  });
+
+  it('M7: rejects malformed application calls', () => {
+    const t = setup();
+    t.tick(() => {
+      const accessor = t.bind('p')('a', counterOptions) as MemoryAccessor<any>;
+      expect(() => (accessor.commit as any)('count')).toThrow(/requires a value/);
+      expect(() => t.bind('p')('b', null as any)).toThrow(/options must be an object/);
+      expect(() =>
+        t.bind('p')('c', { version: 1, initialize: counterInit, migrate: 'x' as any })
+      ).toThrow(/migrate must be a function/);
+    });
+  });
+
+  it('M7: rejects reentrant applications and lifecycle calls from initialize', () => {
+    const t = setup();
+    t.tick(() => {
+      const bind = t.bind('p');
+      const errors: string[] = [];
+      const options: MemoryApplicationOptions<Counter> = {
+        version: 1,
+        initialize: () => {
+          for (const attempt of [
+            () => bind('a', options),
+            () => t.manager.begin(t.plat.state.tick),
+            () => t.manager.end(t.plat.state.tick),
+          ]) {
+            try {
+              attempt();
+            } catch (error) {
+              errors.push((error as Error).message);
+            }
+          }
+          return { count: 0 };
+        },
+      };
+      expect(bind('a', options).query()).toEqual({ count: 0 });
+      expect(errors).toEqual([
+        expect.stringMatching(/reentrant application for p\/a/),
+        expect.stringMatching(/begin cannot be called reentrantly/),
+        expect.stringMatching(/end cannot be called reentrantly/),
+      ]);
+    });
+  });
+
+  it('M7: rejects remove on the partition being modified by its own callback', () => {
+    const t = setup();
+    t.tick(() => {
+      const accessor = t.bind('p')('a', {
+        version: 1,
+        initialize: () => ({ count: 0, extra: 1 }),
+      }) as MemoryAccessor<any>;
+      accessor.commit(() => {
+        expect(() => accessor.remove('extra')).toThrow(/being modified/);
+      });
+    });
+  });
+
+  it('M7: reports malformed stored structures as load errors', () => {
+    const v2 = (partitions: unknown, extra: object = {}) =>
+      JSON.stringify({ memoryManager: { schemaVersion: 2, partitions, ...extra } });
+    const v1 = (allocations: unknown, rawPartitions: unknown = {}) =>
+      JSON.stringify({ memoryManager: { schemaVersion: 1, allocations, rawPartitions } });
+    const cases: [string, RegExp][] = [
+      [JSON.stringify({ memoryManager: [] }), /namespace: not an object/],
+      [v2({ a: { b: { dataVersion: 1, payload: {}, extra: 1 } } }), /Unknown record field extra/],
+      [v2({ a: { '': { dataVersion: 1, payload: {} } } }), /Invalid partitions key/],
+      [v2({ a: 5 }), /Invalid partitions bucket/],
+      [v1({ a: { main: 5 } }), /Invalid allocation at a\/main/],
+      [v1({ a: { main: { backend: 'disk' } } }), /Invalid allocation backend/],
+      [JSON.stringify({ memoryManager: { schemaVersion: 1, allocations: {}, rawPartitions: 5 } }), /Invalid MemoryManager rawPartitions/],
+    ];
+    for (const [raw, error] of cases) {
+      const t = setup(raw);
+      expect(() => t.begin()).toThrow(error);
+      expect(t.plat.state.writes).toBe(0);
+    }
+  });
+
+  it('M7: skips and reports unsafe legacy plugin keys', () => {
+    const legacy = { plugins: JSON.parse('{"__proto__":{"x":1},"ok":{"y":2}}') };
+    const t = setup(JSON.stringify({ leviathan: legacy }));
+    t.tick();
+    expect(stored(t.plat).memoryManager.partitions).toEqual({
+      ok: { main: { dataVersion: 0, payload: { y: 2 } } },
+    });
+    expect(t.logs.lines.some((line) => line.includes('legacy import skipped unsafe key: __proto__'))).toBe(true);
+  });
+});
+
+/** 2026-09-22 第二轮模块审计的回归用例（N1、N3、N4）。 */
+describe('MemoryManager audit round-2 regressions', () => {
+  it('N1: copies path-written values so callers keep ownership', () => {
+    const t = setup();
+    const DEFAULT = { limit: 1 };
+    const FROZEN = Object.freeze({ limit: 1 });
+    let a!: MemoryAccessor<any>;
+    let b!: MemoryAccessor<any>;
+    t.tick(() => {
+      a = t.bind('p')('a', { version: 1, initialize: () => ({}) });
+      b = t.bind('p')('b', { version: 1, initialize: () => ({}) });
+      a.commit('config', DEFAULT);
+      b.commit('config', DEFAULT);
+      a.commit('frozen', FROZEN);
+    });
+    t.tick(() => {
+      a.commit(['config', 'limit'], 5);
+      a.commit(['frozen', 'limit'], 2); // 冻结原对象不影响分区中的副本
+      a.commit('snapshot', a.get('config')); // 分区内复制，不再共享
+      a.commit(['config', 'limit'], 7);
+    });
+    DEFAULT.limit = 9; // 调用方事后修改原对象
+    expect(FROZEN.limit).toBe(1);
+    expect(b.get(['config', 'limit'])).toBe(1);
+    expect(a.get(['snapshot', 'limit'])).toBe(5);
+    expect(partitionOf(t.plat, 'p', 'a').payload).toEqual({
+      config: { limit: 7 },
+      frozen: { limit: 2 },
+      snapshot: { limit: 5 },
+    });
+    expect(partitionOf(t.plat, 'p', 'b').payload).toEqual({ config: { limit: 1 } });
+  });
+
+  it('N3: ignores enumerable prototype extensions like JSON.stringify does', () => {
+    const t = setup();
+    let status: ReturnType<MemoryManager['getStatus']>;
+    let raw: string;
+    (Object.prototype as any).polluted = 1;
+    try {
+      t.tick(() => {
+        const a = t.bind('p')('a', { version: 1, initialize: () => ({ box: {} }) }) as MemoryAccessor<any>;
+        a.commit('box', { v: 1 });
+        a.commit((memory) => void (memory.extra = { y: 1 }));
+      });
+      status = t.manager.getStatus();
+      raw = t.plat.state.raw;
+    } finally {
+      delete (Object.prototype as any).polluted;
+    }
+    expect(status.writeFailure).toBeNull();
+    expect(raw).not.toContain('polluted');
+    expect(partitionOf(t.plat, 'p', 'a').payload).toEqual({ box: { v: 1 }, extra: { y: 1 } });
+  });
+
+  const history = (extra: Record<string, unknown> = {}) =>
+    JSON.stringify({
+      tool: { note: 'kept' },
+      memoryManager: {
+        schemaVersion: 2,
+        partitions: {
+          p: {
+            a: { dataVersion: 1, payload: { count: 5 } },
+            b: { dataVersion: 1, payload: { count: 6, list: [1, 2] } },
+            c: { dataVersion: 1, payload: { count: 7 } },
+            ...extra,
+          },
+        },
+      },
+    });
+
+  it('N4: loads without encoding and applies without re-parsing', () => {
+    const t = setup(history());
+    const stringify = jest.spyOn(JSON, 'stringify');
+    const parse = jest.spyOn(JSON, 'parse');
+    try {
+      t.begin();
+      // 装载只解析一次，不重新编码 payload 或根字段（只编码 owner/localId 等键名前缀）。
+      expect(stringify.mock.calls.filter(([value]) => typeof value !== 'string')).toEqual([]);
+      expect(parse).toHaveBeenCalledTimes(1);
+      parse.mockClear();
+      const a = t.bind('p')('a', counterOptions);
+      expect(parse).not.toHaveBeenCalled(); // 同版本申请直接使用暂存对象
+      expect(a.query()).toEqual({ count: 5 });
+      a.commit('count', 50);
+      t.end();
+    } finally {
+      stringify.mockRestore();
+      parse.mockRestore();
+    }
+    // 未修改的记录与根字段按原内容写出。
+    const expected = JSON.parse(history());
+    expected.memoryManager.partitions.p.a.payload.count = 50;
+    expect(stored(t.plat)).toEqual(expected);
+    expect(t.plat.state.raw).toContain('"b":{"dataVersion":1,"payload":{"count":6,"list":[1,2]}}');
+  });
+
+  it('N4: attributes a lazy encoding failure of a clean partition to its owner', () => {
+    const t = setup(history());
+    t.tick(() => {
+      const a = t.bind('p')('a', counterOptions);
+      // 协议违规：通过读取引用制造循环，分区没有被标脏，首次拼接时才会编码它。
+      (a.query() as any).self = a.query();
+      (t.bind('p')('b', counterOptions) as MemoryAccessor<any>).commit('count', 1);
+    });
+    expect(t.manager.getStatus().writeFailure).toMatchObject({ stage: 'encode', owner: 'p', localId: 'a' });
+    expect(t.plat.state.writes).toBe(0);
+  });
+
+  it('N4: fixes the baseline before migrate so a mutating failure cannot leak', () => {
+    const t = setup(history());
+    t.tick(() => {
+      const failing = {
+        version: 2,
+        initialize: counterInit,
+        migrate: (memory: any) => {
+          memory.count = -1; // 修改收到的对象后抛错
+          throw new Error('migrate failed');
+        },
+      };
+      expect(() => t.bind('p')('a', failing)).toThrow(/migrate failed/);
+      t.bind('p')('c', counterOptions).commit('count', 70); // 触发整串拼接
+    });
+    expect(partitionOf(t.plat, 'p', 'a')).toEqual({ dataVersion: 1, payload: { count: 5 } });
+    t.tick(() => {
+      const fixed = t.bind('p')('a', {
+        version: 2,
+        initialize: counterInit,
+        migrate: (memory: any) => ({ count: memory.count * 2 }),
+      });
+      expect(fixed.query()).toEqual({ count: 10 }); // 从基线重新解析，而不是被修改过的对象
+    });
+    expect(partitionOf(t.plat, 'p', 'a')).toEqual({ dataVersion: 2, payload: { count: 10 } });
+  });
+});
+
+/** N2：只缓存确定性失败，用户回调阶段的失败在下一次申请时重试。 */
+describe('MemoryManager application failure cache', () => {
+  const catchError = (action: () => unknown): Error => {
+    try {
+      action();
+    } catch (error) {
+      return error as Error;
+    }
+    throw new Error('expected a failure');
+  };
+
+  it('caches deterministic failures detected by the manager', () => {
+    const t = setup(
+      JSON.stringify({
+        memoryManager: {
+          schemaVersion: 2,
+          partitions: { p: { old: { dataVersion: 1, payload: {} }, bad: { dataVersion: 1, payload: [1] } } },
+        },
+      })
+    );
+    t.tick(() => {
+      const noMigrate = { version: 2, initialize: counterInit };
+      const first = catchError(() => t.bind('p')('old', noMigrate));
+      expect(first.message).toMatch(/missing migrate/);
+      expect(catchError(() => t.bind('p')('old', noMigrate))).toBe(first); // 命中缓存
+      const invalid = catchError(() => t.bind('p')('bad', counterOptions));
+      expect(invalid.message).toMatch(/not managed data/);
+      expect(catchError(() => t.bind('p')('bad', counterOptions))).toBe(invalid);
+    });
+  });
+
+  it('retries callback failures, including invalid return values and transient conditions', () => {
+    const t = setup();
+    let visible = false;
+    const initialize = jest.fn(() => {
+      if (!visible) throw new Error('room not visible');
+      return { count: 1 };
+    });
+    const invalid = jest.fn(() => ({ count: NaN }));
+    t.tick(() => {
+      expect(() => t.bind('p')('seed', { version: 1, initialize })).toThrow(/room not visible/);
+      expect(() => t.bind('p')('invalid', { version: 1, initialize: invalid })).toThrow(/non-finite/);
+      expect(() => t.bind('p')('invalid', { version: 1, initialize: invalid })).toThrow(/non-finite/);
+    });
+    expect(invalid).toHaveBeenCalledTimes(2);
+    visible = true; // 暂时性条件解除后，同一声明直接成功
+    t.tick(() => {
+      expect(t.bind('p')('seed', { version: 1, initialize }).query()).toEqual({ count: 1 });
+    });
+    expect(initialize).toHaveBeenCalledTimes(2);
+    expect(partitionOf(t.plat, 'p', 'seed').payload).toEqual({ count: 1 });
+  });
+});
+
+/** 类型层面的使用示例也要能在运行时工作：const 路径常量复用。 */
+describe('MemoryManager path constants', () => {
+  it('accepts reusable readonly path constants', () => {
+    const t = setup();
+    t.tick(() => {
+      const m = t.bind('o')('main', {
+        version: 1,
+        initialize: () => ({ rooms: { W1N1: { level: 1 } } as Record<string, { level: number }> }),
+      });
+      const path = ['rooms', 'W1N1', 'level'] as const;
+      m.commit(path, 2);
+      expect(m.get(path)).toBe(2);
+    });
+  });
+});
+
+export type { MemoryManager };

@@ -8,7 +8,7 @@
  * 实现过程：loop 在 tick 开始驱动存储并应用注册命令，再按依赖顺序初始化和执行插件，
  * 集中仲裁意图，逆序执行收尾，最后更新健康记录并驱动存储提交；各阶段结合 CPU 检查与错误捕获。
  *
- * 技术要点：同一 tick 重复调用被跳过，重入被拒绝；注册命令整批校验后生效，连续失败会暂停插件。
+ * 技术要点：同一 tick 重复调用被跳过，重入按真实 tick 归属拒绝（硬终止遗留的锁在下一 tick 失效）；注册命令整批校验后生效，连续失败会暂停插件。
  * 服务、上下文和计时包装跨 tick 复用，意图与本轮失败集合每 tick 重建；global reset 后重建实例。
  * 持久数据的加载与恢复完全交给 Runtime 的 MemoryManager，本文件不直接读写游戏存储。
  */
@@ -80,8 +80,13 @@ export const createFramework = (options: FrameworkOptions): Framework => {
   /** 动态调用归属，用于限制 setup/submit 权限；嵌套事件回调退出后必须恢复外层值。 */
   let currentPhase: Phase = 'framework';
   let currentPlugin = '';
-  /** running 防止递归 loop；lastTick 防止同 tick 重复执行，失败 tick 也不重放。 */
-  let running = false;
+  /**
+   * runningTick 是带 tick 归属的重入锁：只在“同一个真实 tick 内”判定为重入。
+   * 引擎硬终止 CPU 时 finally 不会执行，若 heap 保留，布尔锁会让之后每个 tick 都被判为
+   * 重入而永久锁死；记录 tick 后，下一个真实 tick（Game.time 更大）会把遗留值视为过期。
+   * lastTick 防止同 tick 重复执行，失败 tick 也不重放。
+   */
+  let runningTick: number | undefined;
   let lastTick: number | undefined;
   /** 以下诊断、可用集合与 broker 每 tick 重建；-1 broker 仅为首次 loop 前占位。 */
   let failures: PluginFailure[] = [];
@@ -306,10 +311,15 @@ export const createFramework = (options: FrameworkOptions): Framework => {
    * 普通插件故障隔离到自身/依赖者，关键插件故障进入本 tick safeMode 并停止后续提交。
    */
   const loop = (): void => {
-    if (running) throw new Error('Framework loop is not reentrant');
-    if (lastTick === getGame().time) return;
-    running = true;
-    lastTick = getGame().time;
+    const now = getGame().time;
+    if (runningTick === now) throw new Error('Framework loop is not reentrant');
+    if (lastTick === now) return;
+    // 新的真实 tick：覆盖可能由硬终止遗留的旧锁，并复位上一轮未能在 finally 中恢复的归属状态。
+    runningTick = now;
+    lastTick = now;
+    currentPhase = 'framework';
+    currentPlugin = '';
+    activeCleanup = undefined;
     failures = [];
     failed = new Set();
     available = new Set();
@@ -320,16 +330,10 @@ export const createFramework = (options: FrameworkOptions): Framework => {
     const entered: typeof participants = [];
     /** 注册批次验证成功后才统计参与集合，失败批次不改变已有健康记录。 */
     let registryReady = false;
-    /**
-     * 本轮是否有插件因 CPU 准入被跳过。被跳过的插件不会执行 setup，也就不会提出
-     * Memory 申请；此时必须延后封存启动窗口，否则它会在窗口关闭后才申请而失去
-     * Segment 资格（设计文档 §4：申请不能依赖 CPU 准入）。
-     */
-    let startupPending = false;
     try {
-      // Memory 生命周期先于插件阶段开始：解析/恢复与页激活在 setup 申请之前完成。
-      // 用错误边界包裹：存储异常按内核故障记录并进入安全模式，绝不把异常留在
-      // tick 之外（否则 running 无法复位，之后每个 tick 都会被判定为不可重入）。
+      // Memory 生命周期先于插件阶段开始：首次 begin 同步装载存储，之后插件 setup 才能申请分区。
+      // 装载故障是宿主故障：错误边界记录后进入安全模式，本 tick 不执行任何插件阶段；
+      // 异常不能逃出 tick（否则 runningTick 无法复位，本 tick 内的后续调用会被判为重入）。
       const memoryBegin = invoke('framework', 'framework', () =>
         runtime.memory.begin(getGame().time)
       );
@@ -373,10 +377,7 @@ export const createFramework = (options: FrameworkOptions): Framework => {
         if (safeMode) break;
         const id = plugin.manifest.id;
         if (!enabled.has(id) || !dependenciesReady(plugin)) continue;
-        if (!cpu.admit(plugin.manifest.critical)) {
-          startupPending = true;
-          continue;
-        }
+        if (!cpu.admit(plugin.manifest.critical)) continue;
         // Context 是 global 级闭包；tick 和 broker 均在使用时读取当前值。
         const ctx = initialized.get(id)?.context ?? context(plugin);
         if (!initialized.has(id)) {
@@ -395,9 +396,6 @@ export const createFramework = (options: FrameworkOptions): Framework => {
           activeCleanup = undefined;
           if (!setup.ok) {
             dispose(id);
-            // setup 失败的插件可能还没来得及申请 Memory：窗口不能就此封存，
-            // 否则它恢复后只能落到主 Memory 后端。
-            startupPending = true;
             if (plugin.manifest.critical) {
               safeMode = true;
               break;
@@ -484,7 +482,7 @@ export const createFramework = (options: FrameworkOptions): Framework => {
       });
     } finally {
       // 收尾阶段整体再包一层 try/finally：即使 end 钩子或 Memory 收尾抛错，
-      // 也一定复位 running 与归属状态，避免后续 tick 全部被判为不可重入。
+      // 也一定复位 runningTick 与归属状态。
       try {
         // 所有已经进入 begin 的插件都得到 end，包括自身 begin 失败者，以便释放本 tick 状态。
         measure('framework.tickEnd', () => {
@@ -517,16 +515,14 @@ export const createFramework = (options: FrameworkOptions): Framework => {
           });
           if (!result.ok) safeMode = true;
         }
-        // 提前中止（安全模式）、插件因 CPU 未准入或 setup 失败时都不封存启动申请
-        // 窗口，留给后续 tick 继续收集；依赖未就绪导致的跳过不作为申请缺失处理。
-        if (safeMode || startupPending) runtime.memory.deferStartupWindow();
-        // Memory 收尾在插件 end 与健康累计之后：封存窗口、推进迁移、提交 dirty 分区。
+        // Memory 收尾在插件 end 与健康累计之后：统一提交全部脏分区。提交失败只记录诊断，
+        // 不抛错；这里的错误边界只捕获生命周期协议错误。
         const memoryEnd = invoke('framework', 'tickEnd', () =>
           runtime.memory.end(getGame().time)
         );
         if (!memoryEnd.ok) safeMode = true;
       } finally {
-        running = false;
+        runningTick = undefined;
         // 无论本轮是否 safeMode，都恢复内核归属状态，避免污染下一次 loop 的权限判定。
         currentPhase = 'framework';
         currentPlugin = '';
@@ -542,7 +538,7 @@ export const createFramework = (options: FrameworkOptions): Framework => {
     unregister,
     /** 恢复必须位于 tick 外；只清 heap 熔断及连续失败，历史计数保留。 */
     recover: (id: string) => {
-      if (running) throw new Error('Recover outside loop');
+      if (runningTick === getGame().time) throw new Error('Recover outside loop');
       if (!registry.copy().has(id)) throw new Error('Unknown plugin: ' + id);
       const h = health(id);
       h.circuitOpen = false;
@@ -552,8 +548,11 @@ export const createFramework = (options: FrameworkOptions): Framework => {
     getStatus: () => ({
       safeMode,
       tick: lastTick,
-      // 只通过 MemoryHost 契约投影诊断；失败不禁止插件缩减脏数据，也不触发安全模式。
-      memory: { rawWriteError: runtime.memory.getStatus().rawWriteError },
+      // 只通过 MemoryHost 契约投影诊断：装载故障对应安全模式；写入失败不禁止插件缩减
+      // 脏数据，也不触发安全模式。
+      memory: (({ loadError, rawWriteError }) => ({ loadError, rawWriteError }))(
+        runtime.memory.getStatus()
+      ),
       failures: failures.map((f) => ({ ...f })),
     }),
   };

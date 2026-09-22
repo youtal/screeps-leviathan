@@ -40,10 +40,6 @@ describe('App composition', () => {
       set: jest.fn((value: string) => {
         raw = value;
       }),
-      // MemoryManager 在首次 begin 请求固定 Segment 页（下一 tick 才可见）：
-      // 这里提供只读的 segments 视图与激活入口即可。
-      segments: {},
-      setActiveSegments: jest.fn(),
     };
   });
 

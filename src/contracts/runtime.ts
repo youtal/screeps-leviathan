@@ -50,7 +50,10 @@ export interface ModuleContextOptions {
 export interface ModuleContext extends EnvContext {
   bus: Bus;
   profiler: Profiler | null;
-  /** 装配了 MemoryManager 时提供按模块名绑定的申请入口；未装配时省略。 */
+  /**
+   * 按模块名绑定的分区申请入口。createRuntime 总会提供；保留可选是为了允许测试替身或
+   * 特殊宿主手工构造不含存储能力的上下文。
+   */
   memory?: ApplyMemoryAccessor;
 }
 

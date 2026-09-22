@@ -1,469 +1,212 @@
 /**
  * 文件摘要
  *
- * 模块角色：core/memoryManager 的主存储格式处理层，供管理器加载目录和生成待写文本。
+ * 模块角色：core/memoryManager 的主存储格式装载层，只在 global 首次 begin 时运行一次。
  *
- * 主要功能：解析并校验命名空间，导入旧版插件数据，保留其他根字段，并按修改范围复用 JSON 片段。
+ * 主要功能：解析主存储文本，按设计 §8 的兼容协议识别 schemaVersion 2、转换 schemaVersion 1、
+ * 在缺少命名空间时导入旧 leviathan 插件数据；输出每个分区记录的版本与已解析 payload、
+ * 非托管根字段的键值、结构变化标记及诊断。
  *
- * 实现过程：loadRawRoot 解析根对象，建立或验证分配表、分区和迁移记录；createRawStore 将这些对象
- * 包装为带标脏、序列化及外部根字段同步方法的容器，按目录、迁移记录和插件分别缓存字符串。
+ * 实现过程：JSON.parse 整个文本后逐层校验容器结构，但**不在装载时重新编码**：记录的 payload
+ * 与非托管根字段以解析出的对象交给管理器，由管理器在首次需要片段时（首次提交拼接整串，或
+ * 迁移前固定基线）才编码。global reset 首 tick 因此只承担一次整体解析；申请同版本分区时直接
+ * 使用该对象，不再二次解析。encodeRecord 仍由本文件提供，保证记录片段格式只有一处定义。
  *
- * 技术要点：不直接调用 RawMemory；修改对应对象后必须清除其片段缓存，避免序列化旧值。
- * 缓存属于实例，可跨 tick 使用，global reset 后重新建立；损坏格式抛错，危险对象键被拒绝。
- * 迁移源代次允许旧记录缺省，但存在时必须为非负整数；清理资格由管理器进一步核验。
+ * 技术要点：只接受可安全理解的结构，否则抛错由管理器锁定装载故障、保护原文本不被覆盖。
+ * 历史 payload 可以是任意 JSON 值（数组、null、基本值或尚不满足受管约束的对象），装载只保证
+ * 其无损保留；是否可发布访问器由申请时的校验决定。Segment 归属的身份被忽略且不读取任何页面。
+ * 一次性成本：一次整体解析；编码推迟到管理器首次需要片段时，每条记录至多一次。
+ * 旧 leviathan 导入的 payload 是保留根字段的子对象，导入时复制，二者不共享可变对象。
  */
-import type { JsonValue } from '@/contracts/memory';
 import {
   LEGACY_NAMESPACE_KEY,
   NAMESPACE_KEY,
   NAMESPACE_SCHEMA_VERSION,
-  type AllocationRecord,
-  type MigrationMove,
-  type MigrationRecord,
-  type NamespaceV1,
 } from './types';
+import { isPlainObject, isReservedKey } from './validate';
 
-/** 已解析的根对象与命名空间；namespace 与 root[NAMESPACE_KEY] 是同一引用。 */
-export interface LoadedRoot {
-  root: Record<string, unknown>;
-  namespace: NamespaceV1;
-  /** 除命名空间外的根字段名，序列化与状态诊断都要保留它们。 */
+/** 装载得到的一条分区记录：版本与已解析的 payload（尚未编码为片段）。 */
+export interface StoredRecord {
+  owner: string;
+  localId: string;
+  dataVersion: number;
+  /** 历史 payload：任意 JSON 值，与其它记录、根字段不共享对象。 */
+  payload: unknown;
+}
+
+export interface LoadedStore {
+  /** 非托管根字段（键与已解析值），按原顺序；由管理器首次拼接时编码为前缀。 */
+  foreign: [string, unknown][];
   preservedKeys: string[];
-  /** 加载期发现但被安全跳过的内容（例如旧布局里的原型键），由调用方记录诊断。 */
+  records: StoredRecord[];
+  /** 格式转换或导入产生了需要写出的结构变化。 */
+  structureChanged: boolean;
+  ignoredSegmentPartitions: { owner: string; localId: string }[];
   warnings: string[];
 }
 
-/** 只关心"是不是普通键值对象"；插件 payload 的深层合法性沿用 JSON 语义。 */
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === 'object' && !Array.isArray(value);
-
 const isNonNegativeInteger = (value: unknown): value is number =>
-  Number.isInteger(value) && (value as number) >= 0;
+  Number.isSafeInteger(value) && (value as number) >= 0;
 
-/**
- * 拒绝原型相关键。
- *
- * `allocations['__proto__'] = {}` 这类赋值改的是原型而不是数据键：记录会静默消失，
- * 还可能出现"幻影分配"（读到的继承属性被当成真实记录）。校验阶段直接拒绝，
- * 容器同时用 null 原型创建，双保险。
- */
-const isSafeKey = (key: string): boolean =>
-  key !== '__proto__' && key !== 'prototype' && key !== 'constructor';
+/** 身份键在装载时只要求非空且不是原型保留键；是否可申请由 apply 的更严格规则决定。 */
+const isLoadableKey = (key: string): boolean => key !== '' && !isReservedKey(key);
 
-/** 校验单条分配记录：后端必须是已知值，segment 必须带页号，raw 不得带页号。 */
-const validateAllocation = (
+const hasOwn = (object: object, key: string): boolean =>
+  Object.prototype.hasOwnProperty.call(object, key);
+
+/** 编码一条记录片段 `{"dataVersion":N,"payload":...}`；payload 须为可编码的 JSON 值。 */
+export const encodeRecord = (dataVersion: number, payload: unknown): string =>
+  '{"dataVersion":' + dataVersion + ',"payload":' + JSON.stringify(payload) + '}';
+
+/** 校验并取出一条记录的版本与 payload；缺字段或多余字段都视为无法安全理解。 */
+const readRecord = (
   value: unknown,
   where: string
-): AllocationRecord => {
-  if (!isRecord(value)) throw new Error('Invalid allocation at ' + where);
-  const { backend, segmentId, generation } = value;
-  if (backend !== 'raw' && backend !== 'segment')
-    throw new Error('Invalid allocation backend at ' + where);
-  if (!isNonNegativeInteger(generation))
-    throw new Error('Invalid allocation generation at ' + where);
-  if (backend === 'segment') {
-    if (!isNonNegativeInteger(segmentId))
-      throw new Error('Invalid allocation segmentId at ' + where);
-    return { backend, segmentId, generation };
-  }
-  if (segmentId !== undefined)
-    throw new Error('Raw allocation must not carry segmentId at ' + where);
-  return { backend, generation };
-};
-
-/** 校验 Raw 分区记录：dataVersion 非负整数，payload 允许任意 JSON 值。 */
-const validateRawPartition = (
-  value: unknown,
-  where: string
-): { dataVersion: number; payload: JsonValue } => {
-  if (!isRecord(value)) throw new Error('Invalid raw partition at ' + where);
+): { dataVersion: number; payload: unknown } => {
+  if (!isPlainObject(value)) throw new Error('Invalid partition record at ' + where);
   if (!isNonNegativeInteger(value.dataVersion))
     throw new Error('Invalid dataVersion at ' + where);
-  return {
-    dataVersion: value.dataVersion,
-    payload: value.payload as JsonValue,
-  };
+  if (!hasOwn(value, 'payload')) throw new Error('Missing payload at ' + where);
+  for (const key of Object.keys(value))
+    if (key !== 'dataVersion' && key !== 'payload')
+      throw new Error('Unknown record field ' + key + ' at ' + where);
+  return { dataVersion: value.dataVersion, payload: value.payload };
 };
 
-/** 校验一条搬迁计划；源与目标必须恰好各有一种后端，且页号与后端匹配。 */
-const validateMove = (value: unknown, where: string): MigrationMove => {
-  if (!isRecord(value)) throw new Error('Invalid migration move at ' + where);
-  const {
-    pluginId,
-    localId,
-    dataVersion,
-    from,
-    fromSegmentId,
-    fromGeneration,
-    to,
-    toSegmentId,
-  } = value;
-  if (typeof pluginId !== 'string' || typeof localId !== 'string')
-    throw new Error('Invalid migration owner at ' + where);
-  if (!isNonNegativeInteger(dataVersion))
-    throw new Error('Invalid migration dataVersion at ' + where);
-  if (
-    (from !== 'raw' && from !== 'segment') ||
-    (to !== 'raw' && to !== 'segment')
-  )
-    throw new Error('Invalid migration backend at ' + where);
-  if (from === 'segment' && !isNonNegativeInteger(fromSegmentId))
-    throw new Error('Migration source segment missing at ' + where);
-  if (fromGeneration !== undefined && !isNonNegativeInteger(fromGeneration))
-    throw new Error('Invalid migration source generation at ' + where);
-  if (to === 'segment' && !isNonNegativeInteger(toSegmentId))
-    throw new Error('Migration target segment missing at ' + where);
-  return {
-    pluginId,
-    localId,
-    dataVersion,
-    from,
-    fromSegmentId: from === 'segment' ? (fromSegmentId as number) : undefined,
-    fromGeneration: fromGeneration as number | undefined,
-    to,
-    toSegmentId: to === 'segment' ? (toSegmentId as number) : undefined,
-  };
+/** 遍历两级 owner → localId 容器，逐项回调；身份键不合法视为结构损坏。 */
+const forEachIdentity = (
+  container: unknown,
+  what: string,
+  visit: (owner: string, localId: string, value: unknown) => void
+): void => {
+  if (!isPlainObject(container)) throw new Error('Invalid MemoryManager ' + what);
+  for (const [owner, bucket] of Object.entries(container)) {
+    if (!isLoadableKey(owner)) throw new Error('Invalid ' + what + ' owner: ' + owner);
+    if (!isPlainObject(bucket)) throw new Error('Invalid ' + what + ' bucket for ' + owner);
+    for (const [localId, value] of Object.entries(bucket)) {
+      if (!isLoadableKey(localId))
+        throw new Error('Invalid ' + what + ' key: ' + owner + '/' + localId);
+      visit(owner, localId, value);
+    }
+  }
 };
 
-/** 校验迁移记录；staged 只需是键值对象（内容由搬运算法写入）。 */
-const validateMigration = (value: unknown): MigrationRecord | null => {
-  if (value === null || value === undefined) return null;
-  if (!isRecord(value)) throw new Error('Invalid migration record');
-  if (!isNonNegativeInteger(value.generation))
-    throw new Error('Invalid migration generation');
-  if (
-    value.phase !== 'copy' &&
-    value.phase !== 'verify' &&
-    value.phase !== 'switch' &&
-    value.phase !== 'cleanup'
-  )
-    throw new Error('Invalid migration phase');
-  if (value.reason !== 'allocation' && value.reason !== 'preemption')
-    throw new Error('Invalid migration reason');
-  if (!Array.isArray(value.moves) || value.moves.length === 0)
-    throw new Error('Invalid migration moves');
-  if (!isRecord(value.staged)) throw new Error('Invalid migration staging');
-  return {
-    generation: value.generation,
-    phase: value.phase,
-    reason: value.reason,
-    moves: value.moves.map((move, index) =>
-      validateMove(move, 'moves[' + index + ']')
-    ),
-    staged: value.staged as Record<string, JsonValue>,
-  };
+const loadV2 = (namespace: Record<string, unknown>): StoredRecord[] => {
+  for (const key of Object.keys(namespace))
+    if (key !== 'schemaVersion' && key !== 'partitions')
+      throw new Error('Unknown MemoryManager namespace field: ' + key);
+  const records: StoredRecord[] = [];
+  forEachIdentity(namespace.partitions, 'partitions', (owner, localId, value) => {
+    const { dataVersion, payload } = readRecord(value, owner + '/' + localId);
+    records.push({ owner, localId, dataVersion, payload });
+  });
+  return records;
 };
 
 /**
- * 深度校验命名空间。
- *
- * 不只检查顶层容器：目录里每条记录、Raw 分区、迁移计划都会逐项验证，任何非法形状
- * 立刻抛错。这样后续遍历不会在半损坏的数据结构上崩溃，也避免把错误数据当成有效
- * 分配继续使用。generationCounter 缺失按 0 处理（兼容尚无该字段的写入）。
+ * schemaVersion 1 转换：以 allocations 的正式归属为准。raw 归属必须有对应 Raw 记录，
+ * 否则报装载错误（不能当作首次安装）；segment 归属连同同身份的残留 Raw 副本一起忽略；
+ * 没有正式归属的孤立 Raw 记录与 migration/generationCounter 等字段不进入目标格式。
  */
-const validateNamespace = (value: unknown): NamespaceV1 => {
-  if (!isRecord(value))
-    throw new Error('Invalid MemoryManager namespace: not an object');
-  if (value.schemaVersion !== NAMESPACE_SCHEMA_VERSION)
-    throw new Error(
-      'Unsupported MemoryManager schema: ' + String(value.schemaVersion)
-    );
-  if (!isRecord(value.allocations) || !isRecord(value.rawPartitions))
-    throw new Error('Invalid MemoryManager namespace: bad partitions');
-  const allocations: NamespaceV1['allocations'] = Object.create(null);
-  for (const [pluginId, bucket] of Object.entries(value.allocations)) {
-    if (!isSafeKey(pluginId))
-      throw new Error('Invalid allocation key: ' + pluginId);
-    if (!isRecord(bucket))
-      throw new Error('Invalid allocation bucket for ' + pluginId);
-    allocations[pluginId] = Object.create(null);
-    for (const [localId, record] of Object.entries(bucket)) {
-      if (!isSafeKey(localId))
-        throw new Error('Invalid allocation key: ' + pluginId + '/' + localId);
-      allocations[pluginId][localId] = validateAllocation(
-        record,
-        pluginId + '/' + localId
-      );
+const loadV1 = (
+  namespace: Record<string, unknown>,
+  ignored: { owner: string; localId: string }[]
+): StoredRecord[] => {
+  const raw = namespace.rawPartitions;
+  if (!isPlainObject(raw)) throw new Error('Invalid MemoryManager rawPartitions');
+  const records: StoredRecord[] = [];
+  forEachIdentity(namespace.allocations, 'allocations', (owner, localId, allocation) => {
+    if (!isPlainObject(allocation))
+      throw new Error('Invalid allocation at ' + owner + '/' + localId);
+    if (allocation.backend === 'segment') {
+      ignored.push({ owner, localId });
+      return;
     }
-  }
-  const rawPartitions: NamespaceV1['rawPartitions'] = Object.create(null);
-  for (const [pluginId, bucket] of Object.entries(value.rawPartitions)) {
-    if (!isSafeKey(pluginId))
-      throw new Error('Invalid raw partition key: ' + pluginId);
-    if (!isRecord(bucket))
-      throw new Error('Invalid raw partition bucket for ' + pluginId);
-    rawPartitions[pluginId] = Object.create(null);
-    for (const [localId, record] of Object.entries(bucket)) {
-      if (!isSafeKey(localId))
-        throw new Error(
-          'Invalid raw partition key: ' + pluginId + '/' + localId
-        );
-      rawPartitions[pluginId][localId] = validateRawPartition(
-        record,
-        pluginId + '/' + localId
-      );
-    }
-  }
-  return {
-    schemaVersion: NAMESPACE_SCHEMA_VERSION,
-    generationCounter: isNonNegativeInteger(value.generationCounter)
-      ? value.generationCounter
-      : 0,
-    allocations,
-    rawPartitions,
-    migration: validateMigration(value.migration),
-  };
+    if (allocation.backend !== 'raw')
+      throw new Error('Invalid allocation backend at ' + owner + '/' + localId);
+    const bucket = raw[owner];
+    const value =
+      isPlainObject(bucket) && hasOwn(bucket, localId) ? bucket[localId] : undefined;
+    if (value === undefined)
+      throw new Error('Missing raw partition for allocation ' + owner + '/' + localId);
+    const { dataVersion, payload } = readRecord(value, owner + '/' + localId);
+    records.push({ owner, localId, dataVersion, payload });
+  });
+  return records;
 };
 
-/** 创建空的版本 1 命名空间；首次使用或旧布局导入后由管理器填充。 */
-export const createEmptyNamespace = (): NamespaceV1 => ({
-  schemaVersion: NAMESPACE_SCHEMA_VERSION,
-  generationCounter: 0,
-  // null 原型：即使调用方误传 `__proto__` 之类的键，也只会成为普通自有属性，
-  // 不会改写原型或让记录静默消失（与 validateNamespace 的容器保持一致）。
-  allocations: Object.create(null),
-  rawPartitions: Object.create(null),
-  migration: null,
-});
-
 /**
- * 从旧 `leviathan` 布局导入插件数据。
- *
- * 只读取 `leviathan.plugins[*]` 与 `leviathan.framework.pluginVersions[*]`，按
- * 原插件 ID 建立 Raw 分区，供同名模块以相同 version 重新申请时直接恢复；
- * Profiler 统计与插件健康表保留在旧命名空间不动（当前无消费者，删除反而丢数据）。
- * 导入结果不写回旧键，旧命名空间作为普通根字段原样保留，可随时回退。
+ * 旧 leviathan 布局导入：plugins 下的对象数据按 owner/main 建立记录，版本取
+ * framework.pluginVersions，缺失或非法记 0（要求业务 migrate）。payload 是保留的 leviathan
+ * 根字段的子对象，导入时经 JSON 往返复制：否则同版本申请或迁移对它的修改会改写保留字段。
+ * 该转换每个存储只发生一次。
  */
-const importLegacy = (
-  root: Record<string, unknown>,
-  namespace: NamespaceV1,
-  warnings: string[]
-): boolean => {
-  const legacy = root[LEGACY_NAMESPACE_KEY];
-  if (!isRecord(legacy)) return false;
-  const plugins = isRecord(legacy.plugins) ? legacy.plugins : {};
-  const framework = isRecord(legacy.framework) ? legacy.framework : {};
-  const versions = isRecord(framework.pluginVersions)
-    ? framework.pluginVersions
-    : {};
-  let imported = false;
-  for (const [pluginId, payload] of Object.entries(plugins)) {
-    if (!isRecord(payload)) continue;
-    // 旧布局里的原型键不能进入容器：跳过并留诊断，避免记录静默消失或污染原型。
-    if (!isSafeKey(pluginId)) {
-      warnings.push('legacy import skipped unsafe key: ' + pluginId);
+const importLegacy = (legacy: unknown, warnings: string[]): StoredRecord[] => {
+  if (!isPlainObject(legacy)) return [];
+  const plugins = isPlainObject(legacy.plugins) ? legacy.plugins : {};
+  const framework = isPlainObject(legacy.framework) ? legacy.framework : {};
+  const versions = isPlainObject(framework.pluginVersions) ? framework.pluginVersions : {};
+  const records: StoredRecord[] = [];
+  for (const [owner, payload] of Object.entries(plugins)) {
+    if (!isPlainObject(payload)) continue;
+    if (!isLoadableKey(owner)) {
+      warnings.push('legacy import skipped unsafe key: ' + owner);
       continue;
     }
-    const version = versions[pluginId];
-    namespace.allocations[pluginId] = {
-      main: { backend: 'raw', generation: 0 },
-    };
-    namespace.rawPartitions[pluginId] = {
-      main: {
-        // 版本缺失时写 0 作为"未知旧版本"哨兵：applyVersion 对任何已存储数据都要求
-        // migrate，因此不会被误判成首次安装而覆盖真实 payload。
-        dataVersion: Number.isInteger(version) ? (version as number) : 0,
-        // 深拷贝：导入后的分区数据会被模块原地修改，共享引用会把旧命名空间一起改掉，
-        // 违背"旧 leviathan 布局只读、可回退"的约定。数据来自 JSON.parse，往返安全。
-        payload: JSON.parse(JSON.stringify(payload)) as JsonValue,
-      },
-    };
-    imported = true;
+    const version = hasOwn(versions, owner) ? versions[owner] : undefined;
+    const dataVersion = isNonNegativeInteger(version) ? version : 0;
+    records.push({
+      owner,
+      localId: 'main',
+      dataVersion,
+      payload: JSON.parse(JSON.stringify(payload)),
+    });
   }
-  return imported;
+  return records;
 };
 
 /**
- * 解析 RawMemory 文本并校验命名空间。
- *
- * 空字符串按空根处理（测试与首次运行）；解析失败、根不是对象、命名空间版本或任意
- * 记录形状不合法都会抛错——调用方据此进入故障状态，绝不写入，避免覆盖无法理解的
- * 数据。
+ * 装载主存储文本。空文本视为空根；坏 JSON、根不是对象、未知 schemaVersion 或无法理解的
+ * 结构都抛错，调用方据此锁定装载故障且不写回。
  */
-export const loadRawRoot = (text: string): LoadedRoot => {
+export const loadStore = (text: string): LoadedStore => {
   const parsed: unknown = JSON.parse(text === '' ? '{}' : text);
-  if (!isRecord(parsed)) throw new Error('Invalid Memory root: not an object');
-  const root = parsed;
-  const existing = root[NAMESPACE_KEY];
+  if (!isPlainObject(parsed)) throw new Error('Invalid Memory root: not an object');
   const warnings: string[] = [];
-  if (existing === undefined) {
-    const namespace = createEmptyNamespace();
-    importLegacy(root, namespace, warnings);
-    root[NAMESPACE_KEY] = namespace;
-    return {
-      root,
-      namespace,
-      preservedKeys: Object.keys(root).filter((key) => key !== NAMESPACE_KEY),
-      warnings,
-    };
+  const ignoredSegmentPartitions: { owner: string; localId: string }[] = [];
+  const namespace = hasOwn(parsed, NAMESPACE_KEY) ? parsed[NAMESPACE_KEY] : undefined;
+  let records: StoredRecord[];
+  let structureChanged: boolean;
+  if (namespace === undefined) {
+    records = importLegacy(parsed[LEGACY_NAMESPACE_KEY], warnings);
+    structureChanged = records.length > 0;
+  } else {
+    if (!isPlainObject(namespace))
+      throw new Error('Invalid MemoryManager namespace: not an object');
+    const version = namespace.schemaVersion;
+    if (version === NAMESPACE_SCHEMA_VERSION) {
+      records = loadV2(namespace);
+      structureChanged = false;
+    } else if (version === 1) {
+      records = loadV1(namespace, ignoredSegmentPartitions);
+      structureChanged = true;
+    } else {
+      throw new Error('Unsupported MemoryManager schema: ' + String(version));
+    }
   }
-  const namespace = validateNamespace(existing);
-  return {
-    root,
-    namespace,
-    preservedKeys: Object.keys(root).filter((key) => key !== NAMESPACE_KEY),
-    warnings,
-  };
-};
-
-/** 片段化的根写入器；所有 mark* 之后必须调用 serialize 才产生新文本。 */
-export interface RawStore {
-  root: Record<string, unknown>;
-  namespace: NamespaceV1;
-  /** 目录（allocations 或其内部记录）被原地修改。 */
-  markAllocationsDirty(): void;
-  /** migration journal 或代际计数器被修改。 */
-  markMigrationDirty(): void;
-  /** 某个插件的 Raw 分区被修改。 */
-  markPluginDirty(pluginId: string): void;
-  /**
-   * 宿主 Memory 是否带来了新的根字段变化（O(根字段数) 次引用比较，不序列化）。
-   * 只比较键集合与引用：深层原地修改不会被发现，约定外部代码替换根字段写入。
-   */
-  hasExternalChanges(external: Record<string, unknown> | null): boolean;
-  /** 生成下一次完整写入文本；非托管根字段从 external 现取，缺省用解析时的快照。 */
-  serialize(external?: Record<string, unknown> | null): string;
-  /** 写入成功后推进外部基线，避免同一变化被反复判定为"待写"。 */
-  commitExternal(external: Record<string, unknown> | null): void;
-  /** 当前保留的非托管根字段名（只读快照）。 */
-  preservedKeys(): string[];
-}
-
-/**
- * 创建片段写入器。
- *
- * 只缓存我们拥有的片段（allocations/migration/插件分区）；非托管根字段不缓存，
- * 每次写入时从宿主对象（若提供）或加载时的快照序列化，因此不会出现"外部改了字段、
- * 缓存仍是旧文本"的覆盖问题。
- */
-export const createRawStore = (loaded: LoadedRoot): RawStore => {
-  const { root, namespace } = loaded;
-  const fragments = new Map<string, string>();
-  /**
-   * 非托管根字段的序列化片段缓存（键 → 已序列化的 `"key":value` 文本）。
-   *
-   * 只服务"没有宿主根对象"的路径：此时数据来源是加载时的 root 快照，只有本写入器
-   * 自己的 commitExternal 会改它，所以缓存可精确失效。传入 external 时（宿主
-   * Memory 可能被原地深层修改，引用比较发现不了）绝不读写该缓存，保持"每次现取"
-   * 的正确性。生命周期随写入器；global reset 后随重新加载重建。
-   * 换取：默认配置下不再每次写入对 creeps/rooms 等遗留大字段全量 JSON.stringify。
-   */
-  const foreignFragments = new Map<string, string>();
-
-  /**
-   * 生成一个非托管根字段的 `"key":value` 片段；不可表示的值返回空串表示省略。
-   *
-   * 手工拼接必须复刻 `JSON.stringify(object)` 对属性的语义：值为 undefined、函数、
-   * Symbol 或 toJSON 返回 undefined 时，`JSON.stringify(value)` 返回 undefined，
-   * 原生序列化会省略该属性；若照搬字符串拼接会写出 `"k":undefined` 这种非法 JSON，
-   * 下一次加载整体失败。循环引用、BigInt 等会直接抛错，由调用方的写入错误路径接住，
-   * 不会覆盖最后一次有效的主 Memory 文本。
-   */
-  const foreignFragmentOf = (key: string, value: unknown): string => {
-    const text: string | undefined = JSON.stringify(value);
-    return text === undefined ? '' : JSON.stringify(key) + ':' + text;
-  };
-
-  const foreignKeys = (external: Record<string, unknown> | null): string[] => {
-    const keys = new Set<string>();
-    for (const key of Object.keys(root))
-      if (key !== NAMESPACE_KEY) keys.add(key);
-    if (external)
-      for (const key of Object.keys(external))
-        if (key !== NAMESPACE_KEY) keys.add(key);
-    return [...keys];
-  };
-
-  const hasExternalChanges = (
-    external: Record<string, unknown> | null
-  ): boolean => {
-    if (!external || external === root) return false;
-    for (const key of foreignKeys(external)) {
-      if (root[key] !== external[key]) return true;
-      if (!(key in external) !== !(key in root)) return true;
-    }
-    return false;
-  };
-
-  const serialize = (external?: Record<string, unknown> | null): string => {
-    const entries: string[] = [];
-    // 有宿主根对象时以它为准：宿主删掉的字段不再回退到解析快照，
-    // 否则已删除的数据会在下一次写入时"复活"。
-    const keys = external
-      ? Object.keys(external).filter((key) => key !== NAMESPACE_KEY)
-      : Object.keys(root).filter((key) => key !== NAMESPACE_KEY);
-    for (const key of keys) {
-      if (external) {
-        const fragment = foreignFragmentOf(key, external[key]);
-        if (fragment !== '') entries.push(fragment);
-        continue;
-      }
-      let fragment = foreignFragments.get(key);
-      if (fragment === undefined) {
-        fragment = foreignFragmentOf(key, root[key]);
-        foreignFragments.set(key, fragment);
-      }
-      if (fragment !== '') entries.push(fragment);
-    }
-    const allocations =
-      fragments.get('allocations') ?? JSON.stringify(namespace.allocations);
-    fragments.set('allocations', allocations);
-    const migration =
-      fragments.get('migration') ?? JSON.stringify(namespace.migration);
-    fragments.set('migration', migration);
-    const pluginEntries: string[] = [];
-    for (const [pluginId, partitions] of Object.entries(
-      namespace.rawPartitions
-    )) {
-      const fragment =
-        fragments.get('plugin:' + pluginId) ?? JSON.stringify(partitions);
-      fragments.set('plugin:' + pluginId, fragment);
-      pluginEntries.push(JSON.stringify(pluginId) + ':' + fragment);
-    }
-    entries.push(
-      JSON.stringify(NAMESPACE_KEY) +
-        ':{' +
-        '"schemaVersion":' +
-        NAMESPACE_SCHEMA_VERSION +
-        ',"generationCounter":' +
-        namespace.generationCounter +
-        ',"allocations":' +
-        allocations +
-        ',"rawPartitions":{' +
-        pluginEntries.join(',') +
-        '},"migration":' +
-        migration +
-        '}'
+  const preservedKeys = Object.keys(parsed).filter((key) => key !== NAMESPACE_KEY);
+  const foreign: [string, unknown][] = preservedKeys.map((key) => [key, parsed[key]]);
+  if (ignoredSegmentPartitions.length)
+    warnings.push(
+      'ignored segment partitions: ' +
+        ignoredSegmentPartitions.map((id) => id.owner + '/' + id.localId).join(', ')
     );
-    return '{' + entries.join(',') + '}';
-  };
-
-  const commitExternal = (external: Record<string, unknown> | null): void => {
-    if (!external || external === root) return;
-    // root 即将被宿主数据覆盖：快照片段全部作废（后续无 external 时会重新生成）。
-    foreignFragments.clear();
-    for (const key of foreignKeys(external)) {
-      if (key in external) root[key] = external[key];
-      else delete root[key];
-    }
-  };
-
   return {
-    root,
-    namespace,
-    markAllocationsDirty: () => {
-      fragments.delete('allocations');
-    },
-    markMigrationDirty: () => {
-      fragments.delete('migration');
-    },
-    markPluginDirty: (pluginId) => {
-      fragments.delete('plugin:' + pluginId);
-    },
-    hasExternalChanges,
-    serialize,
-    commitExternal,
-    preservedKeys: () =>
-      Object.keys(root).filter((key) => key !== NAMESPACE_KEY),
+    foreign,
+    preservedKeys,
+    records,
+    structureChanged,
+    ignoredSegmentPartitions,
+    warnings,
   };
 };

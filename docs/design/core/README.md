@@ -1,6 +1,6 @@
 # Core 架构设计及开发原则
 
-交付状态：部分交付。统一内核装配、单向依赖边界与事务性插件注册已交付；Memory 同步分区申请及长期访问契约接入未交付。
+交付状态：已交付。统一内核装配、单向依赖边界、事务性插件注册、Memory 同步分区申请及长期访问契约接入均已交付。
 
 本设计定义 Core 的架构与开发原则。模块设计入口：[Framework](./framework.md)、[Runtime](./runtime.md)、[Profiler](./profiler.md)、[ErrorMapper](./errorMapper.md)、[MemoryManager](./memoryManager.md)。
 
@@ -113,7 +113,7 @@ Profiler 若接入持久化，须在存储 begin 成功后同步申请分区；�
 ## 7. 性能、故障与开发原则
 
 - 每个 global 只创建一套内核能力；避免模块级自建实例绕过统一配置。
-- **Memory 访问边界（强制）**：`core/memoryManager` 是唯一允许接触 Memory/RawMemory/Segment 的模块；其它模块只能通过 `context.memory` 申请分区。越界访问属于阻断问题，由 `test/memoryBoundary.test.ts` 自动扫描 `src/` 拦截。
+- **Memory 访问边界（强制）**：`core/memoryManager` 是唯一允许接触 Memory/RawMemory 的模块；其它模块只能通过 `context.memory` 申请分区。越界访问属于阻断问题，由 `test/memoryBoundary.test.ts` 自动扫描 `src/` 拦截。
 - 优先小函数、明确输入输出及端口注入；允许闭包缓存和受控原地更新，注明创建、失效、清理和 reset 行为。
 - 按 tick 调用平台访问器，不长期保存 Game 对象。限制统计标签、错误缓存和未释放订阅的常驻规模。
 - 区分配置错误、装载损坏、分区申请失败、写入失败和插件执行失败；存储故障不能伪装成等待状态。

@@ -1,5 +1,5 @@
 /**
- * 集成测试隔离入口：只将锁定 runner、正式产物和场景复制进临时 Docker 构建上下文。
+ * 集成测试隔离入口：只将锁定 runner、正式产物、Core 探针产物和场景复制进临时 Docker 构建上下文。
  * 旧引擎的安装脚本在容器构建层执行；运行期禁网、只读根文件系统、非 root、无宿主挂载。
  * 不继承宿主凭据到容器，不回退到宿主 node_modules；失败时返回非零退出码供 CI 判断。
  */
@@ -17,6 +17,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { rollup } from 'rollup';
+import nodeResolve from '@rollup/plugin-node-resolve';
+import commonjs from '@rollup/plugin-commonjs';
+import typescript from 'rollup-plugin-typescript2';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -50,23 +54,49 @@ export function stageContext(projectRoot, destination) {
     cpSync(from, to, { recursive: true });
   }
   // 只提取测试所需的容量标量，容器不需要读取或挂载项目 TypeScript 源码。
+  // 容器不访问宿主源码：只从 MemoryManager 常量提取容量标量，供容量场景断言使用。
   const sourcePath = join(projectRoot, 'src/core/memoryManager/types.ts');
   assertRegularTree(sourcePath);
-  const match = /SEGMENT_CAPACITY\s*=\s*([\d_]+)/.exec(
+  const match = /RAW_MEMORY_LIMIT\s*=\s*([\d_]+)/.exec(
     readFileSync(sourcePath, 'utf8')
   );
   if (!match)
-    throw new Error('Missing SEGMENT_CAPACITY in MemoryManager contract');
-  const capacity = Number(match[1].replaceAll('_', ''));
-  if (!Number.isSafeInteger(capacity) || capacity <= 0)
-    throw new Error('Invalid SEGMENT_CAPACITY');
+    throw new Error('Missing RAW_MEMORY_LIMIT in MemoryManager contract');
+  const limit = Number(match[1].replaceAll('_', ''));
+  if (!Number.isSafeInteger(limit) || limit <= 0)
+    throw new Error('Invalid RAW_MEMORY_LIMIT');
   writeFileSync(
     join(destination, 'support/contract.json'),
-    JSON.stringify({ segmentCapacity: capacity })
+    JSON.stringify({ rawMemoryLimit: limit })
   );
 }
 
-/** 参数由固定列表构造，不接受任意 docker run 参数、环境变量转发或宿主挂载。 */
+/**
+ * 把 src/core 的公共入口编译为独立 CJS 模块（与正式构建相同的插件组合），写入构建上下文的
+ * support/leviathan-core.js。Memory 场景用它装配带持久化插件的探针 bot；正式 app 产物没有
+ * 申请分区的插件，无法覆盖真实引擎中的写盘、容量与硬终止路径。只写入临时上下文，不污染 dist/。
+ */
+export async function bundleCore(projectRoot, destination) {
+  const bundle = await rollup({
+    input: join(projectRoot, 'src/core/index.ts'),
+    plugins: [
+      nodeResolve(),
+      commonjs(),
+      typescript({
+        tsconfig: join(projectRoot, 'tsconfig.json'),
+        include: ['src/**/*.ts'],
+        check: false,
+      }),
+    ],
+  });
+  try {
+    const { output } = await bundle.generate({ format: 'cjs' });
+    writeFileSync(join(destination, 'support/leviathan-core.js'), output[0].code);
+  } finally {
+    await bundle.close();
+  }
+}
+
 export function runArguments(image, cliArgs) {
   return [
     'run',
@@ -95,8 +125,8 @@ function docker(args) {
     throw new Error(`Docker exited with ${result.status ?? result.signal}`);
 }
 
+/** 参数校验同步完成（非法参数立即抛出），其余步骤返回 Promise。 */
 export function main(args) {
-  // 只支持选场景，不能让调用方把配置路径改到任意宿主/镜像位置。
   if (
     args.length &&
     !(
@@ -109,17 +139,21 @@ export function main(args) {
       'Usage: npm run test:integration -- [--only scenario-name]'
     );
   }
+  return run(args);
+}
+
+async function run(args) {
   const context = mkdtempSync(join(tmpdir(), 'leviathan-integration-'));
   const image = `leviathan-integration:${process.pid}`;
   let built = false;
   try {
     stageContext(root, context);
+    await bundleCore(root, context);
     docker(['build', '--tag', image, context]);
     built = true;
     docker(runArguments(image, args));
   } finally {
     rmSync(context, { recursive: true, force: true });
-    // 仅清理本次临时 tag，不触及其他镜像或 Docker 构建缓存。
     if (built)
       spawnSync('docker', ['image', 'rm', image], { stdio: 'inherit' });
   }
@@ -130,7 +164,7 @@ if (
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href
 ) {
   try {
-    main(process.argv.slice(2));
+    await main(process.argv.slice(2));
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

@@ -1,8 +1,8 @@
 # MemoryManager 使用说明
 
-本文描述已交付接口。模块独立分区缓存、无 pending 的长期访问器与深路径 API 见 [目标设计](../../design/core/memoryManager.md)，尚未交付；不要将目标方法作为已可调用接口。
+[设计](../../design/core/memoryManager.md) · [源码](../../../src/core/memoryManager/) · [契约](../../../src/contracts/memory.ts)
 
-`createMemoryManager` 提供持久化存储：模块按稳定身份申请分区，通过 `MemoryAccessor` 每 tick 判断就绪状态并读写自己的数据。Runtime 负责组装，Framework 在 tick 边界驱动 `begin/end`；模块不接触 RawMemory 与 Segment。
+`core/memoryManager` 是项目访问持久化存储的唯一入口。模块按稳定身份申请独立分区，申请同步完成并返回**在本 global 内长期有效**的访问器，之后跨 tick 直接读写。所有分区只存放在主 RawMemory；Runtime 负责组装，Framework 在 tick 边界驱动 `begin/end`。
 
 ```ts
 import { createFramework } from '@/core/framework';
@@ -16,178 +16,212 @@ export const loop = framework.loop;
 ## 在插件中使用
 
 ```ts
-import type { MemoryAccessor } from '@/contracts/memory';
+import type { MemoryAccessor, MemoryApplicationOptions } from '@/contracts/memory';
 
 interface State {
   lastTick: number;
   jobs: string[];
+  rooms: Record<string, { level: number; note?: string }>;
+  config?: { enabled: boolean; limit: number };
 }
 
-let state: MemoryAccessor<State> | undefined;
+// 声明放在模块级：initialize/migrate 按函数引用判断“是否同一声明”，停用再启用、
+// setup 中途失败后重试都会重新调用 setup，内联箭头函数会被判为冲突。
+const initialize = (): State => ({ lastTick: 0, jobs: [], rooms: {} });
+const stateOptions: MemoryApplicationOptions<State> = { version: 1, initialize };
 
-// 声明放在模块级：同一身份的重复申请要求 initialize/migrate 与选项保持同一引用，
-// 框架停用后再启用、或 setup 中途失败后重试都会重新调用 setup。
-const initialize = (): State => ({ lastTick: 0, jobs: [] });
-const stateOptions = { version: 1, layer: 'critical', initialize } as const;
+let state: MemoryAccessor<State>;
 
 const plugin: LeviathanPlugin = {
   manifest: { id: 'logistics', version: 1 },
   setup(context) {
-    // 申请在 setup 中完成：身份稳定，重复装配（含停用后再启用）返回同一句柄。
+    // 同步返回长期访问器；失败直接抛错，进入本插件的错误边界。
     state = context.memory('main', stateOptions);
   },
   onTickExecute(context) {
-    const access = state!.access();
-    if (access.status === 'pending') {
-      // 只跳过依赖 Memory 的行为，其它决策照常执行；不要缓存旧 ready 句柄。
-      context.env.log.debug(`memory pending: ${access.reason}`);
-    } else {
-      const snapshot = access.query();          // 类型级深只读
-      access.commit((memory) => {               // 原地修改，回调同步
-        memory.lastTick = context.tick;
-        memory.jobs = snapshot.jobs.slice(0, 8);
-      });
-    }
-    runIndependentWork(context);
+    const level = state.get(['rooms', 'W1N1', 'level']);   // 缺失返回 undefined
+    state.commit('lastTick', context.tick);                // 顶层键
+    state.commit(['rooms', 'W1N1'], { level: 1 });         // 新 Record 条目须提交完整值
+    state.commit(['rooms', 'W1N1', 'level'], (level ?? 0) + 1);
+    state.commit((memory) => {                             // 回调：任意原地修改
+      memory.jobs.splice(8);
+    });
+    state.remove(['rooms', 'W9N9']);                       // 返回是否删除了目标
   },
 };
 ```
 
-要点：
+访问器方法：
 
-- `context.memory(localId, options)` 由框架按 `pluginId` 绑定 owner；`localId` 默认用 `'main'`，支持一个模块多份分区。
-- 句柄（`MemoryAccessor`）可以跨 tick 保存；`access()` 的 ready 视图与数据引用只对签发它的 tick 有效。跨 tick、分区进入 pending 或数据被重新加载后再调用 `query()/commit()` 会抛协议错误——必须每 tick 重新 `access()` 并重新收窄状态。
-- `query()` 只提供类型级只读，不冻结对象；`commit()` 在回调前标脏，回调抛错不回滚，返回成功也不代表已落盘。
-- **不要在 `setup` 里内联创建 `initialize`/`migrate`**（如 `initialize: () => ...`）：每次激活都是新函数引用，第二次 setup 会因“conflicting declaration”被拒绝。把声明提到模块级或稳定的工厂闭包中。
-- 不需要跨 global 保留的数据不要申请分区：闭包缓存更省 CPU 与容量。
+| 方法 | 结果 | 修改语义 |
+| --- | --- | --- |
+| `query()` | 整个分区的深只读引用 | — |
+| `get(key)` / `get(path)` | 目标的深只读值；中间层或目标缺失返回 `undefined` | — |
+| `commit(mutator)` | 回调返回值 | 回调前标脏并要求收尾完整校验；回调抛错不回滚 |
+| `commit(key, value)` / `commit(path, value)` | `void` | 预检成功后标脏并写入值的**副本**；预检失败不修改、不标脏 |
+| `remove(key)` / `remove(path)` | 是否删除了目标 | 删除成功才标脏；目标不存在返回 `false` |
 
-## 申请配置（MemoryApplicationOptions）
+没有 `access()`、`status()` 或 pending 状态。`commit` 只表示 heap 已接受修改，持久化在本 tick 的 `end` 统一完成。
+
+## 深路径
+
+- 字符串参数是**一个完整顶层键**，不按点号拆分；`'W1N1.spawn'` 这类含点号的键按原样处理。
+- 深路径是非空数组：字符串段用于对象键，非负整数段只用于数组下标。可以复用 `as const` 常量：
+  ```ts
+  const LEVEL = ['rooms', 'W1N1', 'level'] as const;
+  state.commit(LEVEL, 2);
+  ```
+- **写入要求所有中间容器已经存在**：不会自动创建中间对象，也不会扩容数组。可选对象或 Record 条目缺失时，先在父容器上提交完整对象，或在回调中初始化。
+- 数组下标必须指向已有元素；数组元素不能通过路径删除（会移位或留下空洞），请在回调中 `splice`。
+- `get` 穿越已存在的基本值（如 `['count', 'x']`）或段类型与容器不匹配时抛错；`__proto__`、`prototype`、`constructor` 段一律拒绝；空路径不代表整个分区。
+
+编译期检查：路径与值的类型由 `MemoryAccessor<M>` 推导，错误键、错误值、数组方法名（`length`、`push`）、越界元组下标、宽 `string[]` 路径、对静态必填属性的 `remove`（即使类型同时带有索引签名）都会编译失败。`Record<number, X>` 这类数字键记录用字符串段访问，例如 `['byTick', String(tick)]`：JSON 对象键总是字符串，运行时也只接受字符串段；分区根本身是数字键记录时，顶层键重载同样接受字符串键（`get('100')`）。路径类型最多 8 段（`MaxPathDepth`），更深的修改用 `commit(mutator)`。`MemoryAccessor<any>` 是显式的动态入口：放弃编译期路径检查，运行时校验照常执行。
+
+项目当前未开启 `strictNullChecks`，编译期无法拒绝 `commit(key, undefined)`；运行时会以“undefined is not a JSON value”拒绝。删除请用 `remove`。
+
+## 数据约束与引用所有权
+
+分区根必须是普通对象，成员只能是 JSON 值：`null`、布尔、有限数字、字符串、无空洞的普通数组和普通对象。`undefined`、函数、Symbol 值与 Symbol 键、BigInt、`NaN`/`Infinity`、`Map`/`Set`/`Date`、Game 对象、对象上的访问器属性（getter/setter）以及 `__proto__`/`prototype`/`constructor` 键都会被拒绝。
+
+原型链上的可枚举扩展属性（其它代码向 `Object.prototype` 添加的属性）与 `JSON.stringify` 一样被忽略，不视为分区数据，也不会阻断写盘。
+
+出于性能取舍，以下违规**不会被检出**，按原生 `JSON.stringify` 语义写出：数组元素上的访问器（写出 getter 当时的返回值）、数组上的附加属性（如 `list.meta = …`，被省略）、对象的不可枚举属性（被省略）。它们都需要逐元素或逐键额外检查，大型数值数组上会使校验成本增加约 10 倍。不要以这些形式在分区中存放数据。
+
+校验时机：
+
+- `initialize`/`migrate` 的返回值、同版本恢复的历史数据、路径写入的新值：发布前校验，失败直接抛错；新值引用写入目标的祖先同样拒绝。`initialize`/`migrate` 的返回值与路径写入的新值在校验的同一次遍历中**复制**：调用方保留原对象，之后修改、冻结或复用它（例如同一个模块级常量写入多个分区）都不影响分区。复制使对象值写入比只校验多约 35% 的开销。
+- `commit(mutator)` 修改过的分区：本 tick `end` 时完整校验，非法数据阻断整串写盘（见下文）。
+- 只经路径写入或 `remove` 修改的分区：`end` 直接编码，不再遍历。
+
+`query()`/`get()` 返回真实对象的类型级只读引用，不克隆、不冻结。**不要通过这些引用直接修改数据**：这样不会标脏，修改可能永远不会落盘，也会绕过收尾校验。路径写入保存副本，因此 `commit('b', get('a'))` 得到与 a 互相独立的 b。只有在 `commit(mutator)` 回调中直接赋值同一对象（如 `m.b = m.a`）才会在分区内形成共享，此时不要让不同分区引用同一对象，也不得成环。**共享关系不会被持久化**：global reset 后各引用位置从文本分别解析，成为互不影响的对象；需要跨 reset 保持一致的数据只存一份，用键引用。字段被替换后，之前保存的嵌套引用会脱离分区，需要最新值时重新 `get`。
+
+## 申请配置
 
 | 配置 | 必填 | 说明 |
 | --- | --- | --- |
-| `version` | 是 | 正整数数据版本；升级时调用 `migrate`，降级被拒绝 |
-| `initialize()` | 是 | 没有历史数据时生成初始数据；必须返回键值对象 |
-| `migrate(memory, fromVersion)` | 升级时 | 接收未知旧数据，自行校验并返回新形状；**只要存储里已有该分区的数据就必须提供**（含旧布局导入的版本 0——它表示"未知旧版本"，不会被当成新安装） |
-| `layer` | 是 | `critical` 当 tick 提交；`checkpoint` 按间隔合并提交 |
-| `checkpointInterval` | 否 | 仅 checkpoint 可用，正整数，默认 100 tick；从首次 dirty 起算 |
-| `priority` | 否 | 显式提供才参与固定 Segment 竞争；缺省或未入选使用主 Memory |
+| `version` | 是 | 正整数，表示 payload 版本 |
+| `initialize()` | 是 | 确认不存在历史分区时同步调用，返回首次安装的分区对象；返回值在校验后被复制，可以安全地返回模块级常量 |
+| `migrate(memory, fromVersion)` | 存在不同版本的历史数据时 | 同步接收与历史记录隔离的副本（`unknown`），自行校验并返回目标版本对象（同样在校验后复制）；升级、降级、旧布局导入的版本 0 都走这里 |
 
-重复申请只有"声明完全一致"（版本、层、间隔、优先级以及 `initialize`/`migrate` 的函数引用）才复用同一句柄；任何差异都会抛配置错误。非法 `localId`、非正整数版本、非有限 priority 同样立即抛错。
+- 已存储版本与 `version` 不同而没有 `migrate`：申请抛错，**绝不**回退到 `initialize` 覆盖历史。
+- `migrate`/`initialize` 抛错、返回 Promise 或返回非法数据：申请抛错，历史记录不变。这类失败**不缓存**，下一次申请会重新运行回调（插件场景下，Framework 熔断会在连续失败后停用插件，`recover()` 后再次重试）。
+- 管理器自己判定的确定性错误——缺少 `migrate`、同版本历史数据不满足数据约束——在本 global 内缓存：相同声明再次申请直接抛出同一错误，不重复解析与校验。修正声明（新的函数引用或版本）即可重新申请。
+- 同版本的历史数据不满足数据约束（例如根是数组）：只拒绝该分区申请；声明新版本并提供 `migrate` 修复。
+- 重复申请只有 `version`、`initialize`、`migrate` 完全相同（函数按引用）才返回同一访问器，否则抛 `conflicting declaration`。
+- 旧协议字段 `layer`、`checkpointInterval`、`priority` 会被显式拒绝。
+- 申请只能在 `begin` 成功之后、`end` 之前（插件的 `setup` 与各钩子中）进行；迟到申请与首次申请规则相同，没有申请窗口。
 
-## 就绪语义（pending 原因）
+### initialize 与 migrate 必须是确定性函数
 
-| reason | 含义 | 处理 |
-| --- | --- | --- |
-| `loading` | 首次加载尚未完成 | 下一 tick 重试 |
-| `segment-activating` | 目标页尚未激活（请求后下一 tick 可见） | 下一 tick 重试 |
-| `migration` | 分区正在搬迁，写入被冻结 | 等待迁移完成，继续无关工作 |
-| `verification` | 搬迁副本等待回读校验 | 同上 |
-| `recovery` | 数据损坏、归属不符、版本异常，或已存储 payload 不是键值对象 | 由 `getStatus().fault/writeError` 暴露；页内容恢复一致后会在后续 tick 自动重读自愈，`writeError` 保留最近一次故障供回溯 |
+`initialize`、`migrate` 只能依赖自己的输入（`migrate` 收到的历史数据与版本号），不要读取 Game、其他插件的服务或其他分区。原因：
 
-`retryAt` 是建议重试 tick，不保证到期就绪。Framework 不会因为 pending 跳过插件的其它钩子、禁止其 Intent 或计入失败。
+- 它们只在申请时运行一次，结果随即持久化；读到的暂时性状态会被固化进存储；
+- 依赖暂时条件的回调会在条件不满足时让申请失败，插件 setup 随之失败，连续失败后被 Framework 熔断。
 
-### recovery 处置流程
-
-1. 从管理器 `getStatus()` 区分全局 `fault` 与 `allocations[]` 中具体分区的 `pending/writeError`，记录 pluginId、localId、后端和 Segment 页号。payload 不是键值对象时，`initialize` 不会覆盖历史，`migrate` 也不会绕过装载校验。
-2. 在任何人工存储修复前暂停游戏中的脚本执行，备份完整主 Memory 与相关 Segment（包括目录和 migration journal）。使用游戏存储管理工具或经审核的维护工具处理，禁止在业务模块中增加 Memory/RawMemory 旁路。
-3. 从备份恢复合法 payload，保留与目录一致的 owner、generation、dataVersion。若存在迁移 journal，必须按同一备份恢复源、目标和 journal 的一致状态，不得只删除 journal 或随意清空源页。无可验证备份时保留现场，不能用空对象宣称数据已经恢复。
-4. 主 Memory 在实例加载时形成快照：人工修复 Raw 数据或全局 fault 后，重新创建运行实例（global reset）再恢复执行。Segment 的无数据 recovery 分区会在页可见且内容修复后自动重读；版本/迁移回调问题应修正声明或代码并重建实例，不能假定所有 recovery 都会自行解除。
-5. 重新申请原身份，确认 ready、业务数据正确且后续提交成功。分区 `writeError` 可能保留最近一次故障，应结合 pending、dirty 与写入结果判断。
-
-没有通用的在线重置接口。放弃历史数据并重新初始化属于有损运维操作，必须单独确定丢弃范围和恢复方案；不要通过换 pluginId/localId 留下孤立分区来绕过恢复。
-
-## 提交与失败
-
-- `critical` 分区在每个 tick 收尾提交；`checkpoint` 分区从首次 dirty 起算，后续修改不延后期限。
-- 主 Memory 只重新序列化变化的分区与目录；完全 clean 的 tick 不写 RawMemory；Segment 分区只写自己的页。
-- 写入失败保留 dirty 与 `writeError`，下一 tick 重试；单个 Segment 分区失败不影响其它分区。
-- 单页容量上限约 100 KB（当前按 JSON 字符数计量），超限拒绝写入并保留旧数据，不自动拆页。
-- 主 Memory 序列化文本超过 2 097 152 字符时整串拒绝写入（不交给引擎），相关分区保持 dirty 并在 `writeError` 中给出体积；缩减数据后下一 tick 自动重试。
-
-主 Memory 的计量单位是 JavaScript `string.length`（UTF-16 码元）：普通汉字占 1、`😀` 占 2；不是 UTF-8 字节数。官方 driver 的 `RawMemory.set` 使用相同判断，来源与核验边界见[复审处置 R2](../../audits/2026-09-20-remediation.md#9-复审新增项评估与处置)。
-
-整串失败会阻止本次所有 Raw 更新持久化，包括 critical 分区；`critical` 表示提交时机，不保证引擎写入成功。依赖目录落盘的迁移 cleanup 会等待成功。故障期间 heap 的修改在 global reset 后可能丢失，应停止无界增长、通过 ready 分区的 `commit` 缩减可丢弃数据；宿主根字段由其所属工具缩减。默认模式保留的是根字段快照，人工修改存储须先暂停执行并在恢复前重建实例。
-
-写入失败不把已有 heap 数据的分区强制转成 pending，否则插件无法通过 commit 缩减数据自救；继续处理无关业务，并用 Framework 状态或管理器状态监测恢复。
-
-## 分配与迁移
-
-- 固定使用 10 个页（ID 0..9）并**排他占用**：激活请求提交精确集合，不并入外部活动页；外部工具不应与本模块同时使用这些页。
-- `priority` 降序排名，只取前 10 个申请，同分按稳定身份排序；落选者与窗口后的新申请使用主 Memory。
-- 启动窗口在首个 tick 收尾时封存。框架在安全模式、插件因 CPU 未准入或 setup 失败时会延后封存，最多 `maxStartupDeferrals`（默认 10）个 tick，超限强制封存并在诊断里标记。
-- 页分配前必须先观察到页内容：只有"读到过且为空"的页参与分配；目录或迁移 journal 引用的页视为自有，其余非空页（其他工具数据、无归属的历史信封）登记为保留页并跳过，绝不覆盖。
-- 搬迁串行执行：copy（暂存并写目标信封）→ 下一 tick 回读校验 → 切换目录 → cleanup（**确认新目录已随主 Memory 落盘后**才清空被腾退的页）；代际取自持久单调计数器，每次搬迁都是新值。中断后可跨 global reset 继续，且**不要求对应模块本轮重新申请**——数据从存储搬运，恢复以 journal 为准。
-- 搬迁期间（copy/verify/switch）相关分区保持 `pending`，写入被冻结；插件的新提交会被拒绝，避免"提交未搬进目标、switch 又清掉 dirty"的静默丢失。cleanup 阶段目录已经切换，分区恢复可用。
-- 被抢占的页会先腾退，再分配给本批入选者；旧页只有在目录落盘成功之后才被清空，任何时刻都至少保留一份有效数据。
-
-## 诊断
+依赖游戏状态的初始数据，在申请成功后按需补齐：
 
 ```ts
-const status = memory.getStatus();
-// status.loaded / fault / rawWriteError / tick
-// status.startupWindowOpen / startupWindowForced / startupDeferrals
-// status.allocations[]: owner、backend、segmentId、pending、dirty、writeError（最近一次故障，可能已恢复）
-// status.migration: { generation, phase, reason, moves } | null
-// status.reservedSegments[]: 被外部数据或未认领信封占用的页及原因
-// status.unobservedSegments[]: 尚未观察到内容、暂不参与分配的页
-// status.allocationSkipped[]: 分配规划中因数据未装载或损坏而落选的候选及原因
-// status.preservedRootKeys: 未被本模块认领的 Memory 根字段
+// initialize 只返回静态默认值
+const initialize = () => ({ seeded: false, sources: [] as string[] });
+
+onTickExecute(context) {
+  if (!state.get('seeded')) {
+    const room = context.env.getRoom('W1N1');
+    if (room) {
+      state.commit('sources', room.find(FIND_SOURCES).map((source) => source.id));
+      state.commit('seeded', true);
+    }
+  }
+}
 ```
 
-`rawWriteError` 非空表示主 Memory 整串写入最近一次失败（体积超限或引擎抛错），与是否存在待提交分区无关；下一 tick 自动重试，成功后清空，不阻断申请。
+停用或卸载插件不会删除分区，本 global 未申请的历史分区也原样保留并参与写出。没有分区删除或更名接口。
 
-应用也可通过 `framework.getStatus().memory.rawWriteError` 读取同一诊断，无需引用 MemoryManager 实现。此状态独立于 safeMode 和插件故障计数，读取的是调用时的最近一次写入结果。
+## 提交
 
-`fault` 非空表示存储无法解析（未知 schema、非法容器形状）：此时所有申请返回 `pending('recovery')`，管理器拒绝写入，原始数据保持不变。
+- 所有脏分区在本 tick 的 `end` **统一提交**，没有提交层级、间隔或节流选项；同一分区一个 tick 内的多次修改只编码一次。
+- 只重新序列化脏分区，其它分区复用已提交的 JSON 片段；但写盘时仍会拼接并输出完整主文本，成本与主 Memory 总量相关。
+- 没有任何修改的 tick 收尾是常数时间：不遍历分区、不序列化、不写 RawMemory。
+- 任一分区变化都会重新编码**整个分区**。频繁变化的大数据应按独立修改范围拆成多个分区（`context.memory('jobs', …)`、`context.memory('stats', …)`），避免每 tick 编码大对象。
 
-## 数据安全边界
+### 整体写盘阻塞
 
-- 未知 schema、页归属不符、版本降级、缺少 `migrate` 的升级都会拒绝写入并给出诊断，不用空数据覆盖历史。
-- 旧 `leviathan` 命名空间只做一次性导入（插件 payload 与版本号），不删除、不改写，可随时回退。
-- 主 Memory 中其它工具的根字段原样保留，且不缓存其文本：写入时从宿主 `Memory` 现取现序列化，同一 global 内被替换或新增的根字段会被合并（深层原地修改不会被检测）。
-- 运行中以 heap 数据为事实源：分区有未提交修改（dirty）时，重试装载绝不会用存储里的旧内容覆盖内存，页短暂不可见只会推迟提交。没有数据的分区不会参与 Segment 搬迁，并在 `allocationSkipped` 中给出原因。
-- 不自动合并控制台等外部对存储的编辑，但会传播宿主的根字段变化（替换、新增、**删除**）；完全 clean 的 tick 不写 RawMemory。
+提交是整串的：**任何一个脏分区校验或编码失败、或主文本超过容量，本轮所有分区都不写盘**，包括其他模块的关键状态。失败时：
+
+- 不推进任何已提交基线，脏状态与 heap 修改全部保留，下一 tick 按最新数据自动重试；
+- `getStatus().writeFailure` 给出阶段（`validate`/`encode`/`capacity`/`platform`），分区级错误带 `owner`/`localId`，整串错误不伪造归属；
+- 访问器照常可用。修复方式是在下一 tick 用该分区的访问器修正非法值（例如 `commit(['box', 'n'], 0)`）或缩减数据。
+
+停用出问题的插件**不会**解除阻塞（其脏状态仍在）；需要由仍持有访问器的修复逻辑处理，或修复插件后恢复执行。重建 global 会丢弃所有未落盘的 heap 修改，再从上一次有效文本恢复，不是无损修复。
+
+### 提交开销与 CPU 预留
+
+提交在所有插件收尾之后执行，本身不做 CPU 准入判断。私服实测（主 Memory 约 2 MB）：只有小分区变化时约 1.5–2.5 CPU，重新编码大分区约 6–10 CPU，均可能超过 Framework 默认的收尾预留 `reserveCpu`（5）。bucket 耗尽、单 tick 上限回落到常规 limit 时，大分区的提交可能在每个 tick 都被 CPU 硬终止，持久化因此一直无法完成（恢复协议保证不丢失已提交数据，但新修改无法落盘）。持有大分区时应：把频繁变化的数据拆成小分区、避免在同一 tick 修改大分区，并按主 Memory 规模调高 `reserveCpu`。
+
+### 容量
+
+主文本上限为 2 097 152 个 **UTF-16 码元**（`string.length`），包含命名空间结构与其他根字段：普通汉字占 1，`😀` 占 2，不是 UTF-8 字节数。超限整串拒绝，不覆盖有效文本。
+
+## 故障与诊断
+
+```ts
+const status = manager.getStatus();
+// loaded / loadError / tick
+// rawWriteError: 'validate o/a: $.box.n: non-finite number' 之类的文本；成功后为 null
+// writeFailure: { stage, tick, message, owner?, localId? } | null
+// dirty[]: 待提交分区；structureChanged: 是否有待写出的格式转换
+// partitions[]: 全部已存储分区（owner、localId、dataVersion、applied）
+// ignoredSegmentPartitions[]: 装载时忽略的旧 Segment 身份
+// preservedRootKeys[]: 原样保留的其他根字段
+```
+
+应用可通过 `framework.getStatus().memory` 读取 `loadError` 与 `rawWriteError`，无需引用实现。
+
+| 故障 | 行为 | 处置 |
+| --- | --- | --- |
+| 装载失败（坏 JSON、根不是对象、未知 `schemaVersion`、无法理解的结构） | 首次 `begin` 抛错并锁定本 global；之后每次 `begin` 都报告同一错误，Framework 进入安全模式，不执行插件阶段；**绝不写回** | 暂停执行，备份并修复主 Memory 文本后重建 global |
+| 分区申请失败（缺少 migrate、回调抛错、数据不合规） | 申请抛错，进入插件错误边界；历史记录不变，其它分区不受影响 | 修正声明或提供 migrate |
+| 整串写入失败 | 见“整体写盘阻塞”；不增加插件失败计数、不触发安全模式 | 修正数据或缩减体积，下一 tick 自动重试 |
+
+运行中通过控制台修改 RawMemory 不会被合并，并可能被下一次写盘覆盖；要接纳外部编辑，先停止业务写入再重建 global。
+
+## 生命周期与恢复
+
+- `begin(tick)`/`end(tick)` 的 `tick` 必须等于真实 tick（平台 `getTick()`；经 Runtime 创建时即 `platform.getGame().time`）；同 tick 重复调用不重复装载或提交，`end` 之后同 tick 不再允许修改；回调执行中调用 `begin/end` 视为重入并拒绝。
+- CPU 硬终止或遗漏 `end` 后，下一个真实 tick 的 `begin` 会终结旧阶段、清除旧锁；已发布的访问器、脏数据全部保留并在该 tick 提交，不会补跑或回滚旧回调的部分修改。
+- 被中断的 `initialize`/`migrate` 不会发布访问器，下一次申请重试。
+- global reset 后只从平台实际保存的文本恢复，未提交的 heap 修改随之丢失。
+- 首次装载只解析一次主文本，不重新编码：同版本申请直接使用解析出的对象；历史记录与其他根字段在首次提交时才编码为片段（实测 2 MB、100 个分区：装载约 31 ms，全部申请约 41 ms，首次提交约 15 ms，之后的提交约 1.6 ms）。未申请的历史分区在首次提交前以解析对象驻留 heap。
+
+## 旧格式兼容
+
+首次装载时自动转换，并在本 tick `end` 写出 schemaVersion 2（即使没有业务修改）：
+
+- schemaVersion 1：只导入正式归属为 raw 的分区；Segment 归属的身份被忽略（同身份的残留 Raw 副本一并忽略），首次装载输出一次汇总 `warn`，同名分区再次申请时按首次安装处理。Segment 页不会被读取、激活或清空。
+- 没有 `memoryManager` 命名空间时，导入旧 `leviathan.plugins` 的对象数据为 `<pluginId>/main`，版本取 `framework.pluginVersions`，缺失记 0（需要 `migrate`）。原 `leviathan` 字段原样保留。
+- 历史 payload 可以是任意 JSON 值，未申请时原样保留；`dataVersion` 0 的记录在转换和 global reset 后都能再次装载。
 
 ## 日志
 
-`createMemoryManager({ logging })` 接受注入的 `LoggerFactory`，作用域固定为 `MemoryManager`，接入规则见 [Core 架构 §10](../../design/core/README.md)。默认等级（warn/error 开、info/debug 关）下：
-
-- 正常路径完全静默，包括迁移过程与 clean tick；
-- `warn`：写入失败（同一原因一次）、页被外部数据占用、容量超限、启动窗口强制封存；
-- `error`：存储加载失败、不可自愈的数据问题（schema、归属、版本）；
-- 排查时用 `createLogging({ levels: { info: true } })` 打开迁移阶段与恢复日志，`debug` 级别另有 pending 往返追踪。
-
-日志是补充信息，权威诊断仍以 `getStatus()` 为准。
-
-## 性能注意
-
-- 首次加载解析整份主 Memory 一次，稳态复用 heap 对象；每 tick 成本与变化分区数量相关，与总分区数无关。
-- Segment 写入避免主 Memory 整串重组，但页的加载与切换有宿主成本；只为可重建缓存省 CPU 时优先使用闭包，不要为了占满 10 页而持久化。
-
-## 应用层装配
-
-`src/core/runtime` 是 Core 组合根，创建 Logger 后显式创建 MemoryManager，再把完整 Runtime 交给 Framework。`src/app/runtime.ts` 只创建 Runtime、选择插件并创建 Framework。业务模块只需通过 `context.memory` 申请分区，不需要也不允许自行创建存储入口。
-
-**访问边界（AGENTS.md 第 9 节）**：`core/memoryManager` 是项目内唯一允许访问全局 `Memory`、`RawMemory` 与 Segment 的模块。其它模块若有跨 global 状态需求，必须走 `context.memory`；直接访问存储属于阻断问题，`test/memoryBoundary.test.ts` 会扫描 `src/` 自动拦截。
+`createMemoryManager({ logging })` 接受注入的 `LoggerFactory`，作用域为 `MemoryManager`。默认等级下正常路径静默；`warn`：整串提交失败（同一原因一次）、忽略的 Segment 身份、导入跳过的旧键；`error`：装载失败（每个 global 一次）；`info`：业务迁移完成、写盘失败后恢复。权威诊断以 `getStatus()` 为准。
 
 ## 独立使用（不经 Framework）
 
-`createRuntime({}, { memory })` 会把测试或特殊宿主提供的 MemoryHost 按模块名绑定到 `ModuleContext.memory`；独立 Runtime 不驱动 tick，调用方需要自行在边界调用 `memory.begin(tick)` / `memory.end(tick)`。模块级测试可以直接 `createMemoryManager({ logging, platform })` 注入日志工厂和假平台，不必启动框架。
+```ts
+const manager = createMemoryManager({
+  logging: createLogging(),
+  // 二选一：完整平台端口，或只替换缺省平台的 tick 来源（缺省读取全局 Game.time）
+  platform: { readRaw, writeRaw, getTick },
+  // getTick: () => myGame.time,
+});
+manager.begin(Game.time);
+const accessor = manager.bind('tool')('main', options);
+// …
+manager.end(Game.time);
+```
 
-## 迁移恢复注意事项
+经 Runtime 创建时，缺省平台的 tick 来源自动取自 `platform.getGame().time`，与 Framework 调用 `begin/end` 的 tick 同源；`createRuntime({ memoryManager: { platform } })` 可替换整个平台端口（此时 tick 由该端口自己提供）；`createRuntime({}, { memory })` 可注入其它 `MemoryHost`，按模块名绑定到 `ModuleContext.memory`，独立 Runtime 需要调用方自行驱动 `begin/end`。
 
-- global reset 后恢复 copy/verify/switch 时，重新申请仍返回 pending；业务版本升级回调延后到后端切换完成再执行，不能在冻结期间写入。
-- 页不可见不会解除迁移冻结；只跳过依赖该分区的行为。
-- 清理前检查管理范围、所有目录引用和信封 owner/代次/数据版本。旧 cleanup 记录缺少源代次时保留原页并输出诊断，不自动清空身份不明的数据。
+同一 global 只应装配一个 MemoryManager：多个实例各自持有 heap 片段，会互相覆盖同一命名空间。
 
-## 未交付
-
-- 同一 global 只应装配一个 MemoryManager：多个实例各自持有 heap 快照，会在同一命名空间上互相覆盖。
-- 目标服务器的实际运行验证；主 Memory 的 UTF-16 长度口径已核对官方 driver，修改过限制的私服需要单独核验。
-- 迁移期间的在线修改（当前冻结搬迁分区）与多迁移并行。
-- 独立 heap 监控设施；旧布局导入仅覆盖插件 payload，Profiler 统计与健康表保留在原处不迁移。
-
-## 迁移与序列化的数据完整性
-
-- 搬迁过程中发现源或目标 payload 不是键值对象、切回 Raw 时缺少可携带的数据时，搬迁会中止并保留原有副本，诊断出现在分区 `writeError` 与 `warn` 日志中；不会从缺值生成记录，也不会清空仍有效的旧页。
-- 宿主根字段中无法用 JSON 表示的值（undefined、函数、Symbol）与原生 `JSON.stringify` 一致地被省略；循环引用、BigInt 会使写入失败并出现在 `getStatus().rawWriteError`，主 Memory 保持最后一次有效文本，问题字段被移除后自动恢复。
+**访问边界（AGENTS.md 第 9 节）**：除本模块及其平台适配层外，任何源码都不得访问全局 `Memory` 或 `RawMemory`；`test/memoryBoundary.test.ts` 会扫描 `src/` 自动拦截。

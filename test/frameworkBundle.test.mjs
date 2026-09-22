@@ -80,15 +80,6 @@ const sandbox = (chunk) => {
         writes++;
         raw = value;
       },
-      // Segment 视图：MemoryManager 在首次 begin 请求固定页（下一 tick 才可见），
-      // 这里提供可读写的 segments 对象与激活入口即可。
-      segments: {},
-      setActiveSegments: (ids) => {
-        assert.ok(
-          Array.isArray(ids) && ids.length <= 10,
-          'at most 10 segments'
-        );
-      },
     },
     require: (name) => {
       assert.equal(name, 'main.js.map', 'runtime may only load its source map');
@@ -155,8 +146,8 @@ test('real generated stack maps to TypeScript using uploaded main.js.map module'
   vm.runInContext(
     `
     const noMemory = {
-      begin() {}, end() {}, deferStartupWindow() {},
-      getStatus() { return {rawWriteError: null}; },
+      begin() {}, end() {},
+      getStatus() { return { loadError: null, rawWriteError: null }; },
       bind() { return () => { throw new Error('MemoryManager is not assembled'); }; }
     };
     const core = exports.createRuntime({}, { memory: noMemory });
@@ -197,4 +188,40 @@ test('real generated stack maps to TypeScript using uploaded main.js.map module'
   assert.equal(h.context.Memory, undefined);
   assert.equal(h.reads(), 0);
   assert.equal(h.writes(), 0);
+});
+
+/**
+ * 真实产物中的默认 MemoryManager：经 RawMemory 与 Game.time 装配，插件申请分区后按
+ * schemaVersion 2 写出；访问器跨 tick 直接使用，干净 tick 不再序列化或写入。
+ */
+test('bundled memory manager persists partitions and skips clean ticks', async () => {
+  const chunk = await compile('src/core/index.ts');
+  const h = sandbox(chunk);
+  vm.runInContext(
+    `
+    const core = exports.createRuntime({ profiler: false });
+    let accessor;
+    globalThis.persisting = exports.createFramework({ runtime: core, plugins: [{
+      manifest: { id: 'counter', version: 1 },
+      setup(context) {
+        accessor = context.memory('main', { version: 1, initialize: () => ({ n: 0 }) });
+      },
+      onTickExecute() {
+        if (Game.time < 3) accessor.commit(['n'], Game.time);
+      }
+    }] });
+    for (let i = 0; i < 4; i++) { persisting.loop(); Game.time++; }
+    `,
+    h.context
+  );
+  assert.equal(h.context.persisting.getStatus().safeMode, false);
+  assert.deepEqual(JSON.parse(h.raw()), {
+    memoryManager: {
+      schemaVersion: 2,
+      partitions: { counter: { main: { dataVersion: 1, payload: { n: 2 } } } },
+    },
+  });
+  assert.equal(h.reads(), 1, 'raw memory is parsed once per global');
+  assert.equal(h.writes(), 2, 'only ticks with commits write');
+  assert.equal(h.context.Memory, undefined);
 });

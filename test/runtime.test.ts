@@ -128,30 +128,45 @@ describe('Runtime context factory', () => {
     const platform = {
       readRaw: jest.fn(() => '{}'),
       writeRaw: jest.fn(),
-      readSegments: jest.fn(() => ({})),
-      writeSegment: jest.fn(),
-      activeSegments: jest.fn(() => [] as number[]),
-      activateSegments: jest.fn(),
+      getTick: jest.fn(() => 1),
     };
     const runtime = createRuntime({
-      memoryManager: { platform, segmentIds: [7] },
+      memoryManager: { platform },
       profiler: false,
     });
     const context = runtime.createContext('Worker');
     expect(platform.readRaw).not.toHaveBeenCalled();
-    expect(platform.readSegments).not.toHaveBeenCalled();
     runtime.memory.begin(1);
     expect(platform.readRaw).toHaveBeenCalledTimes(1);
-    expect(platform.activateSegments).toHaveBeenCalledWith([7]);
-    const state = context.memory('main', {
-      version: 1, layer: 'critical', initialize: () => ({ count: 0 }),
-    }).access();
-    expect(state.status).toBe('ready');
-    if (state.status !== 'ready') throw new Error('Expected ready partition');
-    state.commit((data) => data.count++);
+    const accessor = context.memory!('main', {
+      version: 1,
+      initialize: () => ({ count: 0 }),
+    });
+    accessor.commit((data) => data.count++);
     runtime.memory.end(1);
     const saved = JSON.parse(platform.writeRaw.mock.calls[0][0]);
-    expect(saved.memoryManager.rawPartitions.Worker.main.payload.count).toBe(1);
+    expect(saved.memoryManager.partitions.Worker.main.payload.count).toBe(1);
+  });
+
+  /** M2：默认 MemoryManager 的真实 tick 取自共享 getGame 端口，而不是全局 Game。 */
+  it('derives the memory tick from the shared getGame port', () => {
+    const fakeGame = { time: 42 } as unknown as Game;
+    const previousGame = (global as any).Game;
+    const previousRaw = (global as any).RawMemory;
+    let raw = '';
+    delete (global as any).Game;
+    (global as any).RawMemory = { get: () => raw, set: (value: string) => { raw = value; } };
+    try {
+      const runtime = createRuntime({ platform: { getGame: () => fakeGame }, profiler: false });
+      runtime.memory.begin(42);
+      runtime.createContext('Worker').memory!('main', { version: 1, initialize: () => ({ n: 1 }) });
+      runtime.memory.end(42);
+      expect(JSON.parse(raw).memoryManager.partitions.Worker.main.payload).toEqual({ n: 1 });
+      expect(() => runtime.memory.begin(43)).toThrow(/does not match current tick 42/);
+    } finally {
+      (global as any).Game = previousGame;
+      (global as any).RawMemory = previousRaw;
+    }
   });
 
   /** 替换项优先于创建配置，未使用的配置不能触发校验、访问存储或创建第二个实例。 */

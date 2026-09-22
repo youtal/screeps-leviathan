@@ -55,14 +55,20 @@ export const createRuntime = (
    * 日志工厂，避免内核组件各自持有第二套日志配置。
    */
   const bus = overrides.bus ?? createBus(logging);
+  const getGame = options.platform?.getGame ?? (() => Game);
   /**
    * MemoryManager 位于 logging 之后创建，只消费已经存在的日志契约实例。
    * overrides.memory 服务测试或特殊宿主；默认实例直到 begin 才读取 RawMemory。
+   * tick 来源由共享 getGame 端口派生：Framework 以 getGame().time 调用 begin/end，
+   * 管理器以同一来源判定真实 tick，注入模拟 Game 时两者不会分叉。
    */
   const memory =
     overrides.memory ??
-    createMemoryManager({ ...options.memoryManager, logging });
-  const getGame = options.platform?.getGame ?? (() => Game);
+    createMemoryManager({
+      ...options.memoryManager,
+      getTick: () => getGame().time,
+      logging,
+    });
   /**
    * 默认 Profiler 统计的落点：一个只存在于本闭包 heap 的普通对象。
    *

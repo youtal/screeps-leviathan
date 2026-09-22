@@ -1,6 +1,6 @@
 # Leviathan Framework 设计
 
-交付状态：部分交付。Framework 协议、Runtime 消费与插件事务已交付；Memory 同步装载错误契约接入未交付。
+交付状态：已交付。Framework 协议、Runtime 消费、插件事务、Memory 同步装载错误契约接入与带 tick 归属的 loop 重入锁均已交付。
 
 ## 1. 模块定位
 
@@ -183,7 +183,7 @@ Profiler 的起始取样失败时直接执行原函数。结束时先恢复调�
 
 安全模式只提供诊断与可执行的收尾；首版没有内建最低生存策略。
 
-FrameworkStatus 的 memory 诊断通过 MemoryHost.getStatus 投影 loadError 与 rawWriteError，查询时生成独立快照；不读取存储实现或逐 tick 分配诊断对象。装载失败按宿主故障处理；存储写入失败与插件执行故障分开，不增加失败计数或触发安全模式，允许插件通过正常 commit 缩减数据自救。装载诊断扩展未交付。
+FrameworkStatus 的 memory 诊断通过 MemoryHost.getStatus 投影 loadError 与 rawWriteError，查询时生成独立快照；不读取存储实现或逐 tick 分配诊断对象。装载失败按宿主故障处理；存储写入失败与插件执行故障分开，不增加失败计数或触发安全模式，允许插件通过正常 commit 缩减数据自救。装载诊断扩展已交付。
 
 ## 9. CPU 与性能观测
 

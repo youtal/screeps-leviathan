@@ -5,6 +5,7 @@ import {
   mkdirSync,
   writeFileSync,
   existsSync,
+  readFileSync,
   symlinkSync,
   rmSync,
 } from 'node:fs';
@@ -37,7 +38,7 @@ function fixture() {
   }
   writeFileSync(
     join(root, 'src/core/memoryManager/types.ts'),
-    'export const SEGMENT_CAPACITY = 100_000;'
+    'export const RAW_MEMORY_LIMIT = 2_097_152;'
   );
   return root;
 }
@@ -48,7 +49,10 @@ test('staging includes only runner inputs, never root config or credentials', ()
   try {
     stageContext(root, target);
     assert.ok(existsSync(join(target, 'dist/main.js')));
-    assert.ok(existsSync(join(target, 'support/contract.json')));
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(target, 'support/contract.json'), 'utf8')),
+      { rawMemoryLimit: 2_097_152 }
+    );
     assert.ok(existsSync(join(target, 'scenarios/example.scenario.js')));
     for (const name of ['.secret.json', '.git', 'src'])
       assert.equal(existsSync(join(target, name)), false);

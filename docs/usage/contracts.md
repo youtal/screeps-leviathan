@@ -23,12 +23,12 @@ Framework 的装配入口要求完整 `CoreRuntime`。应用应由 `createRuntim
 
 ## Memory 契约的交付边界
 
-`MemoryAccessor`、`MemoryAccess`、`ApplyMemoryAccessor`、`MemoryApplicationOptions` 与宿主生命周期端口 `MemoryHost` 均已发布；存储实现见 [MemoryManager 使用说明](./core/memoryManager.md)，装配方式与 pending 语义在该文档中给出。
+`MemoryAccessor`（长期访问器：query/get/commit/remove）、深路径类型（`PathValue`、`ValidPath`、`RemovablePath`、`MaxPathDepth` 等）、`ApplyMemoryAccessor`、`MemoryApplicationOptions` 与宿主生命周期端口 `MemoryHost` 均已发布；存储实现、路径规则与故障处理见 [MemoryManager 使用说明](./core/memoryManager.md)。
 
-MemoryHost 实现及测试替身必须提供 `getStatus(): { rawWriteError: string | null }`；无失败时返回 null，实现可额外返回自己的诊断字段。Framework 只将此最小字段投影到 `FrameworkStatus.memory.rawWriteError`，不依赖 MemoryManager 的具体类型。
+MemoryHost 实现及测试替身必须提供 `begin`、`end`、`bind` 与 `getStatus(): { loadError: string | null; rawWriteError: string | null }`；无故障时两者为 null，实现可额外返回自己的诊断字段。`begin` 在装载失败时抛错。Framework 只将这两个字段投影到 `FrameworkStatus.memory`，不依赖 MemoryManager 的具体类型。
 
-每 tick 调用 `access()` 并检查 `status`。指定 priority 的模块必须处理 pending：仅跳过依赖 Memory 的行为，其他活动继续。`retryAt` 是建议重试 tick，不是就绪保证。稳定 Accessor 可以跨 tick 保存，ready 句柄和数据引用不能跨 tick 使用。
+申请同步完成：成功返回在本 global 内长期有效的访问器，可以跨 tick 保存并直接调用；失败直接抛错，没有 pending 状态。`query`/`get` 返回的引用只读，修改必须经 `commit`/`remove`。
 
-申请配置为 `version`、`initialize`、`layer`，以及可选的 `priority`、`migrate`、`checkpointInterval`。`migrate` 接收 unknown 旧数据，须自行校验；TypeScript 泛型不能验证历史 JSON。checkpoint 间隔只适用于 checkpoint 层，约定为正整数，默认 100 tick。
+申请配置为 `version`、`initialize` 与可选的 `migrate`；没有提交层级、间隔或存储优先级。`migrate` 接收与历史记录隔离的 unknown 旧数据，须自行校验；TypeScript 泛型不能证明反序列化数据的运行时结构。
 
-`query()` 只提供类型级只读，不冻结对象；`commit()` 回调要求同步，抛错不承诺回滚，返回成功也不表示已落盘。实现与测试覆盖这些语义；未交付部分以 MemoryManager 使用说明的“未交付”一节为准。
+`query()` 只提供类型级只读，不冻结对象；`commit()` 回调要求同步，抛错不承诺回滚，返回成功也不表示已落盘。实现与测试覆盖这些语义。
