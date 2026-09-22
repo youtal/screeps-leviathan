@@ -1,0 +1,10 @@
+# 提案
+
+[文档总导航](../README.md)
+
+提案记录尚未决策的技术方案：问题、可选做法、取舍与建议，以及需要回答的问题。它不是设计案，也不描述已交付的能力——提案中的接口草案都还不可调用。
+
+流程：提案经确认后，设计意图写入 [设计方案](../design/README.md)，公共调用方法写入 [使用说明](../usage/README.md)，提案本身标注结论（已采纳或已放弃）并链接到落地文档；被放弃的提案保留记录与理由。
+
+- [跨 tick 高消耗任务框架](./cross-tick-tasks.md)：为什么无法中断任意回调、生成器方案的接口与调度草案、分片粒度实测、硬终止与 global reset 下的恢复策略。状态：已采纳（生成器方案，归入 Core），设计见 [TaskScheduler 设计](../design/core/taskScheduler.md)。
+- [通用能力层的定位与提供方式](./capability-layer.md)：roomShortcuts、goto 这类与 Screeps 耦合的通用能力放在哪一层，以及用服务令牌替代字符串服务名的方案。状态：已采纳（方案 C），设计见[能力层设计](../design/capabilities/README.md)。

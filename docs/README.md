@@ -1,8 +1,8 @@
 # 文档总导航
 
-[项目首页](../README.md) · [开发规范](../AGENTS.md) · [设计索引](./design/README.md) · [使用索引](./usage/README.md) · [测试文档](./testing/README.md) · [更新记录](./changelog/README.md) · [审计报告](./audits/README.md)
+[项目首页](../README.md) · [开发规范](../AGENTS.md) · [设计索引](./design/README.md) · [使用索引](./usage/README.md) · [提案](./proposals/README.md) · [测试文档](./testing/README.md) · [更新记录](./changelog/README.md) · [审计报告](./audits/README.md)
 
-设计记录设计意图和交付状态；使用说明记录公共能力的调用方法；更新记录保存已完成变更的历史。设计中的 API 示例不表示已可调用，使用时查看对应使用说明。
+设计记录设计意图和交付状态；使用说明记录公共能力的调用方法；提案记录尚未决策的方案；更新记录保存已完成变更的历史。设计与提案中的 API 示例都不表示已可调用，使用时查看对应使用说明。
 
 ## 公共契约
 
@@ -21,6 +21,11 @@
 | ErrorMapper | [core/errorMapper](../src/core/errorMapper/) | [设计](./design/core/errorMapper.md) | [使用](./usage/core/errorMapper.md) |
 | Logger | [core/logger](../src/core/logger/) | [设计](./design/core/logger.md) | [使用](./usage/core/logger.md) |
 | MemoryManager | [core/memoryManager](../src/core/memoryManager/) | [设计](./design/core/memoryManager.md) | [使用](./usage/core/memoryManager.md) |
+| TaskScheduler | 未交付；规划路径 `src/core/taskScheduler/` | [设计](./design/core/taskScheduler.md) | 待交付 |
+
+## 能力层
+
+与 Screeps 耦合、为业务模块提供通用能力的插件所在层，不属于 Core；目前尚无模块迁入或新建于此目录。总体设计见[能力层设计](./design/capabilities/README.md)。
 
 ## 业务模块与应用
 
@@ -36,6 +41,13 @@
 | --- | --- | --- | --- |
 | 控制台格式化、表单和帮助 | [utils/console](../src/utils/console/) | [设计](./design/utils/console.md) | [使用](./usage/utils/console.md) |
 | 优先队列 | [priorityQueue.ts](../src/utils/priorityQueue.ts) | [设计](./design/utils/priorityQueue.md) | [使用](./usage/utils/priorityQueue.md) |
+
+## 提案
+
+尚未决策的技术方案，接口草案不可调用；确认后写入设计与使用说明。
+
+- [跨 tick 高消耗任务框架](./proposals/cross-tick-tasks.md)：已采纳，机制为生成器方案，调度器归入 Core；设计见 [TaskScheduler](./design/core/taskScheduler.md)。
+- [通用能力层的定位与提供方式](./proposals/capability-layer.md)：已采纳，方案 C（服务令牌）；设计见[能力层](./design/capabilities/README.md)与[公共契约](./design/contracts.md)。
 
 ## 测试环境
 

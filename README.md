@@ -36,6 +36,7 @@ npm run upload:validation
 - [文档总导航](./docs/README.md)：按源码模块查找设计与使用说明。
 - [设计方案](./docs/design/README.md)
 - [使用说明](./docs/usage/README.md)
+- [提案](./docs/proposals/README.md)：尚未决策的技术方案
 - [测试文档](./docs/testing/README.md)
 - [更新简讯](./docs/changelog/README.md)
 
