@@ -21,6 +21,11 @@
 | ErrorMapper | [core/errorMapper](../src/core/errorMapper/) | [设计](./design/core/errorMapper.md) | [使用](./usage/core/errorMapper.md) |
 | Logger | [core/logger](../src/core/logger/) | [设计](./design/core/logger.md) | [使用](./usage/core/logger.md) |
 | MemoryManager | [core/memoryManager](../src/core/memoryManager/) | [设计](./design/core/memoryManager.md) | [使用](./usage/core/memoryManager.md) |
+| TaskScheduler | 未交付；规划路径 `src/core/taskScheduler/` | [设计](./design/core/taskScheduler.md) | 待交付 |
+
+## 能力层
+
+与 Screeps 耦合、为业务模块提供通用能力的插件所在层，不属于 Core；目前尚无模块迁入或新建于此目录。总体设计见[能力层设计](./design/capabilities/README.md)。
 
 ## 业务模块与应用
 
@@ -41,8 +46,8 @@
 
 尚未决策的技术方案，接口草案不可调用；确认后写入设计与使用说明。
 
-- [跨 tick 高消耗任务框架](./proposals/cross-tick-tasks.md)：把一段高消耗计算分摊到多个 tick 完成。
-- [通用能力层的定位与提供方式](./proposals/capability-layer.md)：与 Screeps 耦合的通用能力如何分层与被消费。
+- [跨 tick 高消耗任务框架](./proposals/cross-tick-tasks.md)：已采纳，机制为生成器方案，调度器归入 Core；设计见 [TaskScheduler](./design/core/taskScheduler.md)。
+- [通用能力层的定位与提供方式](./proposals/capability-layer.md)：已采纳，方案 C（服务令牌）；设计见[能力层](./design/capabilities/README.md)与[公共契约](./design/contracts.md)。
 
 ## 测试环境
 

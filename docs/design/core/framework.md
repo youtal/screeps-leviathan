@@ -1,6 +1,6 @@
 # Leviathan Framework 设计
 
-交付状态：已交付。Framework 协议、Runtime 消费、插件事务、Memory 同步装载错误契约接入与带 tick 归属的 loop 重入锁均已交付。
+交付状态：已交付。Framework 协议、Runtime 消费、插件事务、Memory 同步装载错误契约接入与带 tick 归属的 loop 重入锁均已交付。服务令牌读取重载（`services.get`/`provide`/`optional`，见 §5.3）与任务驱动（TaskHost.drive，见 §8）未交付。
 
 ## 1. 模块定位
 
@@ -115,6 +115,12 @@ Context 在 setup 时创建并缓存；`tick`、意图队列都在使用时读�
 
 回调以订阅者身份执行，阶段沿用发布者发布时的阶段，按阶段判定的能力（例如执行阶段提交意图，意图归属订阅者）保持一致。setup 专属接口（`subscribe`、`services.provide`、`onDispose`）只属于插件自己的 setup 主体，事件回调中一律拒绝：否则回调可以在发布者的 setup 期间越权订阅或发布服务，`onDispose` 还会把清理函数登记到发布者名下，使清理在发布者停用时执行。Framework 以事件回调的嵌套层数判定，每个 tick 开始时复位，硬终止遗留的层数不会延续。
 
+### 5.3 服务令牌读取
+
+`services.get`、`services.provide` 在接受服务名字符串的重载之外，各增加一个接受 `ServiceToken<T>`（`src/contracts/service.ts`）的重载：运行时按 `token.name` 查表，行为与字符串重载完全一致，只是返回类型由令牌的类型参数决定，调用方不再需要在取值处手写类型断言。
+
+令牌只改变服务名一侧的读取方式，不改变 §5.1 的上下文缓存规则，也不改变本节前述 `provides`/`requires` 的语义划分：`provides` 仍然声明服务名、`requires` 仍然声明插件 id，两者不因为存在令牌而合并成同一命名空间。是否同时提供 `services.optional(token)`（返回 `T | undefined`，提供者不可用时不抛错）尚未决定；完整的令牌协议、消费方式、这一待决项与已知的残留耦合见[能力层设计](../capabilities/README.md)。
+
 ## 6. IntentBroker 与资源竞争
 
 公共意图字段：
@@ -161,7 +167,13 @@ Framework 不承担 RawMemory 解析、Memory 挂载、分区格式转换或写�
 
 持久化由 [MemoryManager](./memoryManager.md) 独立管理；Framework 在插件 setup/钩子之前调用 Runtime 中的 MemoryHost.begin，在所有已进入阶段的插件收尾后调用 end。分区申请同步成功或抛错，不设申请窗口或等待句柄。若上个 tick 因硬终止或遗漏收尾未完成，Framework 在真实的新 tick 顶层恢复自身阶段与临时重入锁，并继续调用 MemoryHost.begin，由存储宿主恢复遗留阶段并继续处理保留的脏集合；不能因旧 tick 的运行标记永久拒绝后续 loop。loop 必须使用带真实 tick 归属的重入锁，不能仅依赖 running 布尔值和 finally 复位；同 tick 同步重入仍拒绝。交付时须在真实引擎验证 CPU 硬终止是否保留 heap 及下一 tick 的恢复行为。begin 装载异常进入宿主错误边界和安全模式；插件申请异常进入所属插件的错误边界；end 写入失败保留可用访问器和重试资格。Runtime 统一装配遵循 [Core 架构](./README.md)。
 
-## 8. ErrorMapper、Profiler 与故障隔离
+## 8. 任务边界
+
+Framework 不驱动任何具体的跨 tick 计算，只在自己的收尾时序里给 TaskHost 一次驱动机会：所有插件的 tickEnd、健康/熔断统计与 MemoryHost.end 完成后，Framework 调用 Runtime 中的 `TaskHost.drive(tick, cpu)`，把本 tick 剩余的 CPU 交给就绪任务；`cpu` 是驱动本轮插件用的同一个 CpuBudget，任务因此拿不到 `reserveCpu` 预留的部分。`drive` 只做协作式调度，不理解任务的业务内容，也不参与插件依赖排序或 Intent 仲裁。
+
+`drive` 内部对单个任务的异常隔离由 TaskHost 自己完成，不经过 Framework 的按插件错误边界；`drive` 调用本身的异常由 Framework 按宿主级故障处理（与 MemoryHost.begin 同等边界）：记录诊断、本 tick 跳过任务驱动，不触发 safeMode。完整协议、调度算法与故障归属规则由 [TaskScheduler 设计](./taskScheduler.md) 独立管理，Framework 只消费 `src/contracts/runtime.ts` 发布的 TaskHost 契约，不导入或创建具体实现。
+
+## 9. ErrorMapper、Profiler 与故障隔离
 
 ErrorMapper 使用同步的 `@jridgewell/trace-mapping`，避免依赖异步初始化。实现依据[解析库 API](https://github.com/jridgewell/sourcemaps/tree/main/packages/trace-mapping)，读取上传协议中的 `main.js.map` 模块。
 
@@ -169,7 +181,7 @@ ErrorMapper 使用同步的 `@jridgewell/trace-mapping`，避免依赖异步初�
 
 捕获边界返回 `{ ok: true, value }` 或 `{ ok: false, failure }`。非 Error 抛出值也会规范化；字符串转换、映射和报告器再次失败时保留原始诊断，不击穿 loop。Promise 返回值被视为违反同步钩子契约并报告失败。
 
-### 8.1 包装顺序与 CPU 归属
+### 9.1 包装顺序与 CPU 归属
 
 ```text
 ErrorBoundary.capture(metadata, callback)
@@ -183,7 +195,7 @@ Profiler 的起始取样失败时直接执行原函数。结束时先恢复调�
 
 所有包装器按固定 label 缓存，不在每 tick 重新 wrap。Profiler calls 包含成功和失败调用。插件健康只在实例 heap 内维护失败和熔断，不为诊断写入 Memory。
 
-### 8.2 熔断与安全模式
+### 9.2 熔断与安全模式
 
 默认连续失败 3 个参与 tick 后熔断插件，后续挂起使用者并释放实例资源。未参与的 tick 不重置连续失败计数。`recover(id)` 清除熔断状态，下一 tick 重试。
 
@@ -193,7 +205,7 @@ Profiler 的起始取样失败时直接执行原函数。结束时先恢复调�
 
 FrameworkStatus 的 memory 诊断通过 MemoryHost.getStatus 投影 loadError 与 rawWriteError，查询时生成独立快照；不读取存储实现或逐 tick 分配诊断对象。装载失败按宿主故障处理；存储写入失败与插件执行故障分开，不增加失败计数或触发安全模式，允许插件通过正常 commit 缩减数据自救。装载诊断扩展已交付。
 
-## 9. CPU 与性能观测
+## 10. CPU 与性能观测
 
 默认 `reserveCpu = 5`、`minBucket = 1000`：
 
@@ -211,6 +223,7 @@ framework.tickExecute.plan
 framework.tickExecute.arbitrate
 framework.tickExecute.commit
 framework.tickEnd
+framework.tasks.drive
 plugin.<id>.setup / tickBegin / tickExecute / commit / tickEnd / dispose
 framework.errorMapper.loadSourceMap
 framework.errorMapper.mapStack
@@ -219,7 +232,7 @@ framework.errorMapper.report
 
 Profiler 的初始开关由 Runtime 配置。业务优先级应由后续策略层确定：生存、防御、Spawn 和关键物流优先，布局重算与远期规划可延期。
 
-## 10. 首版验收与后续范围
+## 11. 首版验收与后续范围
 
 已交付：
 

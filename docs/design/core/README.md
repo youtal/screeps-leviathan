@@ -1,8 +1,10 @@
 # Core 架构设计及开发原则
 
-交付状态：已交付。统一内核装配、单向依赖边界、事务性插件注册、Memory 同步分区申请及长期访问契约接入均已交付。
+交付状态：已交付。统一内核装配、单向依赖边界、事务性插件注册、Memory 同步分区申请及长期访问契约接入均已交付。TaskScheduler 的内核能力身份与 Runtime 组装未交付，设计见 [TaskScheduler](./taskScheduler.md)。
 
-本设计定义 Core 的架构与开发原则。模块设计入口：[Framework](./framework.md)、[Runtime](./runtime.md)、[Profiler](./profiler.md)、[ErrorMapper](./errorMapper.md)、[MemoryManager](./memoryManager.md)。
+本设计定义 Core 的架构与开发原则。模块设计入口：[Framework](./framework.md)、[Runtime](./runtime.md)、[Profiler](./profiler.md)、[ErrorMapper](./errorMapper.md)、[MemoryManager](./memoryManager.md)、[TaskScheduler](./taskScheduler.md)。
+
+与 Screeps 耦合的通用能力（roomShortcuts、goto 等）不进入 Core，位于同级的能力层，见[能力层设计](../capabilities/README.md)。
 
 ## 1. 定位与职责
 
@@ -13,7 +15,7 @@ Core 提供脚本基础能力及执行框架。业务模块使用这些能力完
 | App | 创建唯一 Runtime、创建 Framework、选择并装配插件 | 实现存储、日志等底层机制 |
 | Runtime | 统一创建、连接并持有内核能力，派生模块上下文 | 普通插件依赖排序、热插拔事务、游戏决策 |
 | Framework | 驱动生命周期、身份校验、插件注册事务、故障隔离、CPU 准入和 Intent 仲裁 | 再创建一套 Runtime 内核实例 |
-| 内核插件 | 提供日志、事件、观测、错误映射、持久化能力 | 具体游戏对象管理及业务决策 |
+| 内核插件 | 提供日志、事件、观测、错误映射、持久化、跨 tick 任务调度能力 | 具体游戏对象管理及业务决策 |
 | 普通插件 | 查询游戏世界、规划与执行业务、提供领域服务 | 接管内核生命周期和底层存储 |
 
 目标装配关系：
@@ -25,7 +27,8 @@ App
 │   ├── EventBus
 │   ├── ErrorMapper
 │   ├── MemoryManager
-│   └── Profiler
+│   ├── Profiler
+│   └── TaskScheduler
 └── Framework（消费上述 Runtime）
     ├── 生命周期、注册表、故障与调度机制
     └── 普通插件集合
@@ -46,8 +49,9 @@ Runtime 不导入 Framework 实现；内核模块通过端口和回调接入，�
 | Profiler | 调用计时、统计及报告；观测失败不能反向阻塞被观测能力 |
 | ErrorMapper | 堆栈还原与错误规范化；映射失败保留原始诊断 |
 | MemoryManager | 模块独立分区、长期 Accessor、深路径读写、分区 JSON 缓存与主存储提交 |
+| TaskScheduler | 生成器驱动的协作式跨 tick 任务调度；只做调度、CPU 准入与失败隔离，不理解具体业务计算内容 |
 
-`MemoryAccessor` 是 MemoryManager 对模块提供的句柄，而非额外内核实例。Logging 由 Runtime 统一组装，为普通模块、EventBus、Profiler、ErrorMapper 和 MemoryManager 注入作用域日志能力。
+`MemoryAccessor` 是 MemoryManager 对模块提供的句柄，而非额外内核实例。Logging 由 Runtime 统一组装，为普通模块、EventBus、Profiler、ErrorMapper、MemoryManager 和 TaskScheduler 注入作用域日志能力。
 
 内核可以使用 `Game.time`、`Game.cpu`、`RawMemory`、控制台和模块加载等平台原语。RoomShortcuts、Goto、生产、物流、防御等理解游戏领域的组件归为普通插件。染色、HTML 模板等纯工具不必整体提升为内核；Logger 与房间链接等领域辅助函数应保持边界。
 
@@ -84,11 +88,12 @@ Logger
 ├── MemoryManager
 ├── Profiler 的环境日志
 └── ErrorMapper
+    └── TaskScheduler（依赖 Logger、ErrorMapper、Profiler）
 
 上述实例 ──→ Runtime ──→ Framework ──→ 普通插件
 ```
 
-同级 Core 模块只依赖 contracts，不导入彼此的工厂。Runtime 是唯一可导入上述具体工厂的组合根；前序模块不得依赖后序模块。ErrorMapper 的计时由 Framework 在 Profiler 已经存在后接入，错误报告和统计回路必须防止递归。
+同级 Core 模块只依赖 contracts，不导入彼此的工厂。Runtime 是唯一可导入上述具体工厂的组合根；前序模块不得依赖后序模块。ErrorMapper 的计时由 Framework 在 Profiler 已经存在后接入，错误报告和统计回路必须防止递归。TaskScheduler 依赖 Logger（自身诊断）、ErrorMapper（任务失败的堆栈捕获与映射）和 Profiler（任务分片计时），不依赖 EventBus 或 MemoryManager。
 
 Framework 是 tick 驱动者，Runtime 封装内核组件的必要顺序：
 
@@ -129,7 +134,7 @@ Profiler 若接入持久化，须在存储 begin 成功后同步申请分区；�
 
 ## 9. 实施边界
 
-目标目录包括 `core/runtime`、`core/framework` 以及独立的 Logging、EventBus、Profiler、ErrorMapper、MemoryManager 模块。跨模块公共协议集中在 `src/contracts/`，包括 Memory、Logger 与基础设施的调用约定；业务健康状态和内部存储模型归所属模块。实现以显式类型标注承诺接口结构，不代表已经实现设计意图。契约不得反向导入具体实现。详见 [契约设计](../contracts.md)。
+目标目录包括 `core/runtime`、`core/framework` 以及独立的 Logging、EventBus、Profiler、ErrorMapper、MemoryManager、TaskScheduler 模块。跨模块公共协议集中在 `src/contracts/`，包括 Memory、Logger、任务调度与基础设施的调用约定；业务健康状态和内部存储模型归所属模块。实现以显式类型标注承诺接口结构，不代表已经实现设计意图。契约不得反向导入具体实现。详见 [契约设计](../contracts.md)。
 
 内核接口具体命名、公共 API 兼容方式、数据格式升级和迁移测试须在交付前确定。设计文档只表达设计意图及交付状态，调用方法由对应使用说明承载。
 

@@ -1,6 +1,6 @@
 # 提案：通用能力层的定位与提供方式
 
-- 状态：已采纳——选定方案 C（服务令牌 + 类型化读取，§3-4）；设计文档编写中
+- 状态：已采纳——选定方案 C（服务令牌 + 类型化读取，§3-4）；设计见[能力层设计](../design/capabilities/README.md)与[公共契约设计](../design/contracts.md)
 - 提出日期：2026-09-23
 - 范围：roomShortcuts、goto 这类“与 Screeps 强耦合、但为其他业务模块提供通用能力”的模块，如何被定位与消费
 - 导航：[提案索引](./README.md)
@@ -106,7 +106,7 @@ Framework 侧的改动是给 `services.get` 与 `services.provide` 各加一个�
 
 ## 6. 落地步骤（若采纳）
 
-1. `contracts` 新增 `ServiceToken` 与 `defineService`，Framework 增加令牌重载与 `optional`，补类型用例与运行时用例。
+1. `contracts` 新增 `ServiceToken` 与 `defineService`，Framework 增加令牌重载，补类型用例与运行时用例；`optional` 是否加入见 §7 待决问题 2。
 2. roomShortcuts 发布接口与令牌，`app` 改用令牌注册；使用说明同步。
 3. 文档确立分层与层间规则：在 [Core 架构](../design/core/README.md) 之外新增一份能力层说明，或并入文档总导航的分层描述。
 4. goto 落地时按新分层放置，并评估把 roomShortcuts 一并迁到 `capabilities/`。
@@ -116,6 +116,6 @@ Framework 侧的改动是给 `services.get` 与 `services.provide` 各加一个�
 
 1. 目录是否真的迁移，以及迁移时机（现在，还是等 goto 落地）。层级名称用 `capabilities` 还是别的（`platform`、`services`）。迁移一旦发生，还需要同步更新 AGENTS.md §6 用 `src/modules/roomShortcuts/` 作的路径映射举例；根规范按 AGENTS.md §1 不能在没有用户明确授权时自行放宽或改写，这处更新需要与目录迁移一起征得用户确认。
 2. 是否引入 `services.optional`。
-3. 跨 tick 任务调度器归属哪一层：它不依赖 Screeps 概念，但服务于业务计算，见[跨 tick 任务框架提案](./cross-tick-tasks.md)。
+3. ~~跨 tick 任务调度器归属哪一层~~：已决定归入 Core，不占用本方案的能力层名额，见[跨 tick 任务框架提案](./cross-tick-tasks.md)。
 4. 令牌是否同时用于 `manifest.provides` 的声明（涉及清单字段的类型变化）。
 5. `requires` 目前仍是与令牌脱钩的裸插件 id 字符串（见 §4.2），是否需要让 `defineService` 携带所属插件 id、或提供额外的静态检查，来弥补这部分残留的字符串耦合。
