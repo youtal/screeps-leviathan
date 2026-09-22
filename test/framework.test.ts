@@ -748,6 +748,24 @@ describe('ErrorMapper', () => {
     expect(load).toHaveBeenCalledTimes(1);
   });
 
+  /** A06：堆栈同时是映射缓存的键，公开入口必须和 capture 一样限长，否则缓存按输入长度增长。 */
+  it('truncates oversized stacks at the public mapStack entry', () => {
+    const mapper = createErrorMapper(createLogging(), {
+      loadSourceMap: () => ({
+        version: 3,
+        names: [],
+        sources: ['src/example.ts'],
+        mappings: 'AAAA',
+      }),
+      report: jest.fn(),
+    });
+
+    const mapped = mapper.mapStack('x'.repeat(20000));
+    expect(mapped.length).toBe(16384);
+    // 截断发生在查缓存之前：同一条超长堆栈重复映射仍命中同一个缓存项。
+    expect(mapper.mapStack('x'.repeat(30000))).toBe(mapped);
+  });
+
   /** 加载 map 与上报日志都抛错时，capture 仍要返回原始失败信息；错误对象的 toString 抛错也不能让 capture 本身抛出。 */
   it('preserves business failure if loading, reporting or string conversion fails', () => {
     const mapper = createErrorMapper(createLogging(), {
@@ -776,6 +794,45 @@ describe('ErrorMapper', () => {
         };
       })
     ).not.toThrow();
+  });
+
+  /** G02：默认日志出口按插件与阶段去重，成功后重置；注入的 report 每次都收到。 */
+  it('deduplicates repeated failures in the default report and resets after success', () => {
+    const lines: string[] = [];
+    const mapper = createErrorMapper(
+      createLogging({ output: { write: (line) => lines.push(line) } }),
+      { loadSourceMap: () => ({}) }
+    );
+    const meta = { tick: 1, pluginId: 'a', phase: 'tickExecute' } as const;
+    const fail = (message: string) =>
+      mapper.capture(meta, () => {
+        throw new Error(message);
+      });
+    fail('storage broken');
+    fail('storage broken');
+    fail('storage broken');
+    expect(lines).toHaveLength(1);
+    fail('another cause'); // 原因变化时重新记录
+    expect(lines).toHaveLength(2);
+    mapper.capture(meta, () => 'recovered'); // 成功一次即重置
+    fail('another cause');
+    expect(lines).toHaveLength(3);
+    // 其他插件或阶段互不影响。
+    mapper.capture({ ...meta, phase: 'tickEnd' }, () => {
+      throw new Error('another cause');
+    });
+    expect(lines).toHaveLength(4);
+
+    const report = jest.fn();
+    const custom = createErrorMapper(createLogging(), {
+      loadSourceMap: () => ({}),
+      report,
+    });
+    for (let i = 0; i < 3; i++)
+      custom.capture(meta, () => {
+        throw new Error('same');
+      });
+    expect(report).toHaveBeenCalledTimes(3);
   });
 
   /** 默认报告出口必须在创建映射器时派生一次作用域日志器，故障密集时不能反复重建。 */
@@ -1209,6 +1266,88 @@ describe('Framework memory integration', () => {
     expect(JSON.parse(plat.raw()).memoryManager.partitions.seeded.main.payload.n).toBe(2);
   });
 
+  /** G01：事件回调中 setup 专属接口一律拒绝；按阶段判定的意图提交保持不变。 */
+  it('rejects setup-only APIs inside event callbacks and keeps cleanup ownership', () => {
+    const trace: string[] = [];
+    const watcher = plugin('watcher', {
+      manifest: { id: 'watcher', version: 1, provides: ['late'] },
+      setup(context) {
+        context.services.provide('late', {});
+        context.events.subscribe(
+          { scope: 'global' },
+          'creep:spawn',
+          'watch',
+          () => {
+            for (const [name, action] of [
+              [
+                'onDispose',
+                () => context.onDispose(() => trace.push('watcher cleanup')),
+              ],
+              [
+                'subscribe',
+                () =>
+                  context.events.subscribe(
+                    { scope: 'global' },
+                    'creep:death',
+                    'late',
+                    () => undefined
+                  ),
+              ],
+              ['provide', () => context.services.provide('late', {})],
+            ] as const) {
+              try {
+                action();
+                trace.push(name + ' allowed');
+              } catch {
+                trace.push(name + ' rejected');
+              }
+            }
+          }
+        );
+        context.events.subscribe(
+          { scope: 'global' },
+          'creep:death',
+          'intent',
+          () => {
+            context.intents.submit({
+              subjectId: 'c1',
+              channel: 'move',
+              execute: () => OK,
+            });
+            trace.push('intent submitted');
+          }
+        );
+      },
+    });
+    const h = harness([watcher]);
+    h.next();
+    const publisher = plugin('publisher', {
+      setup(context) {
+        context.events.publish({ scope: 'global' }, 'creep:spawn', {
+          creepName: 'x',
+          roomName: 'W1N1',
+          spawnId: 's' as Id<StructureSpawn>,
+        } as never);
+      },
+      onTickExecute(context) {
+        context.events.publish({ scope: 'global' }, 'creep:death', {
+          creepName: 'x',
+        } as never);
+      },
+    });
+    h.framework.register(publisher);
+    h.next();
+    h.framework.disable('publisher');
+    h.next();
+    expect(trace).toEqual([
+      'onDispose rejected',
+      'subscribe rejected',
+      'provide rejected',
+      'intent submitted',
+    ]);
+    expect(h.framework.getStatus().failures).toEqual([]);
+  });
+
   it('reports a configuration error when no memory manager is assembled', () => {
     const consumer = plugin('consumer', {
       setup(context) {
@@ -1221,5 +1360,46 @@ describe('Framework memory integration', () => {
     const failures = h.framework.getStatus().failures;
     expect(failures.length).toBeGreaterThan(0);
     expect(failures[0].message).toMatch(/MemoryManager is not assembled/);
+  });
+});
+
+/** G03：服务对象属于提供者的某次激活，使用者的激活必须包含在其中。 */
+describe('Framework service activation', () => {
+  it('releases requires consumers when a provider instance is replaced in the same batch', () => {
+    let providerSetups = 0;
+    const makeProvider = (label: string): LeviathanPlugin => ({
+      manifest: { id: 'p', version: 1, provides: ['svc'] },
+      setup(ctx) {
+        providerSetups++;
+        ctx.services.provide('svc', { label });
+      },
+    });
+    let consumerSetups = 0;
+    let cached: { label: string } | undefined;
+    const seen: string[] = [];
+    const consumer: LeviathanPlugin = {
+      manifest: { id: 'c', version: 1, requires: ['p'] },
+      setup(ctx) {
+        consumerSetups++;
+        cached = ctx.services.get<{ label: string }>('svc');
+      },
+      onTickExecute() {
+        seen.push(cached!.label);
+      },
+    };
+
+    const h = harness([makeProvider('old'), consumer]);
+    h.next();
+    // 同一批命令内替换提供者：提供者仍在启用集合中，级联只能来自“实例被替换”的判定。
+    h.framework.unregister('p');
+    h.framework.register(makeProvider('new'));
+    h.next();
+    h.next();
+
+    expect(providerSetups).toBe(2);
+    expect(consumerSetups).toBe(2);
+    // 替换后使用者立刻改用新实例，不会继续持有已释放的服务对象。
+    expect(seen).toEqual(['old', 'new', 'new']);
+    expect(h.framework.getStatus().failures).toEqual([]);
   });
 });

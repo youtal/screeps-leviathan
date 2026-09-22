@@ -100,6 +100,7 @@ log.report('stats');         // 无输出（本作用域关闭 report）
 - 输出端口抛错只丢弃当条日志，不向调用方传播，也不会触发二次记录。
 - 惰性回调抛错同样只丢弃当条日志；返回非字符串时按 `String()` 转换。
 - 日志不依赖 Memory、Profiler、ErrorMapper 与 Game；这些能力缺席时仍能输出（默认关闭邮件时完全不访问 Game）。
+- 日志正文按 HTML 渲染（控制台以 HTML 显示输出并执行内联事件处理器），Logger 不改写内容。拼接其他玩家可以控制的字符串（敌方 creep 名称、控制器签名、公开的 `saying`）时，先用 `@/utils/console` 的 `escapeHtml` 处理，见 [控制台工具使用说明](../utils/console.md)。
 - 非法 `notifyInterval`（非正整数）在装配阶段抛 `Invalid notify interval`，属于配置错误，应在启动阶段暴露。
 
 ## 内核模块接入规范

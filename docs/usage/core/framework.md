@@ -64,7 +64,7 @@ framework.register({
 });
 ```
 
-`requires` 填写提供服务的插件 id；`services.get` 填写服务名。二者允许不同。独占服务必须列入 `manifest.provides`，并在 setup 中通过 `services.provide(name, value)` 发布。
+`requires` 填写提供服务的插件 id；`services.get` 填写服务名。二者允许不同。独占服务必须列入 `manifest.provides`，并在 setup 中通过 `services.provide(name, value)` 发布。查询接口与结果语义见 [RoomShortcuts 使用说明](../modules/roomShortcuts.md)。
 
 ## 插件管理
 
@@ -78,6 +78,8 @@ framework.register({
 | `getStatus()`                | 最近一次 tick、safeMode、结构化故障列表与 `memory.loadError/rawWriteError` |
 
 管理命令以批次校验。重复 id、缺失依赖、依赖环或重复服务会使整批失败；当前 tick 不运行业务，旧注册表保留，可在下一 tick 恢复。移除仍被其他插件 requires 的提供者需在同一批中同时移除使用者。
+
+插件 id 必须来自固定且有限的集合：健康记录与 Profiler 包装器按 id 建表，并在 Framework 实例存续期间保留，用房间名、任务 id 等动态数据拼出的 id 会让这些表随运行时间增长。
 
 不直接暴露全局控制台命令；需要控制台入口时，由 app 决定如何暴露实例的管理方法。
 
@@ -93,6 +95,30 @@ framework.register({
 - `intents`：提交动作与读取本轮、上一轮回执。
 
 Context 可以跨 tick 保留；停用后不应继续使用，Game 对象不能跨 tick 保存。
+
+### 事件回调
+
+订阅回调以订阅者身份执行，阶段沿用发布者发布时的阶段：执行阶段发布的事件，回调中可以提交意图，意图归属订阅者。`events.subscribe`、`services.provide` 与 `onDispose` 只能在插件自己的 setup 中调用，在任何事件回调中调用都会抛错，即使发布者正处于 setup；错误进入订阅者的错误边界。收到事件后需要的资源应在 setup 中预先建立，回调只更新状态。
+
+### 读取服务
+
+在使用时调用 `services.get`，不要在 setup 中保存返回的服务对象。服务对象属于提供者的某次激活，提供者重新 setup 后，旧对象已经释放：事件订阅已取消，数据不再更新。
+
+`requires` 的使用者会随提供者停用、熔断、卸载或被替换（同一批命令中先 `unregister` 再 `register` 同一 id）而释放，并在提供者重新可用后重新 setup。`optional` 的使用者不会：可选依赖的提供者重启后，使用者仍在运行，setup 中保存的服务会失效。
+
+提供者不可用或缺失时 `services.get` 抛出 `Unavailable service`；读取可选依赖的服务时需要捕获这一异常。
+
+```ts
+onTickExecute(context) {
+  let stats: StatsService | undefined;
+  try {
+    stats = context.services.get<StatsService>('stats');
+  } catch {
+    // 可选依赖不可用时跳过统计，不影响本插件的主要工作。
+  }
+  stats?.record('observer', context.tick);
+}
+```
 
 ## 持久化边界
 

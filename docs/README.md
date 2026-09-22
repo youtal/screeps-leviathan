@@ -17,7 +17,7 @@
 | Framework | [core/framework](../src/core/framework/) | [设计](./design/core/framework.md) | [使用](./usage/core/framework.md) |
 | Runtime | [core/runtime](../src/core/runtime/) | [设计](./design/core/runtime.md) | [使用](./usage/core/runtime.md) |
 | Profiler | [core/profiler](../src/core/profiler/) | [设计](./design/core/profiler.md) | [使用](./usage/core/profiler.md) |
-| EventBus | [core/eventBus](../src/core/eventBus/) | 独立文档待补充；分类见 Core 架构 | 待补充 |
+| EventBus | [core/eventBus](../src/core/eventBus/) | [设计](./design/core/eventBus.md) | [使用](./usage/core/eventBus.md) |
 | ErrorMapper | [core/errorMapper](../src/core/errorMapper/) | [设计](./design/core/errorMapper.md) | [使用](./usage/core/errorMapper.md) |
 | Logger | [core/logger](../src/core/logger/) | [设计](./design/core/logger.md) | [使用](./usage/core/logger.md) |
 | MemoryManager | [core/memoryManager](../src/core/memoryManager/) | [设计](./design/core/memoryManager.md) | [使用](./usage/core/memoryManager.md) |
@@ -27,15 +27,15 @@
 | 模块 | 源码 | 设计 | 使用说明 |
 | --- | --- | --- | --- |
 | goto | 未交付；规划路径 `src/modules/goto/` | [设计](./design/modules/goto.md) | 待交付 |
-| RoomShortcuts | [modules/roomShortcuts](../src/modules/roomShortcuts/) | [设计](./design/modules/roomShortcuts.md) | 独立说明待补充；[Framework 接入示例](./usage/core/framework.md) |
+| RoomShortcuts | [modules/roomShortcuts](../src/modules/roomShortcuts/) | [设计](./design/modules/roomShortcuts.md) | [使用](./usage/modules/roomShortcuts.md) |
 | App | [app](../src/app/) | 装配原则见 Core 架构 | [项目入口](../README.md) |
 
 ## 工具
 
-| 模块 | 源码 | 文档 |
-| --- | --- | --- |
-| 控制台格式化、表单和帮助 | [utils/console](../src/utils/console/) | 独立设计与使用说明待补充 |
-| 优先队列 | [priorityQueue.ts](../src/utils/priorityQueue.ts) | 独立设计与使用说明待补充 |
+| 模块 | 源码 | 设计 | 使用说明 |
+| --- | --- | --- | --- |
+| 控制台格式化、表单和帮助 | [utils/console](../src/utils/console/) | [设计](./design/utils/console.md) | [使用](./usage/utils/console.md) |
+| 优先队列 | [priorityQueue.ts](../src/utils/priorityQueue.ts) | [设计](./design/utils/priorityQueue.md) | [使用](./usage/utils/priorityQueue.md) |
 
 ## 测试环境
 

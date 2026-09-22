@@ -13,7 +13,7 @@
  * 默认 Runtime 使用普通内存对象，global reset 后重新建立。
  */
 import type { Profiler } from '@/contracts';
-import type { ProfilerContext } from './types';
+import type { ProfilerContext, Record as ProfilerRecord } from './types';
 import { createMemoryAccessor } from './memory';
 import type { Wrap } from '@/contracts';
 
@@ -142,26 +142,62 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
     } as T;
   };
 
+  /** 自身时间合计，用作 detailed 报告中占比的分母。 */
+  const sumSelfTime = (records: ProfilerRecord[]): number =>
+    records.reduce((sum, record) => sum + record.selfTime, 0);
+
+  /**
+   * 渲染一条统计行。
+   *
+   * detailed 追加的两列都由已有字段算出：平均自身时间反映单次调用自身的开销（不含已被
+   * 包裹的子调用），自身时间占比说明该 label 在本次报告中占多少比重，便于直接定位优化
+   * 目标。两者都不需要记录父子调用边，因此每次采样的成本不变。分母为 0 时占比按 0 输出，
+   * 避免除零得到 NaN。
+   *
+   * @param label 统计标签
+   * @param record 该标签的累计记录
+   * @param detailed 是否追加派生列
+   * @param totalSelfTime 本次报告的自身时间合计
+   */
+  const formatRecord = (
+    label: string,
+    record: ProfilerRecord,
+    detailed: boolean,
+    totalSelfTime: number
+  ): string => {
+    const base = `  ${label} - 总时间: ${record.totalTime}, 自身时间: ${record.selfTime}, 调用次数: ${record.calls}, 平均时间: ${
+      record.totalTime / record.calls || 0
+    }`;
+    if (!detailed) return base;
+    const share =
+      totalSelfTime > 0 ? (record.selfTime / totalSelfTime) * 100 : 0;
+    return `${base}, 平均自身时间: ${
+      record.selfTime / record.calls || 0
+    }, 自身占比: ${share.toFixed(1)}%`;
+  };
+
   /**
    * 输出 profiler 报告。
    *
    * filter 存在时只输出单个 label；否则按 selfTime 降序输出全部记录。
-   * detailed 参数目前预留，后续可以用于输出调用树或更细粒度信息。
+   * detailed 为 true 时每行追加平均自身时间与自身时间占比，全量报告的标题还会给出
+   * 自身时间合计。
    *
    * 报告是只读操作：过滤分支走 db.get，命中不存在的 label 会得到全零记录而不会创建 Memory 项。
    * 全量分支对当前命名空间做一次 Object.entries 与排序，成本 O(n log n)，只在显式调用时发生，
-   * 不进入每 tick 热路径。输出经 log.info/log.report，受模块日志开关控制；平均时间用 `|| 0`
-   * 兜住 calls 为 0 时的 NaN。
+   * 不进入每 tick 热路径。标题与数据行都经 log.report（回应显式请求的输出，默认开启），
+   * 受模块日志开关控制；平均时间用 `|| 0` 兜住 calls 为 0 时的 NaN。
+   * detailed 的代价只有：过滤分支多做一次全量读取以求占比分母。
    */
   const report = (detailed = false, filter = ''): void => {
     if (filter) {
-      log.info(`Profiler 报告 (过滤器: ${filter})`);
       const data = db.get(filter);
-      log.report(
-        `  ${filter} - 总时间: ${data.totalTime}, 自身时间: ${data.selfTime}, 调用次数: ${data.calls}, 平均时间: ${
-          data.totalTime / data.calls || 0
-        }`
-      );
+      /** 只有需要占比时才多读一次全量数据；普通单项报告仍然只查这一条记录。 */
+      const totalSelfTime = detailed
+        ? sumSelfTime(Object.values(db.getAll()))
+        : 0;
+      log.report(`Profiler 报告 (过滤器: ${filter})`);
+      log.report(formatRecord(filter, data, detailed, totalSelfTime));
       return;
     }
 
@@ -169,14 +205,17 @@ export const createProfiler = (context: ProfilerContext): Profiler | null => {
     const entries = Object.entries(memory);
     /** 默认按自身耗时降序排列，优先暴露最值得直接优化的函数。 */
     entries.sort((a, b) => b[1].selfTime - a[1].selfTime);
+    const totalSelfTime = detailed
+      ? sumSelfTime(entries.map(([, record]) => record))
+      : 0;
 
-    log.info(`Profiler 报告 (共 ${entries.length} 项)`);
+    log.report(
+      `Profiler 报告 (共 ${entries.length} 项${
+        detailed ? `, 自身时间合计: ${totalSelfTime}` : ''
+      })`
+    );
     for (const [label, record] of entries) {
-      log.report(
-        `  ${label} - 总时间: ${record.totalTime}, 自身时间: ${record.selfTime}, 调用次数: ${record.calls}, 平均时间: ${
-          record.totalTime / record.calls || 0
-        }`
-      );
+      log.report(formatRecord(label, record, detailed, totalSelfTime));
     }
   };
 

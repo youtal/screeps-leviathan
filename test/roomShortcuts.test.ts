@@ -6,7 +6,8 @@
  * 局部删除而不重建房间索引，structureId 与 ruin 记录不一致时保守地丢弃整房缓存；失去
  * 视野（getRoom 返回 undefined）后必须失效并在恢复视野时重建；缓存中的实体被销毁后要
  * 过滤失效 id；缓存租约按 Game.time 到期；forceReInit 时每次查询都重建；事件订阅只在
- * 模块创建时登记一次。
+ * 模块创建时登记一次；清扫按租约回收不再被查询的房间索引与无视野告警标记，并处理
+ * tick 倒退这一异常起点。
  *
  * 替代实现：Screeps 常量（FIND_* 与 STRUCTURE_*）及 lodash 全局在 Node 下不存在，由
  * beforeEach 手工注入；harness 用 fake room/bus/env 替代真实游戏对象，用 Map 模拟
@@ -49,7 +50,11 @@ const installConstants = () => {
  * - objects 是 id → 对象映射，removeObject 用来模拟实体被销毁后 getObjectById 返回 null；
  * - bus 把订阅回调收进 listeners，测试可以直接派发 structure:built/destroyed 事件。
  */
-const createHarness = (forceReInit = false, cacheLeaseTicks = 5000) => {
+const createHarness = (
+  forceReInit = false,
+  cacheLeaseTicks = 5000,
+  sweepIntervalTicks = 500
+) => {
   let structures: any[] = [];
   let hasVision = true;
   let currentTick = 1;
@@ -85,9 +90,11 @@ const createHarness = (forceReInit = false, cacheLeaseTicks = 5000) => {
     profiler: null,
     forceReInit,
     cacheLeaseTicks,
+    sweepIntervalTicks,
   } as unknown as ModuleContext & {
     forceReInit: boolean;
     cacheLeaseTicks: number;
+    sweepIntervalTicks: number;
   };
 
   return {
@@ -201,6 +208,107 @@ describe('RoomShortcuts', () => {
     );
   });
 
+  /** 废墟缺失或不在事件房间时同样无法证明要删的条目，必须整房失效，下次查询重新扫描。 */
+  it.each([
+    ['cannot be found', null, 'not found; invalidating'],
+    ['belongs to another room', 'W2N2', 'belongs to room W2N2'],
+  ])('invalidates the room when the ruin %s', (_case, ruinRoom, warning) => {
+    const harness = createHarness();
+    const spawn = {
+      id: 'spawn-1',
+      structureType: STRUCTURE_SPAWN,
+      pos: { roomName: 'W1N1' },
+    };
+    harness.setStructures([spawn]);
+    harness.shortcuts.getSpawn('W1N1');
+    if (ruinRoom)
+      harness.addObject({
+        id: 'ruin-1',
+        pos: { roomName: ruinRoom },
+        structure: spawn,
+      });
+    harness.listeners.get('structure:destroyed')!({
+      roomName: 'W1N1',
+      structureId: spawn.id,
+      ruinId: 'ruin-1',
+    });
+    harness.shortcuts.getSpawn('W1N1');
+    expect(harness.room.find).toHaveBeenCalledTimes(6); // 失效后重新初始化一次
+    expect(harness.log.warn).toHaveBeenCalledWith(
+      expect.stringContaining(warning)
+    );
+  });
+
+  /** 每个查询接口映射到对应的建筑类型，集合接口返回数组、单体接口返回对象。 */
+  it('maps every getter to its structure type and result shape', () => {
+    const types = {
+      STRUCTURE_EXTENSION: 'extension',
+      STRUCTURE_RAMPART: 'rampart',
+      STRUCTURE_ROAD: 'road',
+      STRUCTURE_WALL: 'constructedWall',
+      STRUCTURE_KEEPER_LAIR: 'keeperLair',
+      STRUCTURE_PORTAL: 'portal',
+      STRUCTURE_LINK: 'link',
+      STRUCTURE_LAB: 'lab',
+      STRUCTURE_CONTAINER: 'container',
+      STRUCTURE_TOWER: 'tower',
+      STRUCTURE_POWER_BANK: 'powerBank',
+      STRUCTURE_OBSERVER: 'observer',
+      STRUCTURE_POWER_SPAWN: 'powerSpawn',
+      STRUCTURE_EXTRACTOR: 'extractor',
+      STRUCTURE_NUKER: 'nuker',
+      STRUCTURE_FACTORY: 'factory',
+      STRUCTURE_TERMINAL: 'terminal',
+      STRUCTURE_INVADER_CORE: 'invaderCore',
+    };
+    Object.assign(global as any, types);
+    const harness = createHarness();
+    const all = [
+      STRUCTURE_SPAWN,
+      STRUCTURE_STORAGE,
+      ...Object.values(types),
+    ].map((type) => ({
+      id: type + '-1',
+      structureType: type,
+      pos: { roomName: 'W1N1' },
+    }));
+    harness.setStructures(all);
+    const byType = (type: string) =>
+      all.find((object) => object.structureType === type);
+    const s = harness.shortcuts;
+    const collections: [unknown[], string][] = [
+      [s.getSpawn('W1N1'), 'spawn'],
+      [s.getExtension('W1N1'), 'extension'],
+      [s.getRampart('W1N1'), 'rampart'],
+      [s.getRoad('W1N1'), 'road'],
+      [s.getWall('W1N1'), 'constructedWall'],
+      [s.getKeeperLair('W1N1'), 'keeperLair'],
+      [s.getPortal('W1N1'), 'portal'],
+      [s.getLink('W1N1'), 'link'],
+      [s.getLab('W1N1'), 'lab'],
+      [s.getContainer('W1N1'), 'container'],
+      [s.getTower('W1N1'), 'tower'],
+      [s.getPowerBank('W1N1'), 'powerBank'],
+    ];
+    for (const [result, type] of collections)
+      expect(result).toEqual([byType(type)]);
+    const singles: [unknown, string][] = [
+      [s.getObserver('W1N1'), 'observer'],
+      [s.getPowerSpawn('W1N1'), 'powerSpawn'],
+      [s.getExtractor('W1N1'), 'extractor'],
+      [s.getNuker('W1N1'), 'nuker'],
+      [s.getFactory('W1N1'), 'factory'],
+      [s.getStorage('W1N1'), 'storage'],
+      [s.getTerminal('W1N1'), 'terminal'],
+      [s.getInVaderCore('W1N1'), 'invaderCore'],
+    ];
+    for (const [result, type] of singles) expect(result).toBe(byType(type));
+    // 本夹具的 room.find 只返回建筑，矿源与矿物为空结果。
+    expect(s.getSource('W1N1')).toEqual([]);
+    expect(s.getMineral('W1N1')).toBeUndefined();
+    expect(harness.room.find).toHaveBeenCalledTimes(3); // 全部查询共用一次初始化
+  });
+
   /** 失去视野时 getRoom 返回 undefined：继续返回缓存会给出过期引用，因此必须失效，并在视野恢复后重新 find。 */
   it('invalidates cached room data when vision is lost', () => {
     const harness = createHarness();
@@ -235,7 +343,7 @@ describe('RoomShortcuts', () => {
     const calls = harness.log.info.mock.calls.map(([content]: [unknown]) => content);
     // 查询路径上的 info 都以回调传入：日志器在 info 关闭时不会调用它们。
     expect(calls.every((content: unknown) => typeof content === 'function')).toBe(true);
-    expect(calls.map((content: () => string) => content())).toEqual([
+    expect((calls as (() => string)[]).map((content) => content())).toEqual([
       'Room W1N1 cache refresh requested, initializing now.',
       'Room W1N1 shortcuts initialized.',
       'Room W1N1 cache refresh requested, initializing now.',
@@ -473,5 +581,106 @@ describe('RoomShortcuts', () => {
     harness.setTick(5001);
     expect(harness.shortcuts.getSpawn('W1N1')).toEqual([second]);
     expect(harness.room.find).toHaveBeenCalledTimes(6);
+  });
+});
+
+/**
+ * A06：缓存只在被查询时才会重建或删除，只查询过一次的房间会一直留在 heap 中。
+ * 清扫按租约回收，这组用例固定“何时回收、回收什么、何时不回收”的边界。
+ */
+describe('RoomShortcuts 缓存回收', () => {
+  beforeEach(() => {
+    installConstants();
+  });
+
+  const spawn = (id: string, roomName = 'W1N1') => ({
+    id,
+    structureType: STRUCTURE_SPAWN,
+    pos: { roomName },
+  });
+
+  it('removes expired room indexes and reports how many were dropped', () => {
+    const harness = createHarness(false, 100, 10);
+    harness.setStructures([spawn('spawn-1')]);
+    harness.shortcuts.getSpawn('W1N1');
+
+    // 首次调用只登记起点：reset 后缓存为空，没有可回收的条目。
+    expect(harness.shortcuts.sweep(1)).toBe(0);
+    // 未到间隔不遍历。
+    harness.setTick(5);
+    expect(harness.shortcuts.sweep(5)).toBe(0);
+    // 到了间隔但仍在租约内，不回收。
+    harness.setTick(50);
+    expect(harness.shortcuts.sweep(50)).toBe(0);
+    // 超过租约且没有再被查询：回收。
+    harness.setTick(200);
+    expect(harness.shortcuts.sweep(200)).toBe(1);
+    // 回收后再次清扫没有可删的条目。
+    harness.setTick(400);
+    expect(harness.shortcuts.sweep(400)).toBe(0);
+  });
+
+  it('drops idle no-vision warnings so a later query warns again', () => {
+    const harness = createHarness(false, 100, 10);
+    harness.setVision(false);
+
+    harness.shortcuts.getSpawn('W1N1');
+    harness.shortcuts.getSpawn('W1N1');
+    // 同一次失去视野只告警一次。
+    expect(harness.log.warn).toHaveBeenCalledTimes(1);
+
+    harness.shortcuts.sweep(1);
+    harness.setTick(500);
+    harness.shortcuts.sweep(500);
+
+    // 标记闲置超过一个租约后被回收，下一次查询重新告警一次。
+    harness.shortcuts.getSpawn('W1N1');
+    expect(harness.log.warn).toHaveBeenCalledTimes(2);
+  });
+
+  it('treats a rolled back tick as expired in both the getter and the sweep', () => {
+    const harness = createHarness(false, 100, 10);
+    harness.setStructures([spawn('spawn-1')]);
+    harness.setTick(1000);
+    harness.shortcuts.getSpawn('W1N1');
+    const finds = jest.mocked(harness.room.find).mock.calls.length;
+    harness.shortcuts.sweep(1000);
+
+    // Game.time 倒退（私服回档）：起点晚于当前 tick，索引按过期处理而不是永不刷新。
+    harness.setTick(5);
+    harness.shortcuts.getSpawn('W1N1');
+    expect(jest.mocked(harness.room.find).mock.calls.length).toBeGreaterThan(
+      finds
+    );
+
+    // 清扫同样立即执行，不会因为间隔判断变成负数而停摆。
+    harness.setTick(3);
+    expect(harness.shortcuts.sweep(3)).toBe(1);
+  });
+
+  it('ignores structure events for rooms whose lease already expired', () => {
+    const harness = createHarness(false, 100, 10);
+    harness.setStructures([spawn('spawn-1')]);
+    harness.shortcuts.getSpawn('W1N1');
+
+    harness.setTick(500);
+    // 租约已过：事件不再维护该索引，因此不会为不存在的废墟记录告警。
+    harness.listeners.get('structure:destroyed')!({
+      roomName: 'W1N1',
+      structureId: 'spawn-1',
+      ruinId: 'ruin-missing',
+    });
+    harness.listeners.get('structure:built')!({
+      roomName: 'W1N1',
+      structureId: 'spawn-2',
+    });
+    expect(harness.log.warn).not.toHaveBeenCalled();
+    expect(harness.log.error).not.toHaveBeenCalled();
+
+    // 下一次查询按租约重扫，结果以真实世界为准。
+    harness.setStructures([spawn('spawn-2')]);
+    expect(harness.shortcuts.getSpawn('W1N1')).toEqual([
+      expect.objectContaining({ id: 'spawn-2' }),
+    ]);
   });
 });

@@ -4,7 +4,8 @@
  * 覆盖模块：parseUploadDestination（CLI 目标解析）、htmlString（.html 模板转为压缩后的
  * JS 字符串）、screepsUpload（分支已存在时上传、缺失时 clone-branch、上传后回读校验）。
  * 覆盖边界：三种合法参数写法与各类非法参数、非 .html 模块不被接管、请求序列与上传内容、
- * sourcemap 的包装形式与 sourcesContent 剥离。
+ * sourcemap 的包装形式与 sourcesContent 剥离（API 上传与 copyPath 部署共用 sourceMapModule）、
+ * 请求超时与非法超时配置。
  *
  * 替代实现：用 node:test 与 node:assert/strict 运行，把 globalThis.fetch 替换为脚本化响应，
  * 从而在不联网、不使用 .secret.json 的前提下走完整个上传流程；config 中是不含真实凭据的假配置。
@@ -19,6 +20,7 @@ import {
   htmlString,
   parseUploadDestination,
   screepsUpload,
+  sourceMapModule,
 } from '../build/rollupPlugins.mjs';
 
 // 保存原始 fetch 供 afterEach 还原：用例内的替代实现只服务于当前用例。
@@ -161,4 +163,50 @@ test('screepsUpload creates and verifies a missing branch', async () => {
   assert.equal(cloneBody.branch, '');
   assert.equal(cloneBody.newName, config.branch);
   assert.equal(cloneBody.defaultModules.main, bundle['main.js'].code);
+});
+
+/** copyPath 部署与 API 上传共用同一处理：剥离 sourcesContent，包装为 CJS 模块。 */
+test('sourceMapModule strips sourcesContent and wraps the map as a module', () => {
+  const text = sourceMapModule(
+    JSON.stringify({
+      version: 3,
+      sources: ['a.ts'],
+      sourcesContent: ['secret source'],
+      mappings: 'AAAA',
+    })
+  );
+  assert.match(text, /^module\.exports = \{/);
+  assert.doesNotMatch(text, /secret source|sourcesContent/);
+  const exported = new Function('module', text + ' return module.exports;')({});
+  assert.deepEqual(exported, {
+    version: 3,
+    sources: ['a.ts'],
+    mappings: 'AAAA',
+  });
+});
+
+/** 服务器不响应时请求在 timeoutMs 后中止，上传失败并给出端点与时长，而不是无限期挂起。 */
+test('screepsUpload aborts a request that exceeds timeoutMs', async () => {
+  globalThis.fetch = (_url, options) =>
+    new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () =>
+        reject(options.signal.reason)
+      );
+    });
+  await assert.rejects(
+    screepsUpload({ config: { ...config, timeoutMs: 20 } }).writeBundle(
+      {},
+      bundle
+    ),
+    /Screeps API GET \/api\/user\/branches timed out after 20 ms/
+  );
+});
+
+/** timeoutMs 可选，但提供时必须是正整数，配置错误在构建开始前暴露。 */
+test('screepsUpload rejects an invalid timeoutMs', () => {
+  for (const timeoutMs of [0, -1, 1.5, '1000'])
+    assert.throws(
+      () => screepsUpload({ config: { ...config, timeoutMs } }),
+      /Invalid Screeps upload configuration/
+    );
 });

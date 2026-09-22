@@ -3,7 +3,8 @@
  *
  * 覆盖模块：createMemoryAccessor（读取/累加/清空统计记录，内存不可用时返回 null 并报错）
  * 与 createProfiler（wrap 包裹函数、totalTime/selfTime/calls 统计、父子调用的 selfTime
- * 扣减、enable/disable 对已包裹函数生效、保留 this、重复 label 拒绝、report 过滤与 reset）。
+ * 扣减、enable/disable 对已包裹函数生效、保留 this、重复 label 拒绝、report 过滤与 reset、
+ * detailed 报告的派生列）。
  * 覆盖边界：观测路径自身失败时（cpu 采样抛错、Memory 写入失败、getMemory 被整体替换）
  * 必须保留原始返回值与原始异常，并且不污染后续统计。
  *
@@ -305,13 +306,63 @@ describe('Profiler', () => {
       'Profiler: label "dup" 已被使用，未执行包裹'
     );
 
+    // G05：标题行与数据行都使用 report 级别（默认开启），默认配置下报告完整可见。
     profiler.report();
-    expect(env.log.report).toHaveBeenCalledTimes(2);
+    expect(env.log.report).toHaveBeenCalledTimes(3);
+    expect(env.log.report).toHaveBeenNthCalledWith(
+      1,
+      'Profiler 报告 (共 2 项)'
+    );
 
     profiler.report(false, 'slow');
-    expect(env.log.info).toHaveBeenCalledWith('Profiler 报告 (过滤器: slow)');
+    expect(env.log.report).toHaveBeenCalledWith('Profiler 报告 (过滤器: slow)');
+    expect(env.log.info).not.toHaveBeenCalled();
 
     profiler.reset();
     expect(memory).toEqual({});
+  });
+
+  /** G05：detailed 只用已有字段派生列（平均自身时间、自身时间占比），不改变采样成本。 */
+  it('adds derived columns to the detailed report', () => {
+    const memory: ProfilerMemory = {
+      slow: { totalTime: 10, selfTime: 8, calls: 2 },
+      fast: { totalTime: 2, selfTime: 2, calls: 1 },
+    };
+    const env = createEnv([0, 1]);
+    const profiler = createProfiler({
+      env,
+      storage: { getMemory: () => memory },
+      enable: true,
+    })!;
+
+    profiler.report(true);
+    expect(env.log.report).toHaveBeenNthCalledWith(
+      1,
+      'Profiler 报告 (共 2 项, 自身时间合计: 10)'
+    );
+    expect(env.log.report).toHaveBeenNthCalledWith(
+      2,
+      '  slow - 总时间: 10, 自身时间: 8, 调用次数: 2, 平均时间: 5, 平均自身时间: 4, 自身占比: 80.0%'
+    );
+    expect(env.log.report).toHaveBeenNthCalledWith(
+      3,
+      '  fast - 总时间: 2, 自身时间: 2, 调用次数: 1, 平均时间: 2, 平均自身时间: 2, 自身占比: 20.0%'
+    );
+
+    // 单项报告同样追加派生列；占比的分母来自全量数据，因此 detailed 时多读一次。
+    jest.mocked(env.log.report).mockClear();
+    profiler.report(true, 'fast');
+    expect(env.log.report).toHaveBeenNthCalledWith(
+      2,
+      '  fast - 总时间: 2, 自身时间: 2, 调用次数: 1, 平均时间: 2, 平均自身时间: 2, 自身占比: 20.0%'
+    );
+
+    // 不开启 detailed 时输出保持原样。
+    jest.mocked(env.log.report).mockClear();
+    profiler.report(false, 'fast');
+    expect(env.log.report).toHaveBeenNthCalledWith(
+      2,
+      '  fast - 总时间: 2, 自身时间: 2, 调用次数: 1, 平均时间: 2'
+    );
   });
 });

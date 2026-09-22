@@ -14,4 +14,4 @@ Profiler 内部适配器每次操作调用 `ProfilerStorage.getMemory` 定位统
 
 Framework 在 ErrorBoundary 内执行 Profiler 包装钩子。映射和报告发生在插件计时结束之后，使用独立框架标签。已创建的包装器复用至当前 global 生命周期结束；不得每 tick 以同一 label 重复 wrap。
 
-report 接口的 detailed 参数为扩展预留项。Memory schema 中累计值表示 CPU 数量，不是现实世界毫秒。
+report 的 detailed 只从已有字段派生：平均自身时间与自身时间占比，全量报告另给出自身时间合计。它不记录父子调用边，因此不增加每次采样的成本；过滤报告在 detailed 时多读一次全量数据来求占比分母。label 是包装器与统计表的键，必须来自固定且有限的集合；`reset()` 清空统计数据但保留已登记的 label。Memory schema 中累计值表示 CPU 数量，不是现实世界毫秒。

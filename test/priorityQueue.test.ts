@@ -24,8 +24,8 @@ describe('PriorityQueue', () => {
    * 两个实例共用同一批断言数据，可排除实现内部硬编码排序方向的可能。
    */
   beforeEach(() => {
-    minHeap = new PriorityQueue([], (a, b) => a < b); // 小根堆
-    maxHeap = new PriorityQueue([], (a, b) => a > b); // 大根堆
+    minHeap = new PriorityQueue<number>([], (a, b) => a < b); // 小根堆
+    maxHeap = new PriorityQueue<number>([], (a, b) => a > b); // 大根堆
   });
 
   /** 乱序插入后按优先级出队，验证的是堆序而非插入顺序；空队列 pop 返回 undefined 与 Array.pop 语义一致。 */

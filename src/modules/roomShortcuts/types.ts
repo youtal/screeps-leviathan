@@ -20,10 +20,13 @@ import type { ModuleContext } from '@/contracts';
  * profiler 可选（工厂当前未包裹任何统计）。
  * - forceReInit：诊断与测试开关，开启后每次 getter 都重扫房间，等价于放弃缓存收益。
  * - cacheLeaseTicks：缓存租约长度，单位 tick；缺省 5000，实现会做有限性与下界归一化。
+ * - sweepIntervalTicks：清扫间隔，单位 tick；缺省 500，同样做归一化。清扫按租约回收不再被
+ *   查询的房间索引，使 heap 占用只与“最近一个租约内查询过的房间”相关。
  */
 interface RoomShortcutsOpt extends ModuleContext {
   forceReInit?: boolean;
   cacheLeaseTicks?: number;
+  sweepIntervalTicks?: number;
 }
 
 /**

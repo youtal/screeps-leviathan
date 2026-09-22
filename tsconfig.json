@@ -1,7 +1,8 @@
 {
   "compilerOptions": {
     "target": "es2017",
-    "moduleResolution": "node",
+    "strict": true,
+    "moduleResolution": "node10",
     "outDir": "dist/",
     "sourceMap": true,
     "removeComments": true,

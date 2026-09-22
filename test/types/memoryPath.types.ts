@@ -64,8 +64,8 @@ export function negative(m: MemoryAccessor<State>, roomName: string, wide: strin
   m.commit('config', { enabled: true });
   // @ts-expect-error 值类型错误
   m.commit('count', 'x');
-  // 注意：项目未开启 strictNullChecks，undefined 可赋给任何类型，编译期无法拒绝
-  // `m.commit('config', undefined)`；该情形由运行时 JSON 校验拒绝（见 memoryManager 测试）。
+  // @ts-expect-error 不能用 undefined 表达删除（strict 下编译期拒绝，运行时 JSON 校验同样拒绝）
+  m.commit('config', undefined);
   // @ts-expect-error 未声明的顶层键
   m.commit('missing', 1);
   // @ts-expect-error 深路径值类型错误

@@ -92,3 +92,13 @@ export function verifyLoggingContract(factory: LoggerFactory): Logger {
   lazy.debug(() => 42);
   return factory.scope('contract', { levels: { debug: true }, notify: true });
 }
+
+/** 全局类型补丁不得让没有 id 的对象（旗帜）看起来带 id；带 store 的视图仍可作为 Id 参数。 */
+export function verifyGlobalObjectTypes(
+  flag: Flag,
+  id: Id<ObjectWithStore>
+): string {
+  // @ts-expect-error 旗帜没有 id
+  void flag.id;
+  return id;
+}

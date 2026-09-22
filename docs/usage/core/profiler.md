@@ -21,6 +21,12 @@ setup(context) {
 - `report(false, label)`：输出单项报告。
 - `report()`：按 selfTime 降序输出累计报告。
 
+报告的标题行与数据行都以 `report` 级别输出，该级别默认开启；关闭 Profiler 作用域的 `report` 等级会隐藏整份报告。
+
+`report(true)` 在每行追加两列派生数据：平均自身时间（`selfTime / calls`）与自身时间占比（该 label 的 `selfTime` 占本次报告合计的百分比），全量报告的标题还会给出自身时间合计。这两列只由已有字段算出，不改变采样成本；`report(true, label)` 为了求占比的分母会多读一次全量数据，`report(false, label)` 仍然只查一条记录。
+
+label 必须来自固定且有限的集合：包装器与标签表按 label 建立并随实例保留，`reset()` 只清空统计数据、不清除已登记的 label，因此不要用房间名、creep 名等动态数据拼接 label。
+
 在 Framework 插件中通常直接使用 `context.profiler`，无需自行组装依赖。Runtime 的默认统计器将累计值保存在实例 heap，global reset 后清空，不写入 RawMemory。
 
 独立调用 `createProfiler` 时，通过 `context.env` 提供 `getGame` 和日志，通过 `context.storage` 提供 `getMemory/markDirty`，通过 `context.enable` 提供初始开关。`ProfilerStorage` 是 Profiler 与宿主之间的底层适配器，不是业务 Memory 接口；业务不能使用旧 context.persistence。独立 Profiler 如果不接 Runtime，应把统计留在调用者闭包中。

@@ -8,8 +8,9 @@
  * 实现过程：用数组表示二叉堆，构造时从末尾父节点向上建堆；入队时上浮，出队时替换根并下沉。
  *
  * 技术要点：建堆 O(n)，入队和出队 O(log n)，查看堆顶 O(1)；空队列查询或弹出返回 undefined。
- * 内部直接复用并修改传入数组，同优先级顺序不保证稳定；实例可跨 tick 保留，global reset 后需重建。
- * 队列不读取游戏环境或持久存储，调用方需保证比较器一致且不绕过队列修改数组。
+ * 构造时浅拷贝传入数组，之后只修改队列自己的数组；同优先级顺序不保证稳定。实例可跨 tick 保留，
+ * global reset 后需重建。队列不读取游戏环境或持久存储，调用方需保证比较器自洽，并且不在元素
+ * 入队后改动影响比较结果的字段。
  */
 export class PriorityQueue<T> {
   /**
@@ -17,7 +18,7 @@ export class PriorityQueue<T> {
    *
    * 数组下标 `i` 的子节点为 `2i+1`、`2i+2`，父节点为 `floor((i-1)/2)`。
    * readonly 只约束“引用不能重新指向别的数组”，并不冻结内容：heapify/push/pop/clear
-   * 都会原地修改它。字段初始化器先建一个空数组、构造函数随即用调用方数组替换，
+   * 都会原地修改它。字段初始化器先建一个空数组、构造函数随即用调用方数组的副本替换，
    * 目的是让字段在声明处即有明确初值；真正的数据始终来自构造参数。
    */
   private readonly heap: T[] = [];
@@ -107,7 +108,7 @@ export class PriorityQueue<T> {
     }
   }
 
-  constructor(arr: T[], comparator: (pre: T, nxt: T) => boolean) {
+  constructor(arr: T[] | undefined, comparator: (pre: T, nxt: T) => boolean) {
     /**
      * 比较器是维持堆序的必要依赖，构造阶段提前拒绝无效值。
      *
@@ -121,7 +122,8 @@ export class PriorityQueue<T> {
      * 拷贝调用方数组后再原地 heapify：队列拥有自己的存储，调用方的数组不会被重排，
      * 后续 push/pop/clear 也不会反映到它上面。代价是构造时一次 O(n) 浅拷贝，
      * 相对 O(n) 的建堆没有量级变化；元素本身不做深拷贝。
-     * `arr ? ... : []` 兜住运行时传入 null/undefined 的情况。
+     * 类型允许 undefined（调用方按条件传数组时不必先补空数组）；`arr ? ... : []` 同时兜住
+     * JavaScript 调用方传入的 null。
      */
     this.heap = arr ? arr.slice() : [];
     this.comparator = comparator;

@@ -16,7 +16,11 @@ import commonjs from '@rollup/plugin-commonjs';
 import typescript from 'rollup-plugin-typescript2';
 import copy from 'rollup-plugin-copy';
 import { existsSync, readFileSync } from 'fs';
-import { htmlString, screepsUpload } from './build/rollupPlugins.mjs';
+import {
+  htmlString,
+  screepsUpload,
+  sourceMapModule,
+} from './build/rollupPlugins.mjs';
 
 // DEST 由外部注入：npm start 通过 --environment DEST:main 传入，build/upload.mjs 则先写
 // process.env 再动态加载本文件。三种情况必须区分清楚：未指定 → 只编译；指定但缺少
@@ -43,8 +47,9 @@ if (!destination) {
 }
 
 // 根据指定的配置决定是上传还是复制到文件夹
-// 部署策略二选一：配置了 copyPath 说明目标是本地目录（连同 sourcemap 一起复制，并把
-// map 包装成 module.exports 形式供游戏内 require）；否则走 screepsUpload 上传到分支；
+// 部署策略二选一：配置了 copyPath 说明目标是本地目录（连同 sourcemap 一起复制，并与 API
+// 上传共用 sourceMapModule：剥离 sourcesContent、包装成 module.exports 供游戏内 require）；
+// 否则走 screepsUpload 上传到分支；
 // 没有 config 时为 null，rollup 会忽略这个 falsy 插件项。
 const deployPlugin =
   config && config.copyPath
@@ -59,7 +64,7 @@ const deployPlugin =
             src: 'dist/main.js.map',
             dest: config.copyPath,
             rename: (name) => name + '.map.js',
-            transform: (contents) => `module.exports = ${contents.toString()};`,
+            transform: (contents) => sourceMapModule(contents.toString()),
           },
         ],
         hook: 'writeBundle',

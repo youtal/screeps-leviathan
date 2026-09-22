@@ -29,7 +29,7 @@ npm run test:all
 npm run upload:validation
 ```
 
-上传配置保存在不会提交到仓库的 `.secret.json` 中，可从 `.secret.json.example` 创建。
+上传配置保存在不会提交到仓库的 `.secret.json` 中，可从 `.secret.json.example` 创建。每个上传目标可选填 `timeoutMs`（单次 API 请求超时，正整数毫秒，默认 30000）；超时后上传失败并报错，不会无限期等待。
 
 ## 文档
 
