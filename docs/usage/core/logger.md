@@ -36,7 +36,7 @@ const logging = createLogging({
 logging.scope('Script').report('done');
 ```
 
-`Logger`、`LogOptions`、`LoggingOptions`、`ScopeLogOptions`、`LogOutput`、`LoggerFactory` 全部从 `@/contracts/logging`（或 `@/contracts`）导入类型；不要从实现文件推导公共类型。`createLogging` 的返回值标注为 `LoggerFactory`，可在测试中用结构兼容对象替换。
+`Logger`、`LogContent`、`LogOptions`、`LoggingOptions`、`ScopeLogOptions`、`LogOutput`、`LoggerFactory` 全部从 `@/contracts/logging`（或 `@/contracts`）导入类型；不要从实现文件推导公共类型。`createLogging` 的返回值标注为 `LoggerFactory`，可在测试中用结构兼容对象替换。
 
 ## 配置项（LoggingOptions）
 
@@ -64,6 +64,24 @@ logging.scope('Script').report('done');
 
 调用方自己拼接日志文本时（如模板字符串），文本在调用 `log.xxx()` 之前就已求值。热路径可先用 `log.isEnabled('info')` 判断再拼接；结果与该等级是否实际输出一致，在作用域创建后不会变化。测试中自建 `Logger` 替身时需要提供 `isEnabled`。
 
+### 惰性内容
+
+每个日志方法既接受字符串，也接受返回字符串的回调。回调只在该等级开启时调用一次；关闭时连回调里的计算都不会发生：
+
+```ts
+log.debug(() => `path ${JSON.stringify(path)} cost ${cost}`); // debug 关闭时不序列化
+```
+
+选择写法：
+
+| 场景 | 写法 |
+| --- | --- |
+| 普通、低频日志 | 直接传字符串，可读性最好 |
+| 热路径，或消息构造昂贵（序列化、`map().join()`、状态快照） | 传回调 |
+| 同一判断下要输出多条日志或做额外工作 | `if (log.isEnabled('debug')) { … }` |
+
+回调必须同步、没有副作用。回调抛错时这条日志被丢弃，调用方不受影响。
+
 ```ts
 const log = logging.scope('Defense', { levels: { info: true, report: false } });
 log.info('wave incoming');   // 输出：[Defense] wave incoming（info 着色）
@@ -80,6 +98,7 @@ log.report('stats');         // 无输出（本作用域关闭 report）
 ## 错误处理与降级
 
 - 输出端口抛错只丢弃当条日志，不向调用方传播，也不会触发二次记录。
+- 惰性回调抛错同样只丢弃当条日志；返回非字符串时按 `String()` 转换。
 - 日志不依赖 Memory、Profiler、ErrorMapper 与 Game；这些能力缺席时仍能输出（默认关闭邮件时完全不访问 Game）。
 - 非法 `notifyInterval`（非正整数）在装配阶段抛 `Invalid notify interval`，属于配置错误，应在启动阶段暴露。
 
@@ -104,7 +123,7 @@ export const createKernelThing = (options: Options) => {
 
 | 场景 | 等级 | 说明 |
 | --- | --- | --- |
-| 每 tick 都会发生（提交、心跳） | `debug` | 默认关闭，排查时用 `levels: { debug: true }` 打开 |
+| 每 tick 都会发生（提交、心跳） | `debug` | 默认关闭，排查时用 `levels: { debug: true }` 打开；需要拼接或计算的消息传惰性回调 |
 | 状态迁移（初始化、后端切换、恢复完成） | `info` | 默认关闭，排查时打开 |
 | 可自愈异常（写入失败、页面被占用、容量超限） | `warn` | 同一原因只记一次 |
 | 不可自愈的数据问题（schema 非法、归属冲突、版本降级） | `error` | 每实例或每分区首次 |
