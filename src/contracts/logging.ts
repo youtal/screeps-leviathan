@@ -3,13 +3,15 @@
  *
  * 模块角色：contracts 中的日志协议，隔开日志使用者、日志工厂与实际输出方式。
  *
- * 主要功能：声明六种日志方法、等级开关与等级查询、控制台与通知输出接口，以及全局和作用域配置。
+ * 主要功能：声明日志内容类型（字符串或惰性回调）、六种日志方法、等级开关与等级查询、控制台与
+ * 通知输出接口，以及全局和作用域配置。
  *
  * 实现过程：LoggingOptions 提供创建时的策略，LoggerFactory.scope 根据名称与局部覆盖返回 Logger；
  * 格式化后的文本交给 LogOutput 的 write 或 notify。
  *
  * 技术要点：可选布尔值区分“跟随默认”与“明确关闭”；作用域不能突破全局关闭邮件的限制。
- * 这里只声明同步接口，不输出文本或缓存日志，输出异常的隔离由实现负责。
+ * 惰性回调只在对应等级开启时由实现调用，使热路径和昂贵消息在关闭时不付出构造成本。
+ * 这里只声明同步接口，不输出文本或缓存日志，输出与回调异常的隔离由实现负责。
  */
 /** undefined 跟随默认开关，false 显式关闭；默认值取自项目设置，不规定具体格式或输出后端。 */
 export interface LogOptions {
@@ -20,17 +22,29 @@ export interface LogOptions {
   info?: boolean;
   report?: boolean;
 }
+/**
+ * 日志内容：已经构造好的字符串，或返回字符串的惰性回调。
+ *
+ * JavaScript 在调用前求值全部实参，字符串形式即使等级关闭也要先完成拼接与参数计算；
+ * 回调形式只在等级开启时被调用一次，关闭时连回调里的计算（序列化、map/join、状态快照）
+ * 都不会发生，代价只剩一次闭包创建。普通低频日志用字符串即可；热路径或构造昂贵的消息用
+ * 回调，或先以 isEnabled 判断。回调必须同步且没有副作用；抛错时实现丢弃该条日志，不向
+ * 调用方传播。
+ */
+export type LogContent = string | (() => string);
+
 /** 同步输出端口；通知、前缀和颜色由装配及实现决定。 */
 export interface Logger {
-  debug(content: string): void;
-  warn(content: string): void;
-  error(content: string): void;
-  success(content: string): void;
-  info(content: string): void;
-  report(content: string): void;
+  debug(content: LogContent): void;
+  warn(content: LogContent): void;
+  error(content: LogContent): void;
+  success(content: LogContent): void;
+  info(content: LogContent): void;
+  report(content: LogContent): void;
   /**
    * 该等级当前是否会输出。等级在创建作用域时已经确定、运行期不变，因此热路径可以在
    * 拼接日志文本之前先查询，关闭时跳过模板字符串求值（JS 会在调用前求值实参）。
+   * 需要在同一判断下输出多条日志或做额外工作时用它；单条消息更适合惰性回调。
    */
   isEnabled(level: keyof LogOptions): boolean;
 }

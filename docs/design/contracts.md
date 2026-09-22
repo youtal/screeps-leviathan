@@ -12,7 +12,7 @@
 
 | 文件 | 发布内容 |
 | --- | --- |
-| `logging.ts` | Logger/LogOptions、输出端口 LogOutput、装配配置 LoggingOptions、作用域覆盖 ScopeLogOptions 与工厂协议 LoggerFactory |
+| `logging.ts` | Logger/LogOptions、日志内容 LogContent（字符串或惰性回调）、输出端口 LogOutput、装配配置 LoggingOptions、作用域覆盖 ScopeLogOptions 与工厂协议 LoggerFactory |
 | `environment.ts` | EnvMethods、EnvContext |
 | `eventBus.ts` | Bus、作用域、监听回调 |
 | `events/index.ts` | 游戏事件注册表、事件名及载荷推导；与总线传输能力分开 |
