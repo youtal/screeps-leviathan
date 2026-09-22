@@ -1,7 +1,7 @@
 /**
  * 文件摘要：编译期契约回归；由 tsc 检查，不由 Jest 执行。
  *
- * 覆盖范围：Memory 长期访问器（深路径类型另见 types/memoryPath.types.ts）、事件作用域与载荷对应、Logger 完整形状与作用域
+ * 覆盖范围：Memory 长期访问器（深路径类型另见 types/memoryPath.types.ts）、Logger 惰性内容、事件作用域与载荷对应、Logger 完整形状与作用域
  * 覆盖、插件清单与上下文的边界。负例必须保留 `@ts-expect-error` 错误，防止公共
  * 能力、事件载荷或 readonly 边界意外放宽；正例则保证契约仍可被正常实现承诺。
  *
@@ -86,5 +86,9 @@ export function verifyLoggingContract(factory: LoggerFactory): Logger {
   void options;
   // @ts-expect-error 作用域等级键必须来自 LogOptions（warning 不是对外契约键）
   factory.scope('contract', { levels: { warning: true } });
+  const lazy = factory.scope('lazy');
+  lazy.debug(() => 'built only when debug is enabled');
+  // @ts-expect-error 惰性回调必须返回字符串
+  lazy.debug(() => 42);
   return factory.scope('contract', { levels: { debug: true }, notify: true });
 }

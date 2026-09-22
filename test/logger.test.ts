@@ -7,7 +7,8 @@
  * 2. 作用域前缀——按等级着色，输出结构与 utils/console 的 dyeText 一致；
  * 3. 输出端口——默认端口调用 console.log / Game.notify，注入端口可完全替代；
  * 4. 邮件策略——装配级 off/error 与作用域级覆盖的组合，只有 error 等级发送；
- * 5. 失败隔离——端口抛错被吞掉，日志基础设施不得中断业务，也不依赖 Game/Memory。
+ * 5. 失败隔离——端口抛错被吞掉，日志基础设施不得中断业务，也不依赖 Game/Memory；
+ * 6. 惰性内容——回调只在等级开启时调用一次，控制台与邮件共用同一文本，回调抛错时丢弃该条日志。
  *
  * 运行方式与前提：普通 Jest（Node 环境）。用例通过注入端口收集文本，因此不需要
  * 真实的 Screeps 控制台；需要验证默认端口的用例会在用例内临时注入 Game 桩，
@@ -140,6 +141,45 @@ describe('createLogging', () => {
     const log = broken.scope('S');
 
     expect(() => log.error('still runs')).not.toThrow();
+  });
+
+  it('evaluates lazy content only when the level is enabled', () => {
+    const { factory, lines } = collect();
+    const log = factory.scope('Lazy', { levels: { info: true, debug: false } });
+    const debugContent = jest.fn(() => 'never built');
+    const infoContent = jest.fn(() => 'built once');
+    log.debug(debugContent);
+    log.info(infoContent);
+    expect(debugContent).not.toHaveBeenCalled();
+    expect(infoContent).toHaveBeenCalledTimes(1);
+    expect(texts(lines)).toEqual(['[Lazy] built once']);
+  });
+
+  it('calls a lazy error message once for both the console and the mail channel', () => {
+    const { factory, lines, notified } = collect({ notify: 'error' });
+    const content = jest.fn(() => 'boom');
+    factory.scope('Mail').error(content);
+    expect(content).toHaveBeenCalledTimes(1);
+    expect(texts(lines)).toEqual(['[Mail] boom']);
+    expect(texts(notified)).toEqual(['[Mail] boom']);
+  });
+
+  it('drops a message whose lazy callback throws without breaking the caller', () => {
+    const { factory, lines } = collect();
+    const log = factory.scope('Faulty');
+    expect(() =>
+      log.warn(() => {
+        throw new Error('formatter failed');
+      })
+    ).not.toThrow();
+    log.warn(() => 'still works');
+    expect(texts(lines)).toEqual(['[Faulty] still works']);
+  });
+
+  it('coerces a non-string lazy result from JavaScript callers', () => {
+    const { factory, lines } = collect();
+    factory.scope('Js').warn((() => 42) as unknown as () => string);
+    expect(texts(lines)).toEqual(['[Js] 42']);
   });
 
   it('rejects an invalid notify interval at assembly time', () => {

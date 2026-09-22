@@ -6,12 +6,15 @@
  * 主要功能：控制日志等级、添加名称与颜色前缀，向控制台输出，并按策略发送 error 通知。
  *
  * 实现过程：创建工厂时合并默认配置和输出接口；scope 再应用局部配置，返回六种日志方法。
- * 启用的消息经 dyeText 生成前缀后送往输出接口，关闭的等级在格式化前返回。
+ * 关闭的等级在解析内容之前返回；启用时先解析内容（惰性回调在此调用一次），再经 dyeText
+ * 生成前缀后送往输出接口。
  *
  * 技术要点：每个作用域按等级按需缓存前缀，随日志器跨 tick 复用，global reset 后重建。
- * 默认输出使用 console.log 和 Game.notify；输出异常被吞掉，邮件关闭策略不可由作用域重新开启。
+ * 默认输出使用 console.log 和 Game.notify；输出异常与惰性回调异常都被吞掉（丢弃该条日志），
+ * 邮件关闭策略不可由作用域重新开启。
  */
 import type {
+  LogContent,
   Logger,
   LoggerFactory,
   LoggingOptions,
@@ -145,11 +148,24 @@ export const createLogging = (options: LoggingOptions = {}): LoggerFactory => {
       };
 
       /**
-       * 统一出口：关闭的等级在格式化之前返回，热路径不支付着色与拼接成本。
+       * 统一出口：关闭的等级在解析内容与格式化之前返回，热路径不支付回调、着色与拼接成本。
+       * 惰性回调只调用一次，同一文本同时用于控制台与邮件。回调抛错时丢弃该条日志：与输出
+       * 端口失败一样静默降级，不向业务传播，也不为此再写日志（避免递归回路）。String()
+       * 兜住 JavaScript 调用方返回非字符串的情况。
        */
-      const emit = (level: Level, content: string, enabled: boolean): void => {
+      const emit = (level: Level, content: LogContent, enabled: boolean): void => {
         if (!enabled) return;
-        const line = prefixFor(level) + content;
+        let text: string;
+        if (typeof content === 'function') {
+          try {
+            text = String(content());
+          } catch {
+            return;
+          }
+        } else {
+          text = content;
+        }
+        const line = prefixFor(level) + text;
         safe(output.write, line);
         if (level === 'error' && mailEnabled) safe(output.notify, line);
       };
