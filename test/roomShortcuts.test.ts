@@ -227,6 +227,23 @@ describe('RoomShortcuts', () => {
   });
 
   /** F4：无视野只按房间告警一次，不使用 error 等级；恢复视野后再次失去时重新告警。 */
+  it('passes lazy info messages on the query path', () => {
+    const harness = createHarness(true);
+    harness.setStructures([{ id: 'spawn-a', structureType: STRUCTURE_SPAWN }]);
+    harness.shortcuts.getSpawn('W1N1');
+    harness.shortcuts.getSpawn('W1N1');
+    const calls = harness.log.info.mock.calls.map(([content]: [unknown]) => content);
+    // 查询路径上的 info 都以回调传入：日志器在 info 关闭时不会调用它们。
+    expect(calls.every((content: unknown) => typeof content === 'function')).toBe(true);
+    expect(calls.map((content: () => string) => content())).toEqual([
+      'Room W1N1 cache refresh requested, initializing now.',
+      'Room W1N1 shortcuts initialized.',
+      'Room W1N1 cache refresh requested, initializing now.',
+      'Room W1N1 already initialized, but force re-initializing.',
+      'Room W1N1 shortcuts initialized.',
+    ]);
+  });
+
   it('warns once per vision loss without logging errors', () => {
     const harness = createHarness();
     harness.setVision(false);
