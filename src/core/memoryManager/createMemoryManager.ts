@@ -68,6 +68,13 @@ const isThenable = (value: unknown): boolean =>
   (typeof value === 'object' || typeof value === 'function') &&
   typeof (value as { then?: unknown }).then === 'function';
 
+/**
+ * 用户回调阶段的失败：initialize/migrate 抛错、返回 thenable 或返回值不合规。它可能来自暂时性
+ * 条件（例如回调违反约定读取了尚不可用的游戏状态），因此不进入失败缓存，下一次申请重新运行；
+ * 插件场景下重试频率由 Framework 熔断限制。只携带消息，原始异常已无后续用途。
+ */
+class CallbackFailure extends Error {}
+
 /** 旧协议字段：JavaScript 调用方仍可能传入，显式拒绝以免静默忽略语义。 */
 const REMOVED_OPTIONS = ['layer', 'checkpointInterval', 'priority'] as const;
 
@@ -180,7 +187,12 @@ export const createMemoryManager = (
   let busyTick = -1;
   /** 本 tick 正在申请中的身份，拒绝 initialize/migrate 内对同一身份的重入申请。 */
   const applying = new Set<string>();
-  /** 失败申请缓存：相同声明不重跑失败的回调，直接重抛同一错误。 */
+  /**
+   * 确定性失败缓存（身份 → 声明与错误）：只登记管理器自己判定、重试也不会改变结果的错误——
+   * 缺少 migrate、同版本历史数据不合规。相同声明再次申请时直接重抛，不重复解析与校验，也不
+   * 每 tick 刷日志。用户回调阶段的失败（CallbackFailure）不登记。申请成功时清除；只驻留 heap，
+   * global reset 后清空。修正声明（新的函数引用或版本）即不命中缓存。
+   */
   const failedApplications = new Map<string, { declaration: Declaration; error: Error }>();
 
   const identity = (owner: string, localId: string): string => owner + '/' + localId;
@@ -309,6 +321,18 @@ export const createMemoryManager = (
   const sameDeclaration = (a: Declaration, b: Declaration): boolean =>
     a.version === b.version && a.initialize === b.initialize && a.migrate === b.migrate;
 
+  /**
+   * 执行用户回调阶段（调用回调并校验、复制其返回值），把其中任何失败标记为 CallbackFailure，
+   * 使 apply 不缓存它。管理器自身的判定（缺少 migrate、历史数据不合规）不经过这里。
+   */
+  const runCallbackStage = <T>(stage: () => T): T => {
+    try {
+      return stage();
+    } catch (error) {
+      throw new CallbackFailure(errorText(error));
+    }
+  };
+
   /** 同步运行用户回调；thenable 结果违反契约。 */
   const runCallback = <T>(callback: () => T, what: string): T => {
     const value = callback();
@@ -344,9 +368,10 @@ export const createMemoryManager = (
     consumedRetained: boolean;
   } => {
     if (!entry) {
-      const created = runCallback(declaration.initialize, 'initialize()');
       return {
-        data: copyPublishRoot(created),
+        data: runCallbackStage(() =>
+          copyPublishRoot(runCallback(declaration.initialize, 'initialize()'))
+        ),
         dataVersion: declaration.version,
         changed: true,
         consumedRetained: false,
@@ -388,8 +413,9 @@ export const createMemoryManager = (
     } else {
       payload = (JSON.parse(materialize(entry)) as { payload: unknown }).payload;
     }
-    const migrated = runCallback(() => migrate(payload, storedVersion), 'migrate()');
-    const data = copyPublishRoot(migrated);
+    const data = runCallbackStage(() =>
+      copyPublishRoot(runCallback(() => migrate(payload, storedVersion), 'migrate()'))
+    );
     log.info(
       'partition ' + identity(entry.owner, entry.localId) + ' migrated dataVersion ' +
         storedVersion + ' -> ' + declaration.version
@@ -427,7 +453,9 @@ export const createMemoryManager = (
       built = buildWorkingData(entry, declaration);
     } catch (error) {
       const wrapped = configError('partition ' + id + ': ' + errorText(error));
-      failedApplications.set(id, { declaration, error: wrapped });
+      // 只缓存确定性失败；回调阶段的失败留给下一次申请重试。
+      if (!(error instanceof CallbackFailure))
+        failedApplications.set(id, { declaration, error: wrapped });
       throw wrapped;
     } finally {
       exitBusy();

@@ -1173,6 +1173,42 @@ describe('Framework memory integration', () => {
     expect(JSON.parse(plat.raw()).memoryManager.partitions.consumer.main.payload.n).toBe(4);
   });
 
+  /** N2：暂时性 initialize 失败触发熔断后，条件恢复并 recover 即可重新申请，无需 global reset。 */
+  it('recovers a plugin whose initialize failed transiently after recover()', () => {
+    const plat = createPlatform();
+    let visible = false;
+    const initialize = () => {
+      if (!visible) throw new Error('room not visible');
+      return { n: 0 };
+    };
+    const options = { version: 1, initialize };
+    let accessor: MemoryAccessor<{ n: number }> | undefined;
+    const h = harness(
+      [
+        plugin('seeded', {
+          setup(context) {
+            accessor = context.memory('main', options);
+          },
+          onTickExecute() {
+            accessor!.commit((data) => void data.n++);
+          },
+        }),
+      ],
+      { memory: plat.manager, failureThreshold: 3 }
+    );
+    plat.attach(h.game);
+    for (let i = 0; i < 4; i++) h.next(); // 连续失败达到阈值，熔断打开
+    expect(accessor).toBeUndefined();
+    visible = true;
+    h.next(); // 熔断中，不重试
+    expect(accessor).toBeUndefined();
+    h.framework.recover('seeded');
+    h.next();
+    h.next();
+    expect(h.framework.getStatus().failures).toEqual([]);
+    expect(JSON.parse(plat.raw()).memoryManager.partitions.seeded.main.payload.n).toBe(2);
+  });
+
   it('reports a configuration error when no memory manager is assembled', () => {
     const consumer = plugin('consumer', {
       setup(context) {

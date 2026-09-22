@@ -224,7 +224,7 @@ describe('MemoryManager application', () => {
     expect(t.manager.getStatus().partitions.map((p) => p.localId)).toEqual(['shared']);
   });
 
-  it('migrates isolated copies, caches failures and never falls back to initialize', () => {
+  it('migrates isolated copies, retries failed callbacks and never falls back to initialize', () => {
     const t = setup();
     t.tick(() => t.bind('a')('main', counterOptions).commit('count', 5));
     const before = t.plat.state.raw;
@@ -237,15 +237,19 @@ describe('MemoryManager application', () => {
     expect(() => manager.bind('a')('main', { version: 2, initialize })).toThrow(
       /missing migrate for stored dataVersion 1/
     );
-    // migrate 修改隔离副本后抛错：历史片段不受污染，相同声明不重跑。
+    // migrate 修改收到的副本后抛错：历史片段不受污染；回调失败不缓存，相同声明再次申请会
+    // 重新运行，且每次都收到未被上一次修改污染的新副本。
+    const received: number[] = [];
     const failing = jest.fn((memory: any) => {
+      received.push(memory.count);
       memory.count = -1;
       throw new Error('boom');
     });
     const failingOptions = { version: 2, initialize, migrate: failing };
     expect(() => manager.bind('a')('main', failingOptions)).toThrow(/boom/);
     expect(() => manager.bind('a')('main', failingOptions)).toThrow(/boom/);
-    expect(failing).toHaveBeenCalledTimes(1);
+    expect(failing).toHaveBeenCalledTimes(2);
+    expect(received).toEqual([5, 5]);
     manager.end(plat.state.tick);
     expect(plat.state.raw).toBe(before);
 
@@ -1167,6 +1171,60 @@ describe('MemoryManager audit round-2 regressions', () => {
       expect(fixed.query()).toEqual({ count: 10 }); // 从基线重新解析，而不是被修改过的对象
     });
     expect(partitionOf(t.plat, 'p', 'a')).toEqual({ dataVersion: 2, payload: { count: 10 } });
+  });
+});
+
+/** N2：只缓存确定性失败，用户回调阶段的失败在下一次申请时重试。 */
+describe('MemoryManager application failure cache', () => {
+  const catchError = (action: () => unknown): Error => {
+    try {
+      action();
+    } catch (error) {
+      return error as Error;
+    }
+    throw new Error('expected a failure');
+  };
+
+  it('caches deterministic failures detected by the manager', () => {
+    const t = setup(
+      JSON.stringify({
+        memoryManager: {
+          schemaVersion: 2,
+          partitions: { p: { old: { dataVersion: 1, payload: {} }, bad: { dataVersion: 1, payload: [1] } } },
+        },
+      })
+    );
+    t.tick(() => {
+      const noMigrate = { version: 2, initialize: counterInit };
+      const first = catchError(() => t.bind('p')('old', noMigrate));
+      expect(first.message).toMatch(/missing migrate/);
+      expect(catchError(() => t.bind('p')('old', noMigrate))).toBe(first); // 命中缓存
+      const invalid = catchError(() => t.bind('p')('bad', counterOptions));
+      expect(invalid.message).toMatch(/not managed data/);
+      expect(catchError(() => t.bind('p')('bad', counterOptions))).toBe(invalid);
+    });
+  });
+
+  it('retries callback failures, including invalid return values and transient conditions', () => {
+    const t = setup();
+    let visible = false;
+    const initialize = jest.fn(() => {
+      if (!visible) throw new Error('room not visible');
+      return { count: 1 };
+    });
+    const invalid = jest.fn(() => ({ count: NaN }));
+    t.tick(() => {
+      expect(() => t.bind('p')('seed', { version: 1, initialize })).toThrow(/room not visible/);
+      expect(() => t.bind('p')('invalid', { version: 1, initialize: invalid })).toThrow(/non-finite/);
+      expect(() => t.bind('p')('invalid', { version: 1, initialize: invalid })).toThrow(/non-finite/);
+    });
+    expect(invalid).toHaveBeenCalledTimes(2);
+    visible = true; // 暂时性条件解除后，同一声明直接成功
+    t.tick(() => {
+      expect(t.bind('p')('seed', { version: 1, initialize }).query()).toEqual({ count: 1 });
+    });
+    expect(initialize).toHaveBeenCalledTimes(2);
+    expect(partitionOf(t.plat, 'p', 'seed').payload).toEqual({ count: 1 });
   });
 });
 

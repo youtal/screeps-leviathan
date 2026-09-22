@@ -254,6 +254,10 @@ export interface MemoryAccessor<M extends object> {
  *
  * initialize/migrate 按函数引用参与“重复申请是否同一声明”的判断，调用方应把它们
  * 声明在模块或稳定实例作用域，避免停用再启用、setup 重试时因新闭包被判为冲突。
+ *
+ * initialize/migrate 必须是只依赖输入的确定性函数：不读取 Game、服务或其他分区。依赖游戏
+ * 状态的初始数据应在申请成功后按需 commit。回调抛错或返回非法数据时申请失败但不缓存，下一次
+ * 申请会重新运行；管理器判定的确定性错误（缺少 migrate、历史数据不合规）在本 global 内缓存。
  */
 export interface MemoryApplicationOptions<M extends object> {
   /** 正整数，表示模块 payload 的版本。 */
