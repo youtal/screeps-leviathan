@@ -58,7 +58,7 @@ const plugin: LeviathanPlugin = {
 | `query()` | 整个分区的深只读引用 | — |
 | `get(key)` / `get(path)` | 目标的深只读值；中间层或目标缺失返回 `undefined` | — |
 | `commit(mutator)` | 回调返回值 | 回调前标脏并要求收尾完整校验；回调抛错不回滚 |
-| `commit(key, value)` / `commit(path, value)` | `void` | 预检成功后标脏写入；预检失败不修改、不标脏 |
+| `commit(key, value)` / `commit(path, value)` | `void` | 预检成功后标脏并写入值的**副本**；预检失败不修改、不标脏 |
 | `remove(key)` / `remove(path)` | 是否删除了目标 | 删除成功才标脏；目标不存在返回 `false` |
 
 没有 `access()`、`status()` 或 pending 状态。`commit` 只表示 heap 已接受修改，持久化在本 tick 的 `end` 统一完成。
@@ -75,7 +75,7 @@ const plugin: LeviathanPlugin = {
 - 数组下标必须指向已有元素；数组元素不能通过路径删除（会移位或留下空洞），请在回调中 `splice`。
 - `get` 穿越已存在的基本值（如 `['count', 'x']`）或段类型与容器不匹配时抛错；`__proto__`、`prototype`、`constructor` 段一律拒绝；空路径不代表整个分区。
 
-编译期检查：路径与值的类型由 `MemoryAccessor<M>` 推导，错误键、错误值、数组方法名（`length`、`push`）、越界元组下标、宽 `string[]` 路径、对静态必填属性的 `remove`（即使类型同时带有索引签名）都会编译失败。`Record<number, X>` 这类数字键记录用字符串段访问，例如 `['byTick', String(tick)]`：JSON 对象键总是字符串，运行时也只接受字符串段。路径类型最多 8 段（`MaxPathDepth`），更深的修改用 `commit(mutator)`。`MemoryAccessor<any>` 是显式的动态入口：放弃编译期路径检查，运行时校验照常执行。
+编译期检查：路径与值的类型由 `MemoryAccessor<M>` 推导，错误键、错误值、数组方法名（`length`、`push`）、越界元组下标、宽 `string[]` 路径、对静态必填属性的 `remove`（即使类型同时带有索引签名）都会编译失败。`Record<number, X>` 这类数字键记录用字符串段访问，例如 `['byTick', String(tick)]`：JSON 对象键总是字符串，运行时也只接受字符串段；分区根本身是数字键记录时，顶层键重载同样接受字符串键（`get('100')`）。路径类型最多 8 段（`MaxPathDepth`），更深的修改用 `commit(mutator)`。`MemoryAccessor<any>` 是显式的动态入口：放弃编译期路径检查，运行时校验照常执行。
 
 项目当前未开启 `strictNullChecks`，编译期无法拒绝 `commit(key, undefined)`；运行时会以“undefined is not a JSON value”拒绝。删除请用 `remove`。
 
@@ -83,15 +83,17 @@ const plugin: LeviathanPlugin = {
 
 分区根必须是普通对象，成员只能是 JSON 值：`null`、布尔、有限数字、字符串、无空洞的普通数组和普通对象。`undefined`、函数、Symbol 值与 Symbol 键、BigInt、`NaN`/`Infinity`、`Map`/`Set`/`Date`、Game 对象、对象上的访问器属性（getter/setter）以及 `__proto__`/`prototype`/`constructor` 键都会被拒绝。
 
+原型链上的可枚举扩展属性（其它代码向 `Object.prototype` 添加的属性）与 `JSON.stringify` 一样被忽略，不视为分区数据，也不会阻断写盘。
+
 出于性能取舍，以下违规**不会被检出**，按原生 `JSON.stringify` 语义写出：数组元素上的访问器（写出 getter 当时的返回值）、数组上的附加属性（如 `list.meta = …`，被省略）、对象的不可枚举属性（被省略）。它们都需要逐元素或逐键额外检查，大型数值数组上会使校验成本增加约 10 倍。不要以这些形式在分区中存放数据。
 
 校验时机：
 
-- `initialize`/`migrate` 的返回值、同版本恢复的历史数据、路径写入的新值：发布前校验，失败直接抛错；新值引用写入目标的祖先（会成环）同样拒绝。
+- `initialize`/`migrate` 的返回值、同版本恢复的历史数据、路径写入的新值：发布前校验，失败直接抛错；新值引用写入目标的祖先同样拒绝。`initialize`/`migrate` 的返回值与路径写入的新值在校验的同一次遍历中**复制**：调用方保留原对象，之后修改、冻结或复用它（例如同一个模块级常量写入多个分区）都不影响分区。复制使对象值写入比只校验多约 35% 的开销。
 - `commit(mutator)` 修改过的分区：本 tick `end` 时完整校验，非法数据阻断整串写盘（见下文）。
 - 只经路径写入或 `remove` 修改的分区：`end` 直接编码，不再遍历。
 
-`query()`/`get()` 返回真实对象的类型级只读引用，不克隆、不冻结。**不要通过这些引用或传给 `commit` 的对象别名直接修改数据**：这样不会标脏，修改可能永远不会落盘，也会绕过收尾校验。不同分区之间不要共享可变子对象；同一分区内共享子对象可以，但不得成环。**共享关系不会被持久化**：`commit('b', get('a'))` 之后 a、b 在本 global 内是同一对象，修改一方另一方随之变化；global reset 后二者从文本分别解析，成为互不影响的两个对象。需要跨 reset 保持一致的数据只存一份，用键引用。字段被替换后，之前保存的嵌套引用会脱离分区，需要最新值时重新 `get`。
+`query()`/`get()` 返回真实对象的类型级只读引用，不克隆、不冻结。**不要通过这些引用直接修改数据**：这样不会标脏，修改可能永远不会落盘，也会绕过收尾校验。路径写入保存副本，因此 `commit('b', get('a'))` 得到与 a 互相独立的 b。只有在 `commit(mutator)` 回调中直接赋值同一对象（如 `m.b = m.a`）才会在分区内形成共享，此时不要让不同分区引用同一对象，也不得成环。**共享关系不会被持久化**：global reset 后各引用位置从文本分别解析，成为互不影响的对象；需要跨 reset 保持一致的数据只存一份，用键引用。字段被替换后，之前保存的嵌套引用会脱离分区，需要最新值时重新 `get`。
 
 ## 申请配置
 
@@ -164,6 +166,7 @@ const status = manager.getStatus();
 - CPU 硬终止或遗漏 `end` 后，下一个真实 tick 的 `begin` 会终结旧阶段、清除旧锁；已发布的访问器、脏数据全部保留并在该 tick 提交，不会补跑或回滚旧回调的部分修改。
 - 被中断的 `initialize`/`migrate` 不会发布访问器，下一次申请重试。
 - global reset 后只从平台实际保存的文本恢复，未提交的 heap 修改随之丢失。
+- 首次装载只解析一次主文本，不重新编码：同版本申请直接使用解析出的对象；历史记录与其他根字段在首次提交时才编码为片段（实测 2 MB、100 个分区：装载约 31 ms，全部申请约 41 ms，首次提交约 15 ms，之后的提交约 1.6 ms）。未申请的历史分区在首次提交前以解析对象驻留 heap。
 
 ## 旧格式兼容
 
