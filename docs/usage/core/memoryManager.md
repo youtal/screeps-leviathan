@@ -75,13 +75,15 @@ const plugin: LeviathanPlugin = {
 - 数组下标必须指向已有元素；数组元素不能通过路径删除（会移位或留下空洞），请在回调中 `splice`。
 - `get` 穿越已存在的基本值（如 `['count', 'x']`）或段类型与容器不匹配时抛错；`__proto__`、`prototype`、`constructor` 段一律拒绝；空路径不代表整个分区。
 
-编译期检查：路径与值的类型由 `MemoryAccessor<M>` 推导，错误键、错误值、数组方法名（`length`、`push`）、越界元组下标、宽 `string[]` 路径、对静态必填属性的 `remove` 都会编译失败。路径类型最多 8 段（`MaxPathDepth`），更深的修改用 `commit(mutator)`。`MemoryAccessor<any>` 是显式的动态入口：放弃编译期路径检查，运行时校验照常执行。
+编译期检查：路径与值的类型由 `MemoryAccessor<M>` 推导，错误键、错误值、数组方法名（`length`、`push`）、越界元组下标、宽 `string[]` 路径、对静态必填属性的 `remove`（即使类型同时带有索引签名）都会编译失败。`Record<number, X>` 这类数字键记录用字符串段访问，例如 `['byTick', String(tick)]`：JSON 对象键总是字符串，运行时也只接受字符串段。路径类型最多 8 段（`MaxPathDepth`），更深的修改用 `commit(mutator)`。`MemoryAccessor<any>` 是显式的动态入口：放弃编译期路径检查，运行时校验照常执行。
 
 项目当前未开启 `strictNullChecks`，编译期无法拒绝 `commit(key, undefined)`；运行时会以“undefined is not a JSON value”拒绝。删除请用 `remove`。
 
 ## 数据约束与引用所有权
 
-分区根必须是普通对象，成员只能是 JSON 值：`null`、布尔、有限数字、字符串、无空洞的普通数组和普通对象。`undefined`、函数、Symbol、BigInt、`NaN`/`Infinity`、`Map`/`Set`/`Date`、Game 对象、访问器属性（getter/setter）以及 `__proto__`/`prototype`/`constructor` 键都会被拒绝。
+分区根必须是普通对象，成员只能是 JSON 值：`null`、布尔、有限数字、字符串、无空洞的普通数组和普通对象。`undefined`、函数、Symbol 值与 Symbol 键、BigInt、`NaN`/`Infinity`、`Map`/`Set`/`Date`、Game 对象、对象上的访问器属性（getter/setter）以及 `__proto__`/`prototype`/`constructor` 键都会被拒绝。
+
+出于性能取舍，以下违规**不会被检出**，按原生 `JSON.stringify` 语义写出：数组元素上的访问器（写出 getter 当时的返回值）、数组上的附加属性（如 `list.meta = …`，被省略）、对象的不可枚举属性（被省略）。它们都需要逐元素或逐键额外检查，大型数值数组上会使校验成本增加约 10 倍。不要以这些形式在分区中存放数据。
 
 校验时机：
 
@@ -89,15 +91,15 @@ const plugin: LeviathanPlugin = {
 - `commit(mutator)` 修改过的分区：本 tick `end` 时完整校验，非法数据阻断整串写盘（见下文）。
 - 只经路径写入或 `remove` 修改的分区：`end` 直接编码，不再遍历。
 
-`query()`/`get()` 返回真实对象的类型级只读引用，不克隆、不冻结。**不要通过这些引用或传给 `commit` 的对象别名直接修改数据**：这样不会标脏，修改可能永远不会落盘，也会绕过收尾校验。不同分区之间不要共享可变子对象；同一分区内共享子对象可以，但不得成环。字段被替换后，之前保存的嵌套引用会脱离分区，需要最新值时重新 `get`。
+`query()`/`get()` 返回真实对象的类型级只读引用，不克隆、不冻结。**不要通过这些引用或传给 `commit` 的对象别名直接修改数据**：这样不会标脏，修改可能永远不会落盘，也会绕过收尾校验。不同分区之间不要共享可变子对象；同一分区内共享子对象可以，但不得成环。**共享关系不会被持久化**：`commit('b', get('a'))` 之后 a、b 在本 global 内是同一对象，修改一方另一方随之变化；global reset 后二者从文本分别解析，成为互不影响的两个对象。需要跨 reset 保持一致的数据只存一份，用键引用。字段被替换后，之前保存的嵌套引用会脱离分区，需要最新值时重新 `get`。
 
 ## 申请配置
 
 | 配置 | 必填 | 说明 |
 | --- | --- | --- |
 | `version` | 是 | 正整数，表示 payload 版本 |
-| `initialize()` | 是 | 确认不存在历史分区时同步调用，返回首次安装的分区对象 |
-| `migrate(memory, fromVersion)` | 存在不同版本的历史数据时 | 同步接收与历史记录隔离的副本（`unknown`），自行校验并返回目标版本对象；升级、降级、旧布局导入的版本 0 都走这里 |
+| `initialize()` | 是 | 确认不存在历史分区时同步调用，返回首次安装的分区对象；返回值在校验后被复制，可以安全地返回模块级常量 |
+| `migrate(memory, fromVersion)` | 存在不同版本的历史数据时 | 同步接收与历史记录隔离的副本（`unknown`），自行校验并返回目标版本对象（同样在校验后复制）；升级、降级、旧布局导入的版本 0 都走这里 |
 
 - 已存储版本与 `version` 不同而没有 `migrate`：申请抛错，**绝不**回退到 `initialize` 覆盖历史。
 - `migrate`/`initialize` 抛错或返回非法数据：申请抛错，历史记录不变。相同声明的失败在本 global 内缓存，不会每 tick 重跑失败回调；修正声明（新的函数引用或版本）即可重新申请。
@@ -124,6 +126,10 @@ const plugin: LeviathanPlugin = {
 - 访问器照常可用。修复方式是在下一 tick 用该分区的访问器修正非法值（例如 `commit(['box', 'n'], 0)`）或缩减数据。
 
 停用出问题的插件**不会**解除阻塞（其脏状态仍在）；需要由仍持有访问器的修复逻辑处理，或修复插件后恢复执行。重建 global 会丢弃所有未落盘的 heap 修改，再从上一次有效文本恢复，不是无损修复。
+
+### 提交开销与 CPU 预留
+
+提交在所有插件收尾之后执行，本身不做 CPU 准入判断。私服实测（主 Memory 约 2 MB）：只有小分区变化时约 1.5–2.5 CPU，重新编码大分区约 6–10 CPU，均可能超过 Framework 默认的收尾预留 `reserveCpu`（5）。bucket 耗尽、单 tick 上限回落到常规 limit 时，大分区的提交可能在每个 tick 都被 CPU 硬终止，持久化因此一直无法完成（恢复协议保证不丢失已提交数据，但新修改无法落盘）。持有大分区时应：把频繁变化的数据拆成小分区、避免在同一 tick 修改大分区，并按主 Memory 规模调高 `reserveCpu`。
 
 ### 容量
 
@@ -154,7 +160,7 @@ const status = manager.getStatus();
 
 ## 生命周期与恢复
 
-- `begin(tick)`/`end(tick)` 的 `tick` 必须等于当前 `Game.time`；同 tick 重复调用不重复装载或提交，`end` 之后同 tick 不再允许修改；回调执行中调用 `begin/end` 视为重入并拒绝。
+- `begin(tick)`/`end(tick)` 的 `tick` 必须等于真实 tick（平台 `getTick()`；经 Runtime 创建时即 `platform.getGame().time`）；同 tick 重复调用不重复装载或提交，`end` 之后同 tick 不再允许修改；回调执行中调用 `begin/end` 视为重入并拒绝。
 - CPU 硬终止或遗漏 `end` 后，下一个真实 tick 的 `begin` 会终结旧阶段、清除旧锁；已发布的访问器、脏数据全部保留并在该 tick 提交，不会补跑或回滚旧回调的部分修改。
 - 被中断的 `initialize`/`migrate` 不会发布访问器，下一次申请重试。
 - global reset 后只从平台实际保存的文本恢复，未提交的 heap 修改随之丢失。
@@ -176,7 +182,9 @@ const status = manager.getStatus();
 ```ts
 const manager = createMemoryManager({
   logging: createLogging(),
-  platform: { readRaw, writeRaw, getTick }, // 缺省直连 RawMemory 与 Game.time
+  // 二选一：完整平台端口，或只替换缺省平台的 tick 来源（缺省读取全局 Game.time）
+  platform: { readRaw, writeRaw, getTick },
+  // getTick: () => myGame.time,
 });
 manager.begin(Game.time);
 const accessor = manager.bind('tool')('main', options);
@@ -184,7 +192,7 @@ const accessor = manager.bind('tool')('main', options);
 manager.end(Game.time);
 ```
 
-`createRuntime({ memoryManager: { platform } })` 可替换平台；`createRuntime({}, { memory })` 可注入其它 `MemoryHost`，按模块名绑定到 `ModuleContext.memory`，独立 Runtime 需要调用方自行驱动 `begin/end`。
+经 Runtime 创建时，缺省平台的 tick 来源自动取自 `platform.getGame().time`，与 Framework 调用 `begin/end` 的 tick 同源；`createRuntime({ memoryManager: { platform } })` 可替换整个平台端口（此时 tick 由该端口自己提供）；`createRuntime({}, { memory })` 可注入其它 `MemoryHost`，按模块名绑定到 `ModuleContext.memory`，独立 Runtime 需要调用方自行驱动 `begin/end`。
 
 同一 global 只应装配一个 MemoryManager：多个实例各自持有 heap 片段，会互相覆盖同一命名空间。
 

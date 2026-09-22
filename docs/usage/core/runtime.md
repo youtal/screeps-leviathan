@@ -32,7 +32,7 @@ const defense = runtime.createContext('Defense', { notify: true });
 | --------------- | -------------------------------------------------------------------- |
 | `platform`      | `getGame`：返回当前 tick 的 Game                                     |
 | `logging`       | Logger 的等级、邮件策略和输出端口配置                                |
-| `memoryManager` | 除 LoggerFactory 外的 MemoryManager 配置，例如平台端口与启动窗口参数 |
+| `memoryManager` | MemoryManager 配置（平台端口）；LoggerFactory 与 tick 来源由 Runtime 注入，tick 取自 `platform.getGame().time` |
 | `profiler`      | `{ enabled, storage }`；传入 `false` 完全禁用 Profiler               |
 | `errorMapper`   | `{ loadSourceMap, report }`                                          |
 

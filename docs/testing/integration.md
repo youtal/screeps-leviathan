@@ -106,7 +106,7 @@ reset：新 isolate 的探针必须从 1 重新计数（若 heap 被继承会得
 `storage load failed: Unsupported MemoryManager schema`，属于**预期内**诊断，不算运行错误。
 
 `leviathan-memory` 的实测记录（screeps 4.3 私服，主文本约 209 万码元）：clean tick 的 loop 约 0.06 CPU，
-仅小分区变化（大分区复用片段、整串拼接与写入）约 1.5–2.0 CPU，大分区重新编码约 6–10 CPU；在插件回调内
+仅小分区变化（大分区复用片段、整串拼接与写入）约 1.5–2.5 CPU，大分区重新编码约 6–10 CPU；在插件回调内
 死循环触发 CPU 硬终止后 **heap 保留**（模块只初始化一次、loop 计数连续），后续 tick 的 Framework 与
 MemoryManager 自动恢复，终止前回调已做的修改随后提交。
 
