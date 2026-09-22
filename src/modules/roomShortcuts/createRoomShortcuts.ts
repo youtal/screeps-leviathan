@@ -166,13 +166,14 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
     /**
      * force=false 时已初始化即直接复用（缓存未过期）；force=true 时重新扫描，
      * 用日志区分这两种情况，便于诊断测试中的强制刷新。
+     * 强制刷新路径在 forceReInit 时由每次查询触发，日志传惰性回调，info 关闭时不拼接。
      */
     if (initedRooms[roomName] && !force) {
       log.info(`Room ${roomName} already initialized, skipping.`);
       return;
     } else if (initedRooms[roomName] && force) {
       log.info(
-        `Room ${roomName} already initialized, but force re-initializing.`
+        () => `Room ${roomName} already initialized, but force re-initializing.`
       );
     }
 
@@ -220,7 +221,7 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
     shortcutsCache[roomName] = cache;
     initedRooms[roomName] = true;
     initializedAt[roomName] = getGame().time;
-    log.info(`Room ${roomName} shortcuts initialized.`);
+    log.info(() => `Room ${roomName} shortcuts initialized.`);
   };
 
   /**
@@ -317,10 +318,13 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
     /**
      * 缓存缺失、显式强制刷新或租约到期都会进入同一初始化路径。
      * 日志按三种原因区分，便于在控制台确认是冷启动、诊断刷新还是租约兜底。
+     * 这里位于查询路径上（forceReInit 时每次查询都会到达），日志传惰性回调：info 关闭时
+     * 连原因判断与拼接都不执行。
      */
     if (!initedRooms[roomName] || forceReInit || leaseExpired) {
       log.info(
-        `Room ${roomName} cache ${forceReInit ? 'refresh requested' : leaseExpired ? 'lease expired' : 'missed'}, initializing now.`
+        () =>
+          `Room ${roomName} cache ${forceReInit ? 'refresh requested' : leaseExpired ? 'lease expired' : 'missed'}, initializing now.`
       );
       init(roomName, forceReInit || leaseExpired);
     }
