@@ -6,7 +6,7 @@
 
 ## 结论与优先顺序
 
-没有发现新的 P1/P2。新增 **3 项 P3、2 项 P4**。任务调度器的身份校验与持久记录重试是本轮最值得先处理的实现问题；它们不影响当前 App 唯一装配的 RoomShortcuts，但会影响未来使用跨 tick 任务的模块。已挂起的 A05（RoomShortcuts 建筑事件无生产者）仍是现有业务链的 P2 限制，本轮不重新提出处置方案。审计索引中永久接受的 A03、A09 不重复列为新发现。
+没有发现新的 P1/P2。新增 **3 项 P3、2 项 P4**。任务调度器的身份校验与持久记录重试是本轮最值得先处理的实现问题；它们不影响当前 App 唯一装配的 RoomShortcuts，但会影响未来使用跨 tick 任务的模块。A05（RoomShortcuts 建筑事件无生产者）仍是现有业务链的 P2 限制；审计后的决定已将其与 A03、A09 一并列为永久接受的风险，不重复列为新发现。
 
 | 顺序 | 发现 | 建议 |
 | --- | --- | --- |
@@ -44,7 +44,7 @@
 | --- | --- |
 | 分层 | Core 同级实现只由 Runtime 组合，Framework 消费完整 Runtime；Memory 只能经 MemoryManager；能力层不直接导入 Core/App/业务实现。三项边界测试与 64 个源码文件摘要检查均通过。RoomShortcuts 由 App 在 Framework 创建后注册，并在插件 `setup` 发布服务，符合现行生命周期。服务令牌只绑定服务名与类型，`manifest.requires` 仍须写提供者插件 id；这一残留耦合已在[能力层设计](../design/capabilities/README.md)说明。 |
 | 持久化 | 分区数据经同一 MemoryHost 生命周期提交，异常装载进入安全模式；私服场景覆盖未知 schema、整串容量上限、硬终止后的 heap/存储恢复。任一脏分区验证失败仍会阻断本次整串提交，是[MemoryManager 设计](../design/core/memoryManager.md)已明示的取舍。主文本约 209 万 UTF-16 码元时，本轮私服样本为 clean 0.065 CPU、小分区修改 2.029 CPU、大分区重编码 7.808 CPU；它们是本环境的样本，不能外推到官方服务器。 |
-| 业务能力 | 当前 App 仅装配 RoomShortcuts。它订阅建筑建成/摧毁事件，但没有生产者；无事件时变化最长约一个默认 5000 tick 租约才可见。该 A05 限制已挂起，能力层目录迁移与服务令牌不改变其效果。RoomShortcuts 被标为 `critical`，将来出现不依赖它的保活插件时，应重新评估全局 safeMode 影响。 |
+| 业务能力 | 当前 App 仅装配 RoomShortcuts。它订阅建筑建成/摧毁事件，但没有生产者；已消失的对象查询时会被过滤，新建建筑可能直到默认 5000 tick 租约到期后的下一次查询才被收录。该 A05 限制已永久接受，能力层目录迁移与服务令牌不改变其效果。RoomShortcuts 被标为 `critical`，将来出现不依赖它的保活插件时，应重新评估全局 safeMode 影响。 |
 | 构建与供应链 | `npm run build` 在不指定 DEST 时只生成 bundle，不上传；产物 `dist/main.js` 为 128,473 字节，source map 为 429,192 字节。`.secret.json` 被忽略，跟踪文件只有占位示例。2026-09-23 的 `npm audit --json` 对根依赖报告 0 项已知漏洞；隔离 runner 为 42 项（critical 1、high 15、moderate 21、low 5），与索引中已接受的 A03 一致。runner 构建上下文白名单及运行期禁网、非 root、只读根等限制仍在。审计报告只是所查询 registry 在检查时已知公告的快照，[npm 文档](https://docs.npmjs.com/auditing-package-dependencies-for-security-vulnerabilities/)说明了其覆盖范围；旧 lodash 风险可见[官方 GitHub 公告](https://github.com/advisories/GHSA-p6mc-m468-83gw)。 |
 | 测试边界 | 真实引擎四个场景覆盖 Runtime、Memory、global reset 与任务调度，但没有端到端建筑事件生产链，也不覆盖完整 backend/上传接口。永久接受的官方服务器性能基线缺口 A09 不在本轮重提。 |
 
