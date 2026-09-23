@@ -49,7 +49,7 @@ export const loop = framework.loop;
 
 ```ts
 import { framework } from '@/app';
-import { RoomShortcutsService } from '@/modules/roomShortcuts';
+import { RoomShortcutsService } from '@/capabilities/roomShortcuts';
 
 framework.register({
   manifest: { id: 'observer', version: 1, requires: ['roomShortcuts'] },
@@ -61,7 +61,7 @@ framework.register({
 });
 ```
 
-`requires` 填写提供服务的插件 id；令牌的 `name` 是服务名，二者允许不同。独占服务必须列入 `manifest.provides`，并在 setup 中通过 `services.provide(token, value)` 或原有字符串重载发布。令牌只在类型层约束服务接口，不改变运行时依赖检查。查询接口与结果语义见 [RoomShortcuts 使用说明](../modules/roomShortcuts.md)。
+`requires` 填写提供服务的插件 id；令牌的 `name` 是服务名，二者允许不同。独占服务必须列入 `manifest.provides`，并在 setup 中通过 `services.provide(token, value)` 或原有字符串重载发布。令牌只在类型层约束服务接口，不改变运行时依赖检查。查询接口与结果语义见 [RoomShortcuts 使用说明](../capabilities/roomShortcuts.md)。
 
 ## 插件管理
 

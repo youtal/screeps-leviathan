@@ -1,7 +1,7 @@
 /**
  * 文件摘要
  *
- * 模块角色：modules/roomShortcuts 的公共出口，发布房间查询接口、服务令牌和现有工厂。
+ * 模块角色：capabilities/roomShortcuts 的公共出口，发布房间查询接口、服务令牌和现有工厂。
  *
  * 主要功能：RoomShortcuts 明确列出业务消费者可用的查询方法；RoomShortcutsService
  * 将服务名与接口绑定，供 App 发布和插件读取；工厂仍可用于独立装配。

@@ -1,7 +1,7 @@
 /**
  * 文件摘要
  *
- * 模块角色：modules/roomShortcuts 的查询实现，为插件提供按房间和对象类别访问建筑、矿物与矿源的方法。
+ * 模块角色：capabilities/roomShortcuts 的查询实现，为插件提供按房间和对象类别访问建筑、矿物与矿源的方法。
  *
  * 主要功能：首次查询建立 ID 索引，复用索引取得本 tick 对象，并在建筑事件或缓存过期时更新。
  *
@@ -318,7 +318,7 @@ export const createRoomShortcuts = (opt: RoomShortcutsOpt) => {
    * `forceReInit` 与 tick 租约决定是否重扫。单对象查询以 undefined 表示无结果，
    * 多对象查询以空数组表示无结果，使调用方无需额外判断 null。
    *
-   * 空结果契约（与 docs/design/modules/roomShortcuts.md 一致）：房间不存在该类别建筑不是错误，
+   * 空结果契约（与 docs/design/capabilities/roomShortcuts.md 一致）：房间不存在该类别建筑不是错误，
    * “初始化失败”等异常路径记录错误日志；“无视野”按房间只记录一次警告，其余空结果静默返回。
    * 泛型 K 让返回值随传入键收窄；isSingle 只影响返回形态，不改变缓存内容。
    */

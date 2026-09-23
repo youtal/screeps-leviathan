@@ -9,7 +9,7 @@
 - [Profiler](./core/profiler.md)：启停采样、包装函数和读取统计报告。
 - [Runtime](./core/runtime.md)：创建共享总线、Profiler 和模块级环境上下文。
 - [TaskScheduler](./core/taskScheduler.md)：取得调度入口、提交与读取结果、重算与重试、CPU 与分片、编写任务体的限制。
-- [RoomShortcuts](./modules/roomShortcuts.md)：取得服务、查询接口、结果语义与缓存更新。
+- [RoomShortcuts](./capabilities/roomShortcuts.md)：取得服务、查询接口、结果语义与缓存更新。
 - [控制台工具](./utils/console.md)：着色、链接、模板工具、表单与帮助面板。
 - [PriorityQueue](./utils/priorityQueue.md)：构造、比较器与接口。
 

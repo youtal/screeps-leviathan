@@ -1,13 +1,13 @@
 # RoomShortcuts 使用说明
 
-RoomShortcuts 按房间查询建筑、Source 与 Mineral。它为每个有视野的房间缓存对象 id，每次查询用 `getObjectById` 取回本 tick 的对象，避免重复调用 `room.find`。设计见 [RoomShortcuts 设计](../../design/modules/roomShortcuts.md)。
+RoomShortcuts 按房间查询建筑、Source 与 Mineral。它为每个有视野的房间缓存对象 id，每次查询用 `getObjectById` 取回本 tick 的对象，避免重复调用 `room.find`。设计见 [RoomShortcuts 设计](../../design/capabilities/roomShortcuts.md)。
 
 ## 取得服务
 
 应用已在 `src/app/modules.ts` 以插件 `roomShortcuts` 注册本模块，服务名同为 `roomShortcuts`。使用方在 manifest 中声明依赖，并在使用时读取服务：
 
 ```ts
-import { RoomShortcutsService } from '@/modules/roomShortcuts';
+import { RoomShortcutsService } from '@/capabilities/roomShortcuts';
 
 framework.register({
   manifest: { id: 'defense', version: 1, requires: ['roomShortcuts'] },
@@ -27,6 +27,8 @@ framework.register({
 独立创建时传入模块上下文和可选配置。工厂在创建时向总线订阅建筑事件，每个 global 只应创建一次；不经 Framework 使用时，这些订阅不会自动取消。
 
 ```ts
+import { createRoomShortcuts } from '@/capabilities/roomShortcuts';
+
 const shortcuts = createRoomShortcuts({
   ...runtime.createContext('roomShortcuts'),
   cacheLeaseTicks: 3000,

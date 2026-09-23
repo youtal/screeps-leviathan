@@ -1,6 +1,6 @@
 # 能力层设计
 
-交付状态：部分交付。`ServiceToken<T>`、`defineService<T>` 与 Framework 的令牌式 `get/provide` 已交付，RoomShortcuts 已发布公共查询接口与令牌；`src/capabilities/` 目录、既有能力模块迁移、`services.optional(token)` 和自动化层间边界测试未交付。目标路径为 `src/capabilities/`；下文目录示例是设计协议。
+交付状态：部分交付。`ServiceToken<T>`、`defineService<T>`、Framework 的令牌式 `get/provide`、`src/capabilities/roomShortcuts/` 与能力层依赖边界测试已交付；其他能力迁移及 `services.optional(token)` 未交付。
 
 ## 1. 定位与目标
 
@@ -26,10 +26,10 @@ modules/        业务模块
 app/            组合根：注册插件、决定启停
 ```
 
-- `capabilities` 只依赖 `contracts` 与注入的 `ModuleContext`，不依赖 `modules`。
+- `capabilities` 只通过 `contracts`、同层能力、注入的 `ModuleContext` 或外部包取得依赖，不直接依赖 Core、App、业务模块和工具实现；`test/capabilityDependencyBoundary.test.ts` 扫描这条边界。
 - `capabilities` 之间可以互相依赖（例如寻路依赖房间查询），顺序由 Framework 的拓扑排序保证。
 - `modules` 通过 `manifest.requires` 加令牌消费 `capabilities`。
-- 组合只发生在 `app`。
+- `app` 创建 Framework 后注册能力插件，并在插件 `setup` 中调用能力工厂、发布服务；能力模块发布查询接口、令牌和工厂。
 
 ### 2.2 服务令牌
 
@@ -84,12 +84,11 @@ framework.register({
 ## 4. 风险与残留耦合
 
 - **`requires`/令牌命名空间脱钩**：见 §2.3。写错或漏写 `requires` 里的插件 id 时类型检查不会报警，只会在运行时表现为服务不可用；令牌只保证 `services.get` 的返回类型正确，不保证依赖声明本身正确。
-- **目录迁移的影响面**：把现有能力模块移入 `capabilities/` 会牵动 `@modules/*` 别名、文档路径、测试导入与源码注释中的路径；模块文档须按 [根开发规范](../../../AGENTS.md) §7 与源码目录同步移动。
+- **后续迁移的影响面**：其他能力迁入 `capabilities/` 时须同步模块文档、测试导入与源码注释中的路径，遵守 [根开发规范](../../../AGENTS.md) §7。
 
 ## 5. 待决设计事项
 
-1. 目录是否真的迁移，以及迁移时机（现在，还是等 goto 落地）；层级名称用 `capabilities` 还是别的（`platform`、`services`）。迁移一旦发生，须同步更新模块文档、导航、测试导入和源码注释中的路径。
+1. 新能力（例如 goto）何时进入 `capabilities/`，以及已有业务模块被复用时的迁移判定。
 2. 是否引入 `services.optional`，还是首版只提供必需依赖的令牌读取。
 3. 令牌是否同时用于 `manifest.provides` 的声明（目前使用 `RoomShortcutsService.name`，清单字段仍是字符串数组）。
 4. `requires`/令牌的残留耦合（§4）是否需要专门弥补，例如让 `defineService` 携带所属插件 id、或提供额外的静态检查。
-5. 是否为 `capabilities → modules` 的单向依赖规则补一条自动化边界扫描（参照 [`test/coreDependencyBoundary.test.ts`](../../../test/coreDependencyBoundary.test.ts) 与 [`test/memoryBoundary.test.ts`](../../../test/memoryBoundary.test.ts) 的模式），使其具备和 Core、Memory 边界同等的阻断级别检查。

@@ -1,7 +1,7 @@
 /**
  * 文件摘要
  *
- * 模块角色：app 中连接业务模块与框架插件接口的文件，决定业务能力如何成为服务。
+ * 模块角色：app 中连接通用能力与框架插件接口的文件，决定能力如何成为服务。
  *
  * 主要功能：声明 roomShortcuts 插件，向其他插件提供同名房间查询服务。
  *
@@ -15,7 +15,7 @@
 import {
   createRoomShortcuts,
   RoomShortcutsService,
-} from '@/modules/roomShortcuts';
+} from '@/capabilities/roomShortcuts';
 import type { LeviathanPlugin } from '@/contracts';
 
 /**

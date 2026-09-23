@@ -25,14 +25,17 @@
 
 ## 能力层
 
-与 Screeps 耦合、为业务模块提供通用能力的插件所在层，不属于 Core；目前尚无模块迁入或新建于此目录。总体设计见[能力层设计](./design/capabilities/README.md)。
+与 Screeps 耦合、为业务模块提供通用能力的插件所在层，不属于 Core。总体设计见[能力层设计](./design/capabilities/README.md)。
+
+| 模块 | 源码 | 设计 | 使用说明 |
+| --- | --- | --- | --- |
+| RoomShortcuts | [capabilities/roomShortcuts](../src/capabilities/roomShortcuts/) | [设计](./design/capabilities/roomShortcuts.md) | [使用](./usage/capabilities/roomShortcuts.md) |
 
 ## 业务模块与应用
 
 | 模块 | 源码 | 设计 | 使用说明 |
 | --- | --- | --- | --- |
 | goto | 未交付；规划路径 `src/modules/goto/` | [设计](./design/modules/goto.md) | 待交付 |
-| RoomShortcuts | [modules/roomShortcuts](../src/modules/roomShortcuts/) | [设计](./design/modules/roomShortcuts.md) | [使用](./usage/modules/roomShortcuts.md) |
 | App | [app](../src/app/) | 装配原则见 Core 架构 | [项目入口](../README.md) |
 
 ## 工具

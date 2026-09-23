@@ -1,5 +1,5 @@
 /**
- * 文件摘要：验证房间查询快捷方式（@/modules/roomShortcuts）的缓存与失效策略。
+ * 文件摘要：验证房间查询快捷方式（@/capabilities/roomShortcuts）的缓存与失效策略。
  *
  * 覆盖模块：createRoomShortcuts 及其依赖的 ModuleContext 协议（bus/env/profiler 注入）。
  * 覆盖边界：集合查询返回空数组、单体查询返回 undefined；structure:destroyed 命中缓存时
@@ -16,7 +16,7 @@
  * 运行方式：npm test（ts-jest，testEnvironment=node）；不需要 .secret.json，
  * 不执行构建与网络请求。
  */
-import { createRoomShortcuts } from '@/modules/roomShortcuts/createRoomShortcuts';
+import { createRoomShortcuts } from '@/capabilities/roomShortcuts/createRoomShortcuts';
 import type { ModuleContext } from '@/contracts';
 
 const createLog = () => ({
