@@ -11,7 +11,7 @@
  * deadline 过期、闲置回收、按 owner 释放、硬终止后有限次数的按 body 重启，以及经存储分区
  * 记录的跨 global 重启计数。
  *
- * 实现过程：registry 是唯一的状态容器（Map<owner+分隔符+id, TaskEntry>）。submit 只保证实例
+ * 实现过程：registry 是唯一的状态容器（Map<owner+分隔符+id, TaskEntry>，身份字段在入口校验）。submit 只保证实例
  * 存在（任何状态都返回已有实例），release、releaseOwner 与闲置回收负责移除。drive 先 sweep
  * 一遍处理闲置回收、deadline 过期与硬终止恢复，再从活跃且 bucket 达标的任务建一个按
  * (priority desc, roundServed asc) 排序的 PriorityQueue，循环弹出、驱动一片；若仍活跃且未达
@@ -45,11 +45,24 @@ import type {
 import { PriorityQueue } from '@/utils/priorityQueue';
 
 /**
- * 组合 owner 与 id 的注册表键。分隔符用不可打印的 NUL 字符：正常的模块名与任务 id 不会
- * 包含它，因此不同 (owner, id) 组合不会拼出相同的键，也不必把这条约束暴露给调用方。
+ * 组合 owner 与 id 的注册表键。入口拒绝 NUL，保证分隔符不出现在字段内部，
+ * 不同 (owner, id) 因而不会拼出相同的键。
  */
 const SEPARATOR = '\u0000';
 const registryKey = (owner: string, id: string): string => owner + SEPARATOR + id;
+
+/**
+ * 身份字段也充当 MemoryManager 的字符串路径段。与其路径保留键规则保持一致，
+ * 并拒绝注册键分隔符；在创建实例/绑定 owner 前报错，避免运行中的任务没有重启记录。
+ * owner 在 bind 校验一次，id 在 submit 校验；get/release 不会创建条目或写入记录。
+ */
+const validIdentityPart = (value: string): boolean =>
+  typeof value === 'string' &&
+  value.length > 0 &&
+  !value.includes(SEPARATOR) &&
+  value !== '__proto__' &&
+  value !== 'prototype' &&
+  value !== 'constructor';
 
 /**
  * 同一实例因硬终止被重启的次数上限。
@@ -104,8 +117,8 @@ const BURST_HEADROOM = 100;
  *   被打断”，无需记录 tick。restarts 记录本实例因此被重启的次数。
  * - lastTouched 是最近一次被 submit/get 触碰的 tick，闲置回收据此判断调用方是否还关心
  *   这个实例。
- * - record 表示该实例在调度器分区中的记录状态：'pending' 待下一次 persist 登记，'stored'
- *   已写入（结束或释放时需要删除），'none' 没有记录（未启用存储、已删除或写入失败）。
+ * - record 表示该实例在调度器分区中的记录状态：'pending' 待下一次 persist 登记（写入失败
+ *   仍保持 pending），'stored' 已写入（结束或释放时需要删除），'none' 不再需要登记。
  */
 interface TaskEntry {
   owner: string;
@@ -384,7 +397,7 @@ export const createTaskScheduler = (
     body: TaskBody<T>,
     options: TaskOptions = {}
   ): TaskHandle<T> => {
-    if (!id) throw new Error('Invalid task id');
+    if (!validIdentityPart(id)) throw new Error('Invalid task id');
     const tick = getGame().time;
     const key = registryKey(owner, id);
     const existing = registry.get(key);
@@ -553,9 +566,9 @@ export const createTaskScheduler = (
   };
 
   /**
-   * 写入 owner/id 的记录。只用路径写入：MemoryManager 在修改前预检路径与值，非法的 owner 或 id
-   * （例如 __proto__）直接抛错且不标脏；回调式 commit 则要到 end 才整体校验，一个非法键会阻断
-   * 整串 Memory 写盘。owner 条目缺失时先提交完整对象，路径写入不会自动创建中间容器。
+   * 写入 owner/id 的记录。只用路径写入，MemoryManager 在修改前预检路径与值；
+   * 身份字段已在入口校验，避免路径失败造成任务无记录。owner 条目缺失时先提交
+   * 完整对象，路径写入不会自动创建中间容器。
    */
   const writeRecord = (
     accessor: MemoryAccessor<TaskRecords>,
@@ -574,8 +587,9 @@ export const createTaskScheduler = (
     id: string
   ): void => {
     const bucket = accessor.get([owner]);
-    if (bucket === undefined || !(id in bucket)) return;
-    accessor.remove([owner, id]);
+    if (bucket === undefined) return;
+    if (id in bucket) accessor.remove([owner, id]);
+    // 若上次已删 id、随后删除空 owner 失败，重试仍须把空 owner 清理掉。
     if (Object.keys(accessor.get([owner]) ?? {}).length === 0) accessor.remove([owner]);
   };
 
@@ -584,23 +598,25 @@ export const createTaskScheduler = (
    * 登记时会被覆盖；读取只遍历分区一次，之后不再全量扫描。
    */
   const loadInherited = (accessor: MemoryAccessor<TaskRecords>, tick: number): void => {
-    inherited = new Map();
-    inheritedSince = tick;
     const data = accessor.query();
+    const loaded = new Map<string, { owner: string; id: string; resets: number }>();
     for (const owner of Object.keys(data)) {
       const bucket = data[owner];
       for (const id of Object.keys(bucket)) {
         const resets = bucket[id];
         if (Number.isInteger(resets) && resets >= 0)
-          inherited.set(registryKey(owner, id), { owner, id, resets });
+          loaded.set(registryKey(owner, id), { owner, id, resets });
       }
     }
+    // 查询或枚举失败时不发布半成品，下次 persist 才能重试完整装载。
+    inherited = loaded;
+    inheritedSince = tick;
   };
 
   /**
    * 在 MemoryHost 的写入阶段把待处理的记录落到分区：先删除已结束实例的记录，再登记新实例，
    * 最后清理超过 retainTicks 仍无人认领的旧记录。没有待处理事项时不申请分区、不标脏，空闲
-   * tick 只有几次长度判断。申请或写入失败只告警，待处理事项保留到下一次 persist。
+   * tick 只有几次长度判断。申请或路径操作失败只告警，待处理事项保留到下一次 persist。
    *
    * 登记规则：同键在上一 global 结束时仍有存续实例（inherited 中有记录），本实例的 reset 次数
    * 即为旧值加一；超过 MAX_GLOBAL_RESTARTS 时本实例直接以 failed 结束（此时它尚未被驱动过，
@@ -628,22 +644,35 @@ export const createTaskScheduler = (
       records = accessor;
     }
     const target = accessor;
-    if (!inherited) loadInherited(target, tick);
+    if (!inherited) {
+      try {
+        loadInherited(target, tick);
+      } catch (error) {
+        reportPersistError(error);
+        return;
+      }
+    }
     const known = inherited!;
-    for (const entry of pendingRemovals.values())
-      tryWrite(() => removeRecord(target, entry.owner, entry.id));
-    pendingRemovals.clear();
+    for (const [key, entry] of pendingRemovals)
+      if (tryWrite(() => removeRecord(target, entry.owner, entry.id)))
+        pendingRemovals.delete(key);
     const registrations = pendingRegistrations;
     pendingRegistrations = [];
     for (const entry of registrations) {
       if (entry.record !== 'pending') continue;
-      entry.record = 'none';
       const key = registryKey(entry.owner, entry.id);
       // 登记前已经结束（例如被取消）或被释放的实例不需要记录；同键旧记录（若有）保留，
       // 由之后同键实例的登记或 retainTicks 后的清理处理。
-      if (!isActive(entry.state) || registry.get(key) !== entry) continue;
+      if (!isActive(entry.state) || registry.get(key) !== entry) {
+        entry.record = 'none';
+        continue;
+      }
+      // 同键旧记录尚未删掉时先重试删除，防止后续重试误删新登记的实例。
+      if (pendingRemovals.has(key)) {
+        pendingRegistrations.push(entry);
+        continue;
+      }
       const previous = known.get(key);
-      known.delete(key);
       const resets = previous === undefined ? 0 : previous.resets + 1;
       if (resets > MAX_GLOBAL_RESTARTS) {
         // 借 capture 规范化一条合成故障：与普通任务失败走同一报告出口与堆栈格式。
@@ -661,16 +690,24 @@ export const createTaskScheduler = (
         );
         entry.failure = blocked.ok ? undefined : blocked.failure;
         finish(entry, 'failed');
-        tryWrite(() => removeRecord(target, entry.owner, entry.id));
+        entry.record = 'none';
+        known.delete(key);
+        if (!tryWrite(() => removeRecord(target, entry.owner, entry.id)))
+          pendingRemovals.set(key, entry);
         continue;
       }
-      if (tryWrite(() => writeRecord(target, entry.owner, entry.id, resets)))
+      if (tryWrite(() => writeRecord(target, entry.owner, entry.id, resets))) {
         entry.record = 'stored';
+        known.delete(key);
+      } else pendingRegistrations.push(entry);
     }
     if (purgeDue) {
-      for (const { owner, id } of known.values())
-        tryWrite(() => removeRecord(target, owner, id));
-      known.clear();
+      for (const [key, { owner, id }] of known) {
+        // 登记暂时失败的活跃实例仍认领这条旧记录，不能把它按孤儿清理。
+        const entry = registry.get(key);
+        if (entry?.record === 'pending' && isActive(entry.state)) continue;
+        if (tryWrite(() => removeRecord(target, owner, id))) known.delete(key);
+      }
     }
   };
 
@@ -718,7 +755,7 @@ export const createTaskScheduler = (
 
   return {
     bind: (owner: string): TaskScheduler => {
-      if (!owner) throw new Error('Invalid task owner');
+      if (!validIdentityPart(owner)) throw new Error('Invalid task owner');
       return {
         submit: (id, body, taskOptions) =>
           submitFor(owner, id, body, taskOptions),

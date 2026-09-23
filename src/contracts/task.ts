@@ -124,7 +124,8 @@ export interface TaskOptions {
 /**
  * 按 owner 绑定后的调度入口；业务代码通过 ModuleContext.tasks 或 PluginContext.tasks
  * 取得，不直接持有 TaskHost。owner 已经把不同模块的任务隔离在各自的命名空间里，
- * 因此 id 只需要在同一 owner 内唯一。
+ * 因此 id 只需要在同一 owner 内唯一。owner 与 id 也用作持久记录的路径段，须为非空
+ * 字符串，不能包含 NUL，也不能是 __proto__、prototype 或 constructor。
  */
 export interface TaskScheduler {
   /**
@@ -134,7 +135,7 @@ export interface TaskScheduler {
    * body/options 被忽略。因此调用方可以每 tick 无条件调用：已完成的结果不会被重算，
    * 失败与过期保持可见。只有不存在实例时才调用 body 创建新实例（deadlineTicks 从这次
    * 创建起算）；body 在调用方的上下文中同步执行一次以取得生成器，body 本身抛错会直接
-   * 从 submit 抛出。每次调用都会刷新实例的闲置计时。
+   * 从 submit 抛出。非法 id 在创建实例和调用 body 之前直接抛错。每次调用都会刷新实例的闲置计时。
    */
   submit<T>(id: string, body: TaskBody<T>, options?: TaskOptions): TaskHandle<T>;
   /** 按 id 查询实例句柄并刷新闲置计时；从未提交、已 release 或已被回收时返回 undefined。 */
@@ -155,7 +156,7 @@ export interface TaskScheduler {
  * bind/begin/end 对齐。
  */
 export interface TaskHost {
-  /** 按 owner（模块名/插件 id）派生绑定后的调度入口；对同一 owner 重复调用是安全的。 */
+  /** 按 owner（模块名/插件 id）派生绑定后的调度入口；非法 owner 直接抛错，对同一 owner 重复调用是安全的。 */
   bind(owner: string): TaskScheduler;
   /**
    * 把本 tick 需要持久化的任务记录写入调度器的存储分区：登记新建的实例及其已经经历的

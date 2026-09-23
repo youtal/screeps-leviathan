@@ -164,6 +164,17 @@ describe('TaskScheduler 驱动与调度', () => {
     expect(b.get('work')!.result).toBe('done:2');
   });
 
+  test('包含 NUL 的 owner/id 在入口拒绝，不会碰撞已有任务', () => {
+    const { host } = createHost();
+    const a = host.bind('a');
+    const original = a.submit('b', () => countingTask(0));
+    const body = jest.fn(() => countingTask(0));
+    expect(() => a.submit('b\u0000c', body)).toThrow('Invalid task id');
+    expect(() => host.bind('a\u0000b')).toThrow('Invalid task owner');
+    expect(body).not.toHaveBeenCalled();
+    expect(a.get('b')).toBe(original);
+  });
+
   test('同优先级任务按分片轮转，不会被先提交者永久饿死', () => {
     const { host, step } = createHost();
     const tasks = host.bind('owner');
@@ -844,6 +855,41 @@ describe('TaskScheduler 跨 global 重启记录', () => {
     return { host, tasks, tick, lines, kills: () => kills };
   };
 
+  /**
+   * 在真实 MemoryManager 访问器外只注入指定次数的路径操作故障；其余读写仍走真实分区，
+   * 因而能验证失败后的待办与下一 tick 的持久记录，而不是只断言调用次数。
+   */
+  const failPaths = (
+    inner: MemoryHost,
+    failOn: { query?: number[]; commit?: number[]; remove?: number[] }
+  ) => {
+    const attempts = { query: 0, commit: 0, remove: 0 };
+    const memory: MemoryHost = {
+      getStatus: () => inner.getStatus(),
+      begin: (tick) => inner.begin(tick),
+      end: (tick) => inner.end(tick),
+      bind: (owner) =>
+        new Proxy(inner.bind(owner), {
+          apply(apply, thisArg, args) {
+            const accessor = Reflect.apply(apply, thisArg, args) as object;
+            return new Proxy(accessor, {
+              get(target, property, receiver) {
+                const method = Reflect.get(target, property, receiver);
+                if (property !== 'query' && property !== 'commit' && property !== 'remove') return method;
+                return (...callArgs: unknown[]) => {
+                  attempts[property]++;
+                  if (failOn[property]?.includes(attempts[property]))
+                    throw new Error('transient ' + property + ' failure');
+                  return Reflect.apply(method, target, callArgs);
+                };
+              },
+            });
+          },
+        }),
+    };
+    return { memory, attempts };
+  };
+
   /** 每次分片都触发硬终止的任务体。 */
   const poison = () =>
     (function* (): Generator<void, void, void> {
@@ -917,19 +963,118 @@ describe('TaskScheduler 跨 global 重启记录', () => {
     expect(store.records()?.planner).toBeUndefined();
   });
 
-  test('非法的任务 id 只让该记录写入失败，不阻断存储写盘与任务运行', () => {
+  test('保留路径段在提交前拒绝，合法任务仍正常登记', () => {
     const store = createStore();
     const global = createGlobal(store);
-    let bad: ReturnType<typeof global.tasks.submit> | undefined;
+    const body = jest.fn(() => countingTask(0));
     global.tick(() => {
-      bad = global.tasks.submit('__proto__', () => countingTask(0));
+      for (const id of ['__proto__', 'prototype', 'constructor'])
+        expect(() => global.tasks.submit(id, body)).toThrow('Invalid task id');
       global.tasks.submit('fine', endless());
     });
     expect(store.records()?.planner).toEqual({ fine: 0 });
-    expect(bad!.state).toBe('done');
+    expect(body).not.toHaveBeenCalled();
+    expect(global.host.getStatus()).toEqual({ queued: 0, running: 1 });
+    expect(() => global.host.bind('__proto__')).toThrow('Invalid task owner');
+    expect(() => global.host.bind('prototype')).toThrow('Invalid task owner');
+    expect(() => global.host.bind('constructor')).toThrow('Invalid task owner');
     expect(
       global.lines.filter((line) => line.includes('task records not persisted'))
-    ).toHaveLength(1);
+    ).toHaveLength(0);
+  });
+
+  test('登记路径首次失败后重试，并沿用上一 global 的 reset 次数', () => {
+    const store = createStore();
+    const first = createGlobal(store);
+    first.tick(() => first.tasks.submit('job', endless()));
+    expect(store.records()?.planner?.job).toBe(0);
+
+    const inner = createMemoryManager({
+      logging: createLogging(),
+      platform: store.platform,
+    });
+    const { memory, attempts } = failPaths(inner, { commit: [1] });
+    const second = createGlobal(store, { memory });
+    second.tick(() => second.tasks.submit('job', endless()));
+    expect(store.records()?.planner?.job).toBe(0);
+    second.tick(() => second.tasks.get('job'));
+    expect(store.records()?.planner?.job).toBe(1);
+    expect(attempts.commit).toBe(2);
+  });
+
+  test('删除 id 后清理空 owner 失败，下一次 persist 继续清理', () => {
+    const store = createStore();
+    const inner = createMemoryManager({
+      logging: createLogging(),
+      platform: store.platform,
+    });
+    const { memory, attempts } = failPaths(inner, { remove: [2] });
+    const global = createGlobal(store, { memory });
+    global.tick(() => global.tasks.submit('job', endless()));
+    global.tick(() => global.tasks.release('job'));
+    expect(store.records()?.planner).toEqual({});
+    global.tick();
+    expect(store.records()?.planner).toBeUndefined();
+    expect(attempts.remove).toBe(3);
+  });
+
+  test('旧记录删除失败时延后同键新实例登记，避免重试误删新记录', () => {
+    const store = createStore();
+    const inner = createMemoryManager({
+      logging: createLogging(),
+      platform: store.platform,
+    });
+    const { memory, attempts } = failPaths(inner, { remove: [1] });
+    const global = createGlobal(store, { memory });
+    global.tick(() => global.tasks.submit('job', endless()));
+    global.tick(() => {
+      global.tasks.release('job');
+      global.tasks.submit('job', endless());
+    });
+    expect(store.records()?.planner?.job).toBe(0);
+    expect(attempts.commit).toBe(1);
+    expect(attempts.remove).toBe(1);
+    global.tick();
+    expect(store.records()?.planner?.job).toBe(0);
+    expect(attempts.commit).toBe(2);
+    expect(attempts.remove).toBe(3);
+    expect(global.tasks.get('job')?.state).toBe('running');
+  });
+
+  test('首次读取已有记录失败后重试，仍继承原 reset 次数', () => {
+    const store = createStore();
+    const first = createGlobal(store);
+    first.tick(() => first.tasks.submit('job', endless()));
+    const inner = createMemoryManager({
+      logging: createLogging(),
+      platform: store.platform,
+    });
+    const { memory, attempts } = failPaths(inner, { query: [1] });
+    const second = createGlobal(store, { memory });
+    second.tick(() => second.tasks.submit('job', endless()));
+    expect(store.records()?.planner?.job).toBe(0);
+    second.tick(() => second.tasks.get('job'));
+    expect(store.records()?.planner?.job).toBe(1);
+    expect(attempts.query).toBe(2);
+  });
+
+  test('无人认领的旧记录清理失败后继续重试', () => {
+    const store = createStore();
+    const first = createGlobal(store);
+    first.tick(() => first.tasks.submit('orphan', endless()));
+    const inner = createMemoryManager({
+      logging: createLogging(),
+      platform: store.platform,
+    });
+    const { memory, attempts } = failPaths(inner, { remove: [1] });
+    const second = createGlobal(store, { memory, retainTicks: 2 });
+    second.tick(() => second.tasks.submit('other', endless()));
+    second.tick(() => second.tasks.get('other'));
+    second.tick(() => second.tasks.get('other'));
+    expect(store.records()?.planner).toEqual({ orphan: 0, other: 0 });
+    second.tick(() => second.tasks.get('other'));
+    expect(store.records()?.planner).toEqual({ other: 0 });
+    expect(attempts.remove).toBe(2);
   });
 
   test('存储不可用时跳过记录并只告警一次，任务照常运行', () => {

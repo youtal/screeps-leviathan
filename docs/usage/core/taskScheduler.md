@@ -115,10 +115,12 @@ function* planLayout(roomName: string) {
 ## 规则与注意事项
 
 - **id 只需要在同一模块内唯一**：不同模块（不同 owner）用相同 id 不会冲突，不需要自己拼前缀。
+- **身份字段校验**：`submit(id)` 的 id 与宿主 `bind(owner)` 的 owner 必须是非空字符串，不能包含 NUL，也不能是 `__proto__`、`prototype`、`constructor`；非法值在创建任务前抛错。`get`/`release` 不创建任务或写入记录。
 - **必须提供 label 的情形**：如果 `id` 按业务动态拼接（例如按房间名区分任务实例，如上面例子里的 `'layout:W1N1'`），必须显式传 `label`（如 `'layout'`）。`label` 会被当作 Profiler 标签的一部分，必须来自固定且有限的集合；不提供时缺省用 `id` 本身，动态 id 会造成 Profiler 报告里的标签无界增长。
 - **实例会一直保留，直到被释放或回收**：完成的结果、失败与过期都占用 heap。不再需要时调用 `release`；连续 `retainTicks`（缺省 1000）个 tick 没有被 `submit`/`get` 触碰的实例会被自动回收（活跃的先取消），按上面的方式每 tick 轮询的实例不受影响。
 - **不保证完成时间**：插件留下的余量少、bucket 低于门限、或被更高优先级任务持续占用时，一个任务可能连续多个 tick 都停留在 `'queued'`；调用方必须容忍“暂时没有结果”。
 - **硬终止后的恢复**：若某一片在执行中被 CPU 硬终止，下一次驱动会丢弃该生成器并从任务体重新开始一次；再次被中断则以 `'failed'` 结束，`failure.message` 注明被硬终止中断的次数。`deadlineTicks` 对被中断的任务同样有效。
 - **连续多次 global reset 仍未完成的任务会失败**：调度器在内核保留的存储分区（owner `framework`、分区 `tasks`）里记录每个存续实例经历的 global reset 次数。同一 id 的实例连续第 3 次 reset 后重新提交时直接以 `'failed'` 结束，`failure.message` 为 `Task <id> restarted by 3 global resets without completing`，用于阻止“每次都让 global 重建”的任务无限重来。失败后记录即删除：修复代码重新部署后，下一次 reset 会给它新的机会；想立即重试就 `release(id)`。这个判定无法区分是哪个任务导致了重建，同一时段存续的其他任务也会计数；需要跨越多次 reset 的长任务应自行保存检查点。
 - **存储开销**：创建或结束一个任务实例会让上述分区在当 tick 或下一 tick 变脏一次；长期运行的实例不产生写入。
+- **存储暂时失败**：分区绑定、首次读取或单条路径操作失败时，调度器告警并在下一次 `persist` 重试未完成的登记或删除；任务本身仍按常规调度，存储恢复前的 global reset 保护可能缺失。
 - **global reset 后自动恢复**：任务状态只在 heap，reset 后任务注册表清空。按上面“每 tick 提交直到拿到结果”的方式使用即可自然重新开始，不需要额外处理。

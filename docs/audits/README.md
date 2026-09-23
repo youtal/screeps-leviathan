@@ -28,4 +28,4 @@
 
 - [2026-09-23 TaskScheduler 工作区交付物审计](./2026-09-23-taskScheduler.md)：基线 `21fb190` 加 `feat/task-scheduler` 未提交工作区。T01–T16：无 P1；P2 为任务预算以 tickLimit 为界、硬终止重启分支的两处缺陷（重建无错误边界、跳过 deadline）、终态语义与“每 tick 无条件 submit”冲突；附单分片开销实测。同日整改关闭 T01–T11、T13–T16（任务只用空闲常规额度并支持单任务软上限、submit 只保证实例存在并新增 release、插件释放时回收任务），T12 部分关闭；新增私服场景 `leviathan-tasks`。第二轮按决定实现跨 global 重启记录与 bucket 盈余额度，并按建议关闭 T12（任务驱动期间事件不进入插件）。
 
-- [2026-09-23 全项目审计：能力层迁移后](./2026-09-23-project-current.md)：基线 `fd602cc`；覆盖分层、Runtime/Framework、Memory、TaskScheduler、RoomShortcuts、构建供应链、测试与文档。新增 J01–J03 三项 P3（任务身份校验、记录操作重试、NUL 注册键碰撞），J04–J05 两项 P4（文档同步与 App 模块文档），附四组真实引擎场景和两棵依赖树扫描。
+- [2026-09-23 全项目审计：能力层迁移后](./2026-09-23-project-current.md)：基线 `fd602cc`；覆盖分层、Runtime/Framework、Memory、TaskScheduler、RoomShortcuts、构建供应链、测试与文档。新增 J01–J03 三项 P3（任务身份校验、记录操作重试、NUL 注册键碰撞；后续已关闭），J04–J05 两项 P4（文档同步与 App 模块文档），附四组真实引擎场景和两棵依赖树扫描。
