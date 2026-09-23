@@ -2,7 +2,8 @@
  * 文件摘要：验证运行时环境工厂（@/core/runtime）的注入契约。
  *
  * 覆盖模块：createEnvMethods（env 查询访问器与带模块名前缀的 logger）与
- * createRuntime（按模块名创建独立 env，同时共享同一个 bus 与 profiler）。
+ * createRuntime（按模块名创建独立 env，同时共享同一个 bus 与 profiler；TaskScheduler
+ * 的配置透传、按模块名绑定与实例替换）。
  * 覆盖边界：env 查询返回的必须是 Game 上的对象引用、日志带 [模块名] 前缀、
  * 模块间通过共享总线通信而 env 互不共用、profiler 默认不写 global Memory、
  * 可通过 ProfilerStorage 把统计落点与标脏动作整体委托给宿主。
@@ -17,7 +18,7 @@
 import { createBus } from '@/core/eventBus';
 import { createLogging } from '@/core/logger';
 import { createRuntime, createEnvMethods } from '@/core/runtime';
-import type { Profiler } from '@/contracts';
+import type { Profiler, TaskHost } from '@/contracts';
 import type { ProfilerMemory } from '@/core/profiler';
 
 /**
@@ -177,7 +178,7 @@ describe('Runtime context factory', () => {
       logging: { notifyInterval: -1 },
       profiler: { enabled: true, storage: { getMemory } },
     }, supplied);
-    for (const key of ['logging', 'bus', 'memory', 'profiler', 'errorMapper'] as const)
+    for (const key of ['logging', 'bus', 'memory', 'profiler', 'errorMapper', 'tasks'] as const)
       expect(runtime[key]).toBe(supplied[key]);
     expect(runtime.createContext('Worker').profiler).toBe(supplied.profiler);
     expect(getMemory).not.toHaveBeenCalled();
@@ -286,5 +287,77 @@ describe('Runtime context factory', () => {
     expect(memory.custom).toEqual({ totalTime: 3, selfTime: 3, calls: 1 });
     expect(markDirty).toHaveBeenCalledTimes(1);
     expect((Memory as any).profiler).toBeUndefined();
+  });
+});
+
+describe('Runtime task scheduler', () => {
+  /** 只提供 TaskScheduler 读取的字段：time 用于提交与闲置计时，cpu 供 drive 读取 bucket 与耗时。 */
+  const taskGame = () =>
+    ({ time: 5, cpu: { getUsed: () => 0, bucket: 10000 } }) as unknown as Game;
+
+  beforeEach(() => {
+    installGame();
+  });
+
+  it('binds context tasks to the module name on the shared TaskHost', () => {
+    const game = taskGame();
+    const runtime = createRuntime({ platform: { getGame: () => game }, profiler: false });
+    const handle = runtime.createContext('Planner').tasks!.submit('job', function* () {
+      return 1;
+    });
+    expect(runtime.tasks.bind('Planner').get('job')).toBe(handle);
+    expect(runtime.tasks.bind('Other').get('job')).toBeUndefined();
+    // 模块名同时是任务 owner，空名在派生上下文时即被拒绝。
+    expect(() => runtime.createContext('')).toThrow('Invalid task owner');
+  });
+
+  it('gives the task scheduler the shared MemoryHost for cross-global records', () => {
+    const game = taskGame();
+    const platform = {
+      readRaw: jest.fn(() => '{}'),
+      writeRaw: jest.fn(),
+      getTick: jest.fn(() => 5),
+    };
+    const runtime = createRuntime({
+      platform: { getGame: () => game },
+      memoryManager: { platform },
+      profiler: false,
+    });
+    runtime.memory.begin(5);
+    runtime.createContext('Planner').tasks!.submit('job', function* () {
+      yield;
+    });
+    runtime.tasks.persist(5);
+    runtime.memory.end(5);
+    const saved = JSON.parse(platform.writeRaw.mock.calls[0][0]);
+    expect(saved.memoryManager.partitions.framework.tasks.payload).toEqual({
+      Planner: { job: 0 },
+    });
+  });
+
+  it('forwards task scheduler options and prefers a supplied TaskHost', () => {
+    expect(() =>
+      createRuntime({ profiler: false, taskScheduler: { retainTicks: 0 } })
+    ).toThrow('Invalid retain ticks');
+    const bind = jest.fn(() => ({
+      submit: jest.fn(),
+      get: jest.fn(),
+      release: jest.fn(),
+    }));
+    const supplied: TaskHost = {
+      bind: bind as unknown as TaskHost['bind'],
+      persist: jest.fn(),
+      drive: jest.fn(),
+      releaseOwner: jest.fn(),
+      getStatus: () => ({ queued: 0, running: 0 }),
+    };
+    // 替换项优先：非法的创建配置不会被求值。
+    const runtime = createRuntime(
+      { profiler: false, taskScheduler: { retainTicks: 0 } },
+      { tasks: supplied }
+    );
+    expect(runtime.tasks).toBe(supplied);
+    runtime.createContext('Planner');
+    expect(bind).toHaveBeenCalledWith('Planner');
   });
 });

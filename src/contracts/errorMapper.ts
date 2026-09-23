@@ -12,7 +12,10 @@
  * 这里只声明接口；同步调用限制、映射失败处理和诊断输出由 ErrorMapper 实现。
  */
 /**
- * 诊断使用的执行位置；commit 是意图提交边界，framework 表示不属于插件的内核工作。
+ * 诊断使用的执行位置；commit 是意图提交边界，framework 表示不属于插件的内核工作，
+ * tasks.drive 专指 TaskHost.drive 这一步——Framework 在收尾阶段之后驱动跨 tick 任务，
+ * 该阶段不允许订阅或提交意图，语义上与 framework 一致，只是拆出独立的诊断与 Profiler
+ * 标签，避免任务调度的耗时和故障与 tickEnd 阶段的健康统计混在一起。
  * 该值同时是权限判据：订阅只允许在 setup，意图只允许在 tickExecute，Kernel 据此拒绝越权调用。
  */
 export type Phase =
@@ -22,7 +25,8 @@ export type Phase =
   | 'commit'
   | 'tickEnd'
   | 'dispose'
-  | 'framework';
+  | 'framework'
+  | 'tasks.drive';
 
 /** 单次调用的可序列化诊断；保留原始堆栈，在映射可用时额外附带源码位置。 */
 export interface PluginFailure {

@@ -3,11 +3,12 @@
  *
  * 模块角色：core/runtime 的基础能力装配实现，是 Core 同级模块具体工厂的集中调用处。
  *
- * 主要功能：创建或接受日志、总线、存储、Profiler 和错误映射实例，返回完整 CoreRuntime 与上下文工厂。
+ * 主要功能：创建或接受日志、总线、存储、Profiler、错误映射和任务调度实例，返回完整
+ * CoreRuntime 与上下文工厂。
  *
  * 实现过程：先按 RuntimeOverrides 选择已有实例，未替换的能力按分组配置创建；
  * 将日志工厂传给消费者，createContext 为模块派生日志环境、
- * 绑定存储申请入口，同时复用同一总线和 Profiler。
+ * 绑定存储申请入口与任务调度入口，同时复用同一总线和 Profiler。
  *
  * 技术要点：Game 通过函数延迟获取，不跨 tick 缓存；配置 profiler: false 不创建统计器，
  * 实例替换优先于配置，overrides.profiler: null 明确禁用。
@@ -18,6 +19,7 @@ import { createErrorMapper } from '@/core/errorMapper';
 import { createLogging } from '@/core/logger';
 import { createMemoryManager } from '@/core/memoryManager';
 import { createProfiler } from '@/core/profiler';
+import { createTaskScheduler } from '@/core/taskScheduler';
 import { DEFAULT_PROFILER_ENABLE } from '@/setting';
 import { createEnvMethods } from './env';
 import type {
@@ -105,6 +107,21 @@ export const createRuntime = (
   /** ErrorMapper 只接收已创建的日志实例；其计时适配由 Framework 在消费时设置。 */
   const errorMapper =
     overrides.errorMapper ?? createErrorMapper(logging, options.errorMapper);
+  /**
+   * TaskScheduler 排在 errorMapper 之后创建：它依赖 Logger（自身诊断）、ErrorMapper
+   * （任务失败的堆栈捕获与映射）、Profiler（任务分片计时）和 MemoryHost（跨 global 的重启
+   * 记录，只经 MemoryHost 契约申请分区），四者此时都已就绪。不依赖 EventBus。
+   */
+  const tasks =
+    overrides.tasks ??
+    createTaskScheduler({
+      ...options.taskScheduler,
+      getGame,
+      logging,
+      errorMapper,
+      profiler,
+      memory,
+    });
 
   const createContext = (
     moduleName: string,
@@ -130,6 +147,7 @@ export const createRuntime = (
       ),
       profiler,
       memory: memory.bind(moduleName),
+      tasks: tasks.bind(moduleName),
     };
     return context;
   };
@@ -141,6 +159,7 @@ export const createRuntime = (
     memory,
     profiler,
     errorMapper,
+    tasks,
     createContext,
   };
 };

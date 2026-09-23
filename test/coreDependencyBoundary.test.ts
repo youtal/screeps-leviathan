@@ -3,8 +3,8 @@
  *
  * 扫描 `src/core/<module>/` 中的 import/export 声明并解析别名与相对路径。同一模块内部
  * 可以自由引用；跨模块具体实现引用一律禁止，唯一例外是 Runtime 可按既定前序集合装配
- * logger、eventBus、memoryManager、profiler 与 errorMapper。`src/core/index.ts` 只是公共
- * 出口聚合，不参与运行时依赖图。测试只读源码，不执行模块。
+ * logger、eventBus、memoryManager、profiler、errorMapper 与 taskScheduler。
+ * `src/core/index.ts` 只是公共出口聚合，不参与运行时依赖图。测试只读源码，不执行模块。
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
@@ -17,6 +17,7 @@ const RUNTIME_PREDECESSORS = new Set([
   'memoryManager',
   'profiler',
   'errorMapper',
+  'taskScheduler',
 ]);
 
 const collectSources = (dir: string): string[] =>

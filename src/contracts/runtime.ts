@@ -5,8 +5,9 @@
  *
  * 主要功能：声明完整 CoreRuntime、业务可用的 ModuleContext，以及按模块名派生上下文的方法。
  *
- * 实现过程：CoreRuntime 汇集日志、总线、存储、计时和错误处理接口；createContext 接收模块名与
- * 日志选项，返回带环境、共享总线、可空 Profiler 和可选存储申请入口的上下文。
+ * 实现过程：CoreRuntime 汇集日志、总线、存储、计时、错误处理和任务调度接口；createContext
+ * 接收模块名与日志选项，返回带环境、共享总线、可空 Profiler、可选存储申请入口和可选任务
+ * 调度入口的上下文。
  *
  * 技术要点：只依赖其他契约；readonly 限制字段赋值，不冻结实例内部状态。
  * getGame 要在调用时取得游戏对象，消费者不可跨 tick 保存结果；本文件不创建任何具体能力。
@@ -19,6 +20,7 @@ import type { ApplyMemoryAccessor } from './memory';
 import type { LoggerFactory } from './logging';
 import type { MemoryHost } from './memory';
 import type { ErrorMapper } from './errorMapper';
+import type { TaskHost, TaskScheduler } from './task';
 /**
  * 派生模块上下文时的可选配置。
  *
@@ -55,6 +57,13 @@ export interface ModuleContext extends EnvContext {
    * 特殊宿主手工构造不含存储能力的上下文。
    */
   memory?: ApplyMemoryAccessor;
+  /**
+   * 按模块名绑定的任务调度入口。createRuntime 总会提供，可选的原因与 memory 一致：
+   * 允许测试替身或特殊宿主手工构造不含任务调度能力的上下文。模块名与插件 id 共用
+   * 同一个 owner 命名空间，因此不能为空；普通模块没有插件生命周期，不再查询的任务由
+   * 调度器的闲置回收释放。
+   */
+  tasks?: TaskScheduler;
 }
 
 export type CreateModuleContext = (
@@ -76,5 +85,6 @@ export interface CoreRuntime {
   readonly memory: MemoryHost;
   readonly profiler: Profiler | null;
   readonly errorMapper: ErrorMapper;
+  readonly tasks: TaskHost;
   readonly createContext: CreateModuleContext;
 }

@@ -15,6 +15,7 @@ import type { ModuleContext, CoreRuntime } from './runtime';
 import type { CpuBudget, GameIntent, IntentReceipt } from './intent';
 import type { PluginFailure } from './errorMapper';
 import type { ApplyMemoryAccessor } from './memory';
+import type { TaskScheduler } from './task';
 /** 注册描述；依赖字段引用插件 ID，provides 字段声明服务名，两者并非同一命名空间。 */
 export interface PluginManifest {
   /**
@@ -48,6 +49,14 @@ export interface PluginContext extends ModuleContext {
   readonly tick: number;
   readonly events: ModuleContext['bus'];
   readonly memory: ApplyMemoryAccessor;
+  /**
+   * 按本插件 id 绑定的任务调度入口，来自 CoreRuntime.tasks.bind(pluginId)。与 memory
+   * 一样由 Framework 在派生 Context 时直接从 Runtime 重新绑定，不依赖 ModuleContext
+   * 上可选的同名字段，从而保证这里始终是非可选的、已绑定到当前插件的调度入口。
+   * 插件被释放（停用、熔断、卸载、替换或 setup 失败）时，Framework 通过
+   * TaskHost.releaseOwner 释放它提交的全部任务。
+   */
+  readonly tasks: TaskScheduler;
   readonly cpu: CpuBudget;
   readonly services: {
     /**

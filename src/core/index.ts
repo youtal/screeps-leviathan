@@ -3,7 +3,8 @@
  *
  * 模块角色：Core 层的统一导出入口，汇集基础能力的工厂和公开类型。
  *
- * 主要功能：提供 EventBus、ErrorMapper、Framework、Logger、MemoryManager、Profiler 和 Runtime 的出口。
+ * 主要功能：提供 EventBus、ErrorMapper、Framework、Logger、MemoryManager、Profiler、Runtime 和
+ * TaskScheduler 的出口。
  *
  * 实现过程：逐个转发子模块入口，使其公开符号可由 Core 入口引用。
  *
@@ -17,3 +18,4 @@ export * from './logger';
 export * from './memoryManager';
 export * from './profiler';
 export * from './runtime';
+export * from './taskScheduler';

@@ -3,7 +3,7 @@
  *
  * 模块角色：contracts 的统一类型入口，供 Core 与业务模块引用共同约定。
  *
- * 主要功能：汇总日志、环境、Runtime、Profiler、事件、错误、意图、插件和存储协议。
+ * 主要功能：汇总日志、环境、Runtime、Profiler、事件、错误、意图、插件、存储和任务调度协议。
  *
  * 实现过程：逐项使用 export type 转发各协议文件，让调用方从同一入口取得接口与类型。
  *
@@ -20,3 +20,4 @@ export type * from './errorMapper';
 export type * from './intent';
 export type * from './plugin';
 export type * from './memory';
+export type * from './task';
