@@ -1,6 +1,6 @@
 # 能力层设计
 
-交付状态：设计已形成；`src/capabilities/` 目录、服务令牌运行时支持、既有能力模块迁移与自动化边界测试均未交付。目标路径为 `src/capabilities/`。下文接口是设计协议，不是已发布 API。
+交付状态：部分交付。`ServiceToken<T>`、`defineService<T>` 与 Framework 的令牌式 `get/provide` 已交付，RoomShortcuts 已发布公共查询接口与令牌；`src/capabilities/` 目录、既有能力模块迁移、`services.optional(token)` 和自动化层间边界测试未交付。目标路径为 `src/capabilities/`；下文目录示例是设计协议。
 
 ## 1. 定位与目标
 
@@ -57,7 +57,7 @@ export interface RoomShortcuts {
 export const RoomShortcutsService = defineService<RoomShortcuts>('roomShortcuts');
 ```
 
-`services.get`、`services.provide` 各有一个接受令牌的重载，运行时按 `token.name` 查表，同时保留接受字符串的原有重载（详见 [公共契约设计](../contracts.md)）。`manifest.provides` 声明服务名、`requires` 声明插件 id，两者是不同的命名空间，令牌不改变这一点，也不合并两者。
+`services.get`、`services.provide` 各有一个接受令牌的重载，运行时按 `token.name` 查表，同时保留接受字符串的原有重载（详见 [公共契约设计](../contracts.md)）。令牌式 `provide` 的值类型由令牌固定，错误值不能反向拓宽令牌的类型参数。`manifest.provides` 声明服务名、`requires` 声明插件 id，两者是不同的命名空间，令牌不改变这一点，也不合并两者。
 
 ### 2.3 消费方式
 
@@ -84,12 +84,12 @@ framework.register({
 ## 4. 风险与残留耦合
 
 - **`requires`/令牌命名空间脱钩**：见 §2.3。写错或漏写 `requires` 里的插件 id 时类型检查不会报警，只会在运行时表现为服务不可用；令牌只保证 `services.get` 的返回类型正确，不保证依赖声明本身正确。
-- **目录迁移的影响面**：把现有能力模块移入 `capabilities/` 会牵动 `@modules/*` 别名、文档路径与测试导入，也会牵动 [根开发规范](../../../AGENTS.md) §6 用 `src/modules/roomShortcuts/` 作的路径映射举例——该文件的示例文本按规范 §1 不能在没有用户明确授权时自行放宽或改写。
+- **目录迁移的影响面**：把现有能力模块移入 `capabilities/` 会牵动 `@modules/*` 别名、文档路径、测试导入与源码注释中的路径；模块文档须按 [根开发规范](../../../AGENTS.md) §7 与源码目录同步移动。
 
 ## 5. 待决设计事项
 
-1. 目录是否真的迁移，以及迁移时机（现在，还是等 goto 落地）；层级名称用 `capabilities` 还是别的（`platform`、`services`）。迁移一旦发生，需同步更新 AGENTS.md §6 的路径映射举例，并征得用户确认。
+1. 目录是否真的迁移，以及迁移时机（现在，还是等 goto 落地）；层级名称用 `capabilities` 还是别的（`platform`、`services`）。迁移一旦发生，须同步更新模块文档、导航、测试导入和源码注释中的路径。
 2. 是否引入 `services.optional`，还是首版只提供必需依赖的令牌读取。
-3. 令牌是否同时用于 `manifest.provides` 的声明（涉及清单字段的类型变化）。
+3. 令牌是否同时用于 `manifest.provides` 的声明（目前使用 `RoomShortcutsService.name`，清单字段仍是字符串数组）。
 4. `requires`/令牌的残留耦合（§4）是否需要专门弥补，例如让 `defineService` 携带所属插件 id、或提供额外的静态检查。
 5. 是否为 `capabilities → modules` 的单向依赖规则补一条自动化边界扫描（参照 [`test/coreDependencyBoundary.test.ts`](../../../test/coreDependencyBoundary.test.ts) 与 [`test/memoryBoundary.test.ts`](../../../test/memoryBoundary.test.ts) 的模式），使其具备和 Core、Memory 边界同等的阻断级别检查。

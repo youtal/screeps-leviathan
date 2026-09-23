@@ -49,22 +49,19 @@ export const loop = framework.loop;
 
 ```ts
 import { framework } from '@/app';
-import { createRoomShortcuts } from '@/modules/roomShortcuts/createRoomShortcuts';
+import { RoomShortcutsService } from '@/modules/roomShortcuts';
 
 framework.register({
   manifest: { id: 'observer', version: 1, requires: ['roomShortcuts'] },
   onTickExecute(context) {
-    const shortcuts =
-      context.services.get<ReturnType<typeof createRoomShortcuts>>(
-        'roomShortcuts'
-      );
+    const shortcuts = context.services.get(RoomShortcutsService);
     const spawns = shortcuts.getSpawn('W1N1');
     context.env.log.info('spawn count: ' + spawns.length);
   },
 });
 ```
 
-`requires` 填写提供服务的插件 id；`services.get` 填写服务名。二者允许不同。独占服务必须列入 `manifest.provides`，并在 setup 中通过 `services.provide(name, value)` 发布。查询接口与结果语义见 [RoomShortcuts 使用说明](../modules/roomShortcuts.md)。
+`requires` 填写提供服务的插件 id；令牌的 `name` 是服务名，二者允许不同。独占服务必须列入 `manifest.provides`，并在 setup 中通过 `services.provide(token, value)` 或原有字符串重载发布。令牌只在类型层约束服务接口，不改变运行时依赖检查。查询接口与结果语义见 [RoomShortcuts 使用说明](../modules/roomShortcuts.md)。
 
 ## 插件管理
 
@@ -105,7 +102,7 @@ Context 可以跨 tick 保留；停用后不应继续使用，Game 对象不能�
 
 ### 读取服务
 
-在使用时调用 `services.get`，不要在 setup 中保存返回的服务对象。服务对象属于提供者的某次激活，提供者重新 setup 后，旧对象已经释放：事件订阅已取消，数据不再更新。
+在使用时调用 `services.get`，不要在 setup 中保存返回的服务对象。令牌与字符串读取遵守同一规则：服务对象属于提供者的某次激活，提供者重新 setup 后，旧对象已经释放，事件订阅已取消、数据不再更新。
 
 `requires` 的使用者会随提供者停用、熔断、卸载或被替换（同一批命令中先 `unregister` 再 `register` 同一 id）而释放，并在提供者重新可用后重新 setup。`optional` 的使用者不会：可选依赖的提供者重启后，使用者仍在运行，setup 中保存的服务会失效。
 

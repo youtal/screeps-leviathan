@@ -16,6 +16,7 @@ import type { CpuBudget, GameIntent, IntentReceipt } from './intent';
 import type { PluginFailure } from './errorMapper';
 import type { ApplyMemoryAccessor } from './memory';
 import type { TaskScheduler } from './task';
+import type { ServiceToken } from './service';
 /** 注册描述；依赖字段引用插件 ID，provides 字段声明服务名，两者并非同一命名空间。 */
 export interface PluginManifest {
   /**
@@ -59,6 +60,8 @@ export interface PluginContext extends ModuleContext {
   readonly tasks: TaskScheduler;
   readonly cpu: CpuBudget;
   readonly services: {
+    /** 令牌读取推断 T；运行时按 token.name 查表，仍按提供者插件 id 检查依赖。 */
+    get<T>(token: ServiceToken<T>): T;
     /**
      * T 由使用者声明，运行时只校验服务归属与可用性，不验证 T 的结构。
      * 应在使用时调用，不在 setup 中缓存结果：optional 依赖的提供者重启时使用者不会重新
@@ -66,6 +69,8 @@ export interface PluginContext extends ModuleContext {
      * 替换而重新 setup，但同样按使用时读取，以免依赖这一时序细节。
      */
     get<T>(name: string): T;
+    /** 令牌约束提供值的结构；NoInfer 防止错误值反向拓宽令牌的 T。 */
+    provide<T>(token: ServiceToken<T>, value: NoInfer<T>): void;
     /** 仅在当前插件 setup 中发布 manifest.provides 声明的服务；事件回调中调用会被拒绝。 */
     provide<T>(name: string, value: T): void;
   };

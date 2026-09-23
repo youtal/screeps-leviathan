@@ -50,12 +50,13 @@ describe('App composition', () => {
   it('exports the instance loop and initializes RoomShortcuts as a service', () => {
     const { framework } = require('@/app');
     const { loop } = require('@/index');
+    const { RoomShortcutsService } = require('@/modules/roomShortcuts');
     expect(loop).toBe(framework.loop);
     let service: any;
     framework.register({
       manifest: { id: 'consumer', version: 1, requires: ['roomShortcuts'] },
       setup: (context: any) => {
-        service = context.services.get('roomShortcuts');
+        service = context.services.get(RoomShortcutsService);
       },
     });
     loop();

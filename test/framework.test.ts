@@ -24,6 +24,7 @@ import type { ProfilerMemory } from '@/core/profiler/types';
 import type { EnvMethods } from '@/contracts';
 import { createIntentBroker } from '@/core/framework/intentBroker';
 import { createCpuGovernor } from '@/core/framework/cpuGovernor';
+import { defineService } from '@/contracts';
 
 /** 测试可独立创建存储，但仍必须在测试组合边界显式注入 Logger。 */
 const createMemoryManager = (options: Omit<MemoryManagerOptions, 'logging'>) =>
@@ -357,6 +358,38 @@ describe('Framework lifecycle', () => {
     h.framework.enable('a');
     h.next();
     expect(trace[trace.length - 1]).toBe('execute.b');
+  });
+
+  it('resolves a typed service token through the existing ownership and availability checks', () => {
+    const token = defineService<{ count: number }>('counter');
+    const observed: number[] = [];
+    const h = harness([
+      plugin('provider', {
+        manifest: { id: 'provider', version: 1, provides: [token.name] },
+        setup: (context) => context.services.provide(token, { count: 7 }),
+      }),
+      plugin('consumer', {
+        manifest: { id: 'consumer', version: 1, requires: ['provider'] },
+        onTickExecute: (context) => {
+          observed.push(context.services.get(token).count);
+          expect(context.services.get<{ count: number }>('counter').count).toBe(
+            7
+          );
+        },
+      }),
+      plugin('undeclared', {
+        onTickExecute: (context) => {
+          expect(() => context.services.get(token)).toThrow(
+            'Undeclared service dependency: counter'
+          );
+        },
+      }),
+    ]);
+    h.framework.loop();
+    expect(observed).toEqual([7]);
+    h.framework.disable('provider');
+    h.next();
+    expect(observed).toEqual([7]);
   });
 
   /** 钩子抛非 Error 值（字符串）同样要被隔离：故障插件的依赖者跳过执行，无关插件照常运行，且本 tick 的 end 与健康统计仍要完成。 */

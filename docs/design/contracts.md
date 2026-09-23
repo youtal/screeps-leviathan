@@ -1,6 +1,6 @@
 # 跨模块契约设计
 
-交付状态：已交付。契约目录、公共类型抽离、实现显式类型承诺、CoreRuntime、Memory 长期访问器、深路径类型、同步装载错误契约、编译期回归与任务调度契约（`task.ts`，含 `CoreRuntime.tasks`）均已交付。服务令牌（`service.ts`）未交付，设计见下文对应小节。
+交付状态：已交付。契约目录、公共类型抽离、实现显式类型承诺、CoreRuntime、Memory 长期访问器、深路径类型、同步装载错误契约、编译期回归、任务调度契约（`task.ts`，含 `CoreRuntime.tasks`）与服务令牌（`service.ts`）均已交付。
 
 ## 定位与依赖原则
 
@@ -22,7 +22,7 @@
 | `plugin.ts` | 清单、生命周期、上下文、框架配置与管理接口 |
 | `runtime.ts` | CoreRuntime、模块上下文与派生工厂 |
 | `memory.ts` | JSON、深只读、申请配置、长期 Accessor、深路径类型与宿主生命周期端口 MemoryHost（含装载及写入诊断） |
-| `service.ts` | ServiceToken、defineService（未交付） |
+| `service.ts` | ServiceToken 类型与 defineService 令牌创建函数 |
 | `task.ts` | TaskContext、TaskBody、TaskHandle、TaskScheduler、TaskOptions 与宿主生命周期端口 TaskHost |
 
 Profiler 统计记录和存储容器、EventBus 监听器索引、Framework 健康表、TaskScheduler 任务注册表、Goto 缓存及偏好 schema 归各自模块。构造参数包含内部数据结构时保留在模块内，不强制发布所有工厂参数。
@@ -47,7 +47,7 @@ MemoryHost 发布 bind、begin、end、getStatus，构造与 bind 无存储副�
 
 ## 服务令牌协议
 
-`ServiceToken<T>` 把服务名与服务类型绑定在类型层，运行时只是 `{ name: string }`；`defineService<T>(name)` 构造令牌。`services.get`/`services.provide` 在字符串重载之外各增加一个接受令牌的重载，运行时仍按 `name` 查表。是否同时提供 `services.optional(token)`（返回 `T | undefined`，提供者不可用时不抛错）尚未决定。
+`ServiceToken<T>` 把服务名与服务类型绑定在类型层，运行时只是 `{ name: string }`；`defineService<T>(name)` 构造令牌。`services.get`/`services.provide` 在字符串重载之外各有一个接受令牌的重载，运行时仍按 `name` 查表；令牌式 provide 的载荷由令牌类型约束。`services.optional(token)`（返回 `T | undefined`，提供者不可用时不抛错）尚未交付，其未注册提供者时的依赖判定仍待设计。
 
 令牌与 `manifest.requires`/`provides` 是两套独立的命名空间：`requires` 声明插件 id、`provides` 声明服务名，令牌只改变服务名一侧的读取方式，不改变清单字段的语义，也不携带“由哪个插件提供”这条信息。完整设计与消费方式见[能力层设计](./capabilities/README.md)。
 

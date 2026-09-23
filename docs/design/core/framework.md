@@ -1,6 +1,6 @@
 # Leviathan Framework 设计
 
-交付状态：已交付。Framework 协议、Runtime 消费、插件事务、Memory 同步装载错误契约接入、带 tick 归属的 loop 重入锁与任务驱动（TaskHost.drive，见 §8）均已交付。服务令牌读取重载（`services.get`/`provide`/`optional`，见 §5.3）未交付。
+交付状态：已交付。Framework 协议、Runtime 消费、插件事务、Memory 同步分区契约接入、带 tick 归属的 loop 重入锁、任务驱动（TaskHost.drive，见 §8）与服务令牌的 `services.get/provide` 重载均已交付；`services.optional(token)` 未交付。
 
 ## 1. 模块定位
 
@@ -119,7 +119,7 @@ Context 在 setup 时创建并缓存；`tick`、意图队列都在使用时读�
 
 ### 5.3 服务令牌读取
 
-`services.get`、`services.provide` 在接受服务名字符串的重载之外，各增加一个接受 `ServiceToken<T>`（`src/contracts/service.ts`）的重载：运行时按 `token.name` 查表，行为与字符串重载完全一致，只是返回类型由令牌的类型参数决定，调用方不再需要在取值处手写类型断言。
+`services.get`、`services.provide` 在接受服务名字符串的重载之外，各有一个接受 `ServiceToken<T>`（`src/contracts/service.ts`）的重载：运行时按 `token.name` 查表，行为与字符串重载完全一致；读取类型由令牌推断，提供值也须匹配令牌类型。
 
 令牌只改变服务名一侧的读取方式，不改变 §5.1 的上下文缓存规则，也不改变本节前述 `provides`/`requires` 的语义划分：`provides` 仍然声明服务名、`requires` 仍然声明插件 id，两者不因为存在令牌而合并成同一命名空间。是否同时提供 `services.optional(token)`（返回 `T | undefined`，提供者不可用时不抛错）尚未决定；完整的令牌协议、消费方式、这一待决项与已知的残留耦合见[能力层设计](../capabilities/README.md)。
 

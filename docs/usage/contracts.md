@@ -1,8 +1,8 @@
 # 公共契约使用说明
 
-本文描述已发布契约。Memory 长期访问器、深路径与同步装载错误契约见 [目标设计](../design/contracts.md)，尚未交付。
+本文描述已发布契约。Memory 长期访问器、深路径与同步装载错误契约均已交付，使用方法见 [MemoryManager](./core/memoryManager.md)；跨模块协议的设计见 [契约设计](../design/contracts.md)。
 
-从 `@/contracts` 或对应子文件导入类型，不从业务实现推导公共能力。
+从 `@/contracts` 或对应子文件导入类型，不从业务实现推导公共能力。服务令牌的创建函数 `defineService` 是此入口发布的运行时值。
 
 ```ts
 import type { Logger, LeviathanPlugin } from '@/contracts';
@@ -16,6 +16,24 @@ export const createConsumer = (log: Logger): LeviathanPlugin => ({
 ```
 
 提供方应显式声明返回接口，例如 `createLogging(...): LoggerFactory`、`createBus(logging): Bus`。调用方可以在测试中注入结构兼容对象；这不要求继承具体类，也不意味着该对象已经满足时序和持久化语义。
+
+## 服务令牌
+
+能力提供者创建一次令牌，并在自己的 `setup` 中用令牌发布服务；消费者按提供者的插件 id 声明 `requires`，使用时用令牌读取：
+
+```ts
+import { defineService } from '@/contracts';
+
+interface CounterService { count(): number }
+export const CounterService = defineService<CounterService>('counter');
+
+// 提供者：manifest.provides: [CounterService.name]
+// setup(context) { context.services.provide(CounterService, { count: () => 1 }); }
+// 消费者：manifest.requires: ['counterPlugin']
+// onTickExecute(context) { const value = context.services.get(CounterService).count(); }
+```
+
+`get(token)` 推断服务接口，`provide(token, value)` 在编译期检查值的结构；字符串重载保持可用。令牌运行时只有 `name`，Framework 仍按服务名查表、按实际提供者插件 id 检查依赖和可用性，不验证服务对象的运行时结构。令牌不自动替消费者填写 `requires`，也不保证服务名与插件 id 相同。可选依赖目前仍用 `manifest.optional` 加 `services.get` 的异常处理；`services.optional(token)` 尚未提供。
 
 Framework 的装配入口要求完整 `CoreRuntime`。应用应由 `createRuntime()` 取得它；测试替身也必须同时提供 `getGame`、Logger、EventBus、MemoryHost、Profiler、ErrorMapper、TaskHost 与上下文工厂，不能只拼接 Framework 恰好使用的局部字段。缺少 TaskHost 时，Framework 在激活插件时绑定 `context.tasks` 失败，每个 tick 都会进入 safeMode。
 

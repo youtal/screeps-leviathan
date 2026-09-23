@@ -7,14 +7,12 @@ RoomShortcuts 按房间查询建筑、Source 与 Mineral。它为每个有视野
 应用已在 `src/app/modules.ts` 以插件 `roomShortcuts` 注册本模块，服务名同为 `roomShortcuts`。使用方在 manifest 中声明依赖，并在使用时读取服务：
 
 ```ts
-import type { createRoomShortcuts } from '@/modules/roomShortcuts/createRoomShortcuts';
-
-type RoomShortcuts = ReturnType<typeof createRoomShortcuts>;
+import { RoomShortcutsService } from '@/modules/roomShortcuts';
 
 framework.register({
   manifest: { id: 'defense', version: 1, requires: ['roomShortcuts'] },
   onTickExecute(context) {
-    const shortcuts = context.services.get<RoomShortcuts>('roomShortcuts');
+    const shortcuts = context.services.get(RoomShortcutsService);
     for (const tower of shortcuts.getTower('W1N1')) {
       // tower 是本 tick 的对象，不要跨 tick 保存。
     }
@@ -23,6 +21,8 @@ framework.register({
 ```
 
 按 [Framework 使用说明](../core/framework.md) 的规则，在使用时调用 `services.get`，不要在 setup 中保存服务对象。
+
+`RoomShortcutsService` 把服务名 `roomShortcuts` 与公共 `RoomShortcuts` 查询接口绑定。消费者无需从工厂返回值推导类型；令牌接口不暴露提供者的缓存清扫方法 `sweep`。现有 `services.get<T>('roomShortcuts')` 字符串写法仍可用。
 
 独立创建时传入模块上下文和可选配置。工厂在创建时向总线订阅建筑事件，每个 global 只应创建一次；不经 Framework 使用时，这些订阅不会自动取消。
 
@@ -74,7 +74,7 @@ const shortcuts = createRoomShortcuts({
 ## 注意事项
 
 - 缓存只在 heap 中，不占用 Memory；global reset 后清空，下一次查询重新扫描。
-- 缓存不设容量上限，按超时回收：插件每隔 `sweepIntervalTicks` 清扫一次，删除超过租约且没有再被查询的房间索引，因此占用只与“最近一个租约内查询过的房间数”相关。服务上的 `sweep(tick)` 由插件调用，业务不需要调用它。
+- 缓存不设容量上限，按超时回收：插件每隔 `sweepIntervalTicks` 清扫一次，删除超过租约且没有再被查询的房间索引，因此占用只与“最近一个租约内查询过的房间数”相关。内部 `sweep(tick)` 由提供者插件调用，不属于令牌发布的消费者接口。
 - 超过租约的房间不再接收建筑事件的增量更新，下一次查询会整体重扫。
 - 失去视野的告警标记闲置一个租约后被回收：长期无视野且持续被查询的房间，大约每个租约会再告警一次。
 - 查询会解析缓存中的每个 id，CPU 与结果数量成正比。同一 tick 内多次需要同一结果时，保存到局部变量复用。

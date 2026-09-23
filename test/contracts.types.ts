@@ -4,6 +4,7 @@
  * 覆盖范围：Memory 长期访问器（深路径类型另见 types/memoryPath.types.ts）、Logger 惰性内容、事件作用域与载荷对应、Logger 完整形状与作用域
  * 覆盖、插件清单与上下文的边界，以及任务体与任务句柄。负例必须保留 `@ts-expect-error` 错误，防止公共
  * 能力、事件载荷或 readonly 边界意外放宽；正例则保证契约仍可被正常实现承诺。
+ * 服务令牌用例同时验证 get 的返回推断与 provide 的载荷检查；字符串重载继续可用。
  *
  * 运行方式：随 `npx tsc --noEmit` 编译；不进入 Jest（testMatch 只收 *.test.ts）。
  */
@@ -19,6 +20,22 @@ import type {
   TaskScheduler,
 } from '@/contracts';
 import type { RuntimeOptions, RuntimeOverrides } from '@/core/runtime';
+import { defineService } from '@/contracts';
+
+/** 令牌携带消费者接口类型；提供值不能反向拓宽该类型。 */
+export function verifyServiceTokenContract(context: PluginContext): void {
+  const counter = defineService<{ count: number }>('counter');
+  const count: number = context.services.get(counter).count;
+  void count;
+  context.services.provide(counter, { count: 1 });
+  // @ts-expect-error 令牌指定的 count 是 number
+  context.services.provide(counter, { count: 'wrong' });
+  // @ts-expect-error 令牌读取结果不是 string
+  const wrong: string = context.services.get(counter);
+  void wrong;
+  const legacy: number = context.services.get<number>('counter');
+  context.services.provide('counter', legacy);
+}
 
 interface State {
   nested: { count: number };

@@ -21,6 +21,7 @@ import type {
   EventType,
   DataByEvent,
   Logger,
+  ServiceToken,
 } from '@/contracts';
 import { createCpuGovernor } from './cpuGovernor';
 import { createIntentBroker } from './intentBroker';
@@ -305,8 +306,11 @@ export const createFramework = (options: FrameworkOptions): Framework => {
       memory: runtime.memory.bind(id),
       tasks: runtime.tasks.bind(id),
       services: {
-        // unknown 服务载荷只在出口断言为 T；这不是运行时结构校验，使用者负责服务协议。
-        get: <T>(name: string): T => {
+        // 字符串与令牌只在入口归一化成服务名；后续完全共用原有的可用性、归属与阶段检查。
+        // unknown 服务载荷只在出口断言为 T；令牌也不做运行时结构校验。
+        get: <T>(nameOrToken: string | ServiceToken<T>): T => {
+          const name =
+            typeof nameOrToken === 'string' ? nameOrToken : nameOrToken.name;
           const service = services.get(name);
           if (
             !service ||
@@ -325,7 +329,10 @@ export const createFramework = (options: FrameworkOptions): Framework => {
           return service.value as T;
         },
         // 只允许 setup 安装服务，不允许运行到一半替换其他插件已经取得的实例。
-        provide: (name, value) => {
+        // 令牌的类型检查在编译期完成，运行时仍按 name 校验 manifest.provides。
+        provide: (nameOrToken, value) => {
+          const name =
+            typeof nameOrToken === 'string' ? nameOrToken : nameOrToken.name;
           if (
             currentPlugin !== id ||
             currentPhase !== 'setup' ||
