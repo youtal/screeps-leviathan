@@ -3,16 +3,25 @@
  *
  * 模块角色：core/framework 的主实现，将注入的 Runtime 与内部调度组件组织成游戏循环。
  *
- * 主要功能：管理插件注册和依赖、服务与订阅、生命周期、动作提交、失败统计及停用恢复。
+ * 主要功能：管理插件注册和依赖、服务与订阅、生命周期、动作提交、失败统计、停用恢复及
+ * 跨 tick 任务驱动。
  *
  * 实现过程：loop 在 tick 开始驱动存储并应用注册命令，再按依赖顺序初始化和执行插件，
- * 集中仲裁意图，逆序执行收尾，最后更新健康记录并驱动存储提交；各阶段结合 CPU 检查与错误捕获。
+ * 集中仲裁意图，逆序执行收尾，更新健康记录，让 TaskHost 写入跨 global 记录后驱动存储提交，
+ * 最后驱动 TaskHost 用剩余 CPU 推进跨 tick 任务；释放插件时一并释放它提交的任务。
+ * 各阶段结合 CPU 检查与错误捕获。
  *
  * 技术要点：同一 tick 重复调用被跳过，重入按真实 tick 归属拒绝（硬终止遗留的锁在下一 tick 失效）；注册命令整批校验后生效，连续失败会暂停插件。
  * 服务、上下文和计时包装跨 tick 复用，意图与本轮失败集合每 tick 重建；global reset 后重建实例。
  * 持久数据的加载与恢复完全交给 Runtime 的 MemoryManager，本文件不直接读写游戏存储。
  */
-import type { Bus, EventScope, EventType, DataByEvent } from '@/contracts';
+import type {
+  Bus,
+  EventScope,
+  EventType,
+  DataByEvent,
+  Logger,
+} from '@/contracts';
 import { createCpuGovernor } from './cpuGovernor';
 import { createIntentBroker } from './intentBroker';
 import { validId } from './pluginRegistry';
@@ -96,6 +105,27 @@ export const createFramework = (options: FrameworkOptions): Framework => {
    */
   let runningTick: number | undefined;
   let lastTick: number | undefined;
+  /**
+   * 任务驱动期间被拦下的事件类型：同一类型只告警一次。集合大小受 EventType 联合类型限制，
+   * 随实例存活，global reset 后清空。日志作用域在第一次告警时才派生，平时不创建。
+   */
+  const droppedEventTypes = new Set<string>();
+  let frameworkLog: Logger | undefined;
+  /**
+   * 绕过插件上下文、在 drive 期间经 runtime.bus 发布的事件不投递给插件订阅者：此时 Memory
+   * 已经提交、健康统计已经结束，订阅者在这里运行既写不了分区，失败也不会计入熔断。
+   */
+  const dropDriveEvent = (type: string): void => {
+    if (droppedEventTypes.has(type)) return;
+    droppedEventTypes.add(type);
+    frameworkLog ??= runtime.logging.scope('Framework');
+    frameworkLog.warn(
+      () =>
+        'event ' +
+        type +
+        ' published while tasks are driven was not delivered to plugins'
+    );
+  };
   /** 以下诊断、可用集合与 broker 每 tick 重建；-1 broker 仅为首次 loop 前占位。 */
   let failures: PluginFailure[] = [];
   let safeMode = false;
@@ -176,12 +206,16 @@ export const createFramework = (options: FrameworkOptions): Framework => {
   /**
    * 按获取资源的逆序释放；单个 cleanup 抛错仍继续其他项，再移除服务与实例。
    * 只释放运行时资源，不读写外部存储；不直接调用业务方法撤销游戏动作。
+   * 插件提交的跨 tick 任务同样是它持有的资源：停用、熔断、卸载、替换或 setup 失败都会走到
+   * 这里，随插件一起释放，避免已释放插件的任务继续消耗 CPU，或让替换后的新实例拿到旧实例
+   * 留下的任务。releaseOwner 是宿主调用，异常按框架故障记录，不计入该插件。
    */
   const dispose = (id: string) => {
     const instance = initialized.get(id);
     if (!instance) return;
     for (const cleanup of instance.cleanup.slice().reverse())
       invoke(id, 'dispose', cleanup);
+    invoke('framework', 'dispose', () => runtime.tasks.releaseOwner(id));
     initialized.delete(id);
     for (const [name, service] of services)
       if (service.owner === id) services.delete(name);
@@ -207,6 +241,16 @@ export const createFramework = (options: FrameworkOptions): Framework => {
       ...base.bus,
       unsubscribe: (scope, type, subscriber) =>
         base.bus.unsubscribe(scope, type, id + ':' + subscriber),
+      // 任务驱动期间只做计算：经插件上下文发布事件直接抛错，发布事件的任务因此失败并带上原因。
+      publish: <T extends EventType>(
+        scope: EventScope,
+        type: T,
+        data: DataByEvent<T>
+      ) => {
+        if (currentPhase === 'tasks.drive')
+          throw new Error('Events cannot be published while tasks are driven');
+        return base.bus.publish(scope, type, data);
+      },
       // T 将事件类型绑定到 DataByEvent<T> 载荷；订阅者键加插件前缀避免常规名称相互覆盖。
       subscribe: <T extends EventType>(
         scope: EventScope,
@@ -226,6 +270,10 @@ export const createFramework = (options: FrameworkOptions): Framework => {
           );
         const key = id + ':' + subscriber;
         base.bus.subscribe(scope, type, key, (data) => {
+          if (currentPhase === 'tasks.drive') {
+            dropDriveEvent(type);
+            return;
+          }
           if (available.has(id) && !failed.has(id)) {
             eventDepth++;
             let result: ReturnType<typeof invoke>;
@@ -255,6 +303,7 @@ export const createFramework = (options: FrameworkOptions): Framework => {
       pluginId: id,
       cpu,
       memory: runtime.memory.bind(id),
+      tasks: runtime.tasks.bind(id),
       services: {
         // unknown 服务载荷只在出口断言为 T；这不是运行时结构校验，使用者负责服务协议。
         get: <T>(name: string): T => {
@@ -566,12 +615,30 @@ export const createFramework = (options: FrameworkOptions): Framework => {
           });
           if (!result.ok) safeMode = true;
         }
+        // TaskHost 的跨 global 记录必须在写入阶段内落到分区，因此排在 Memory 收尾之前；
+        // 没有待处理记录时它不申请分区、不标脏。异常按框架故障记录，不影响 Memory 收尾。
+        invoke('framework', 'tickEnd', () =>
+          runtime.tasks.persist(getGame().time)
+        );
         // Memory 收尾在插件 end 与健康累计之后：统一提交全部脏分区。提交失败只记录诊断，
         // 不抛错；这里的错误边界只捕获生命周期协议错误。
         const memoryEnd = invoke('framework', 'tickEnd', () =>
           runtime.memory.end(getGame().time)
         );
         if (!memoryEnd.ok) safeMode = true;
+        // 任务边界：排在所有插件收尾、健康统计与 Memory 提交之后，把本 tick 剩余的 CPU
+        // 交给 TaskHost 驱动跨 tick 任务。cpu 是驱动本轮插件用的同一个 CpuBudget，TaskHost
+        // 每开始一片前调用它的 admit()（普通插件口径），任务只用常规额度 limit 减 reserveCpu
+        // 以内的剩余，不透支 bucket。任务调度是尽力而为的能力，不是安全关键路径：drive 失败
+        // 只经过与其它宿主调用相同的错误边界记录诊断（阶段标签 tasks.drive），不设 safeMode，
+        // 也不影响已经完成的插件收尾与存储提交。safeMode 为真的 tick 直接跳过，保持与
+        // tickExecute/commit 阶段一致的降级语义——连正常业务都被中止时，不再做这类
+        // 更低优先级的机会性工作。
+        if (!safeMode) {
+          invoke('framework', 'tasks.drive', () =>
+            runtime.tasks.drive(getGame().time, cpu)
+          );
+        }
       } finally {
         runningTick = undefined;
         // 无论本轮是否 safeMode，都恢复内核归属状态，避免污染下一次 loop 的权限判定。

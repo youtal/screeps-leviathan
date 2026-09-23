@@ -94,6 +94,7 @@ heap 探针、`assertRuntimeClean()` 统一错误口径、`withWorld()` 保证 d
 | `leviathan-runtime`      | 正式 bundle 装载、连续 tick、生产 loop 计数、可见房间、CPU API、游戏内 sourcemap、空 Memory                |
 | `leviathan-global-reset` | 旧 `leviathan` 布局导入与原样保留、无关根字段保留、跨 global 的 Memory 继承与 heap 重建、未知 schemaVersion 拒绝覆盖并进入安全模式 |
 | `leviathan-memory`       | 探针插件的长期访问器与 schemaVersion 2 写出、UTF-16 容量上限、完整提交 CPU、CPU 硬终止后的 heap 保留与恢复、global reset 恢复 |
+| `leviathan-tasks`        | TaskScheduler 生成器跨 tick 推进与完成后不重算、任务分片内死循环触发 CPU 硬终止后的重启与失败、终止所在 tick 已提交 Memory 的落盘、跨 global 重启记录 |
 
 `leviathan-runtime` 与 `leviathan-global-reset` 在内存里的正式 main 模块末尾追加 heap 计数器，不改写 `dist/`，也不会进入部署产物。
 `leviathan-memory` 使用构建入口 `bundleCore()` 额外编译的 `src/core/index.ts` CJS 产物（只写入临时构建上下文的
@@ -110,6 +111,14 @@ reset：新 isolate 的探针必须从 1 重新计数（若 heap 被继承会得
 死循环触发 CPU 硬终止后 **heap 保留**（模块只初始化一次、loop 计数连续），后续 tick 的 Framework 与
 MemoryManager 自动恢复，终止前回调已做的修改随后提交。
 
+`leviathan-tasks` 同样用 `leviathan-core` 装配探针 bot：插件每 tick 无条件提交一个计数任务（每片忙等约 0.5 CPU、
+每 tick 上限 1 CPU），收到控制台命令时写入分区标记并提交一个分片内死循环的任务。实测（screeps 4.3 私服，
+CPU limit 100、tickLimit 500、bucket 10000）：计数任务每 tick 约推进 2 片，跨多个 tick 完成，此后每 tick 的
+submit 不再重算；死循环分片被引擎终止后 **heap 保留**，下一 tick 按任务体重启一次、再次被终止后任务以 failed 结束，
+Framework 未进入安全模式；硬终止发生在 MemoryHost `end` 之后，该 tick 已写入的分区标记**已经落盘**，heap 与存储一致。
+第 4 阶段沿用 `leviathan-global-reset` 的「快照 → 新世界」方式模拟一次 global reset：插件每 tick 提交一个不会结束的任务，
+新世界中调度器分区（owner `framework`、分区 `tasks`）里该实例的 reset 记录由 0 变为 1，任务照常运行。
+
 **错误口径**：框架自带的 `report.errors` 只按硬编码模式分类（`TypeError:`、`is not defined` 等），
 普通 `throw new Error('...')` 不会进入其中，只留在 `report.logs`。因此场景应使用
 `assertRuntimeClean()` 而不是直接依赖 `assertNoErrors()`，并显式设置 `logLevel: 'all'` 以便日志扫描
@@ -124,7 +133,8 @@ MemoryManager 自动恢复，终止前回调已做的修改随后提交。
 - 内联 Memory 快照中的任何嵌套**字符串**值都会被 `screeps-integration-tests` 当作 fixture 名解析（库的行为），
   以快照启动新世界的场景必须保证快照不含字符串值；
 - CPU 硬终止后 heap 保留是本私服 driver 的实测行为，官方服务器可能在硬终止后重建 isolate，两种情形都由
-  MemoryManager 与 Framework 的恢复协议覆盖；
+  MemoryManager 与 Framework 的恢复协议覆盖；TaskScheduler 在 isolate 重建时会丢失任务的重启计数，跨 global
+  的防护列为其设计 §8 的待决事项；
 - npm 包没有 TypeScript 声明，项目使用 JavaScript scenario 与 CLI 隔离这项限制；
 - 完整私服的 backend、上传接口和多进程 launcher 兼容性需要未来独立的端到端环境覆盖。
 

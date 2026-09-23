@@ -1,5 +1,5 @@
 /**
- * 文件摘要：验证 Framework 生命周期、调度、错误隔离与纯 heap 状态边界。
+ * 文件摘要：验证 Framework 生命周期、调度、错误隔离、任务驱动接入与纯 heap 状态边界。
  * 使用最小 Game 桩推进 tick，测试不访问真实游戏或网络；旧持久化实现测试随实现移除。
  * Memory/RawMemory 禁止访问测试独立覆盖停用行为；健康状态与 Profiler 仅在实例内保存。
  */
@@ -13,7 +13,12 @@ import { createRuntime } from '@/core/runtime';
 import { runInNewContext } from 'node:vm';
 import { createLogging } from '@/core/logger';
 import type { MemoryAccessor, MemoryHost } from '@/contracts/memory';
-import type { LeviathanPlugin, PluginContext } from '@/contracts';
+import type {
+  CpuBudget,
+  LeviathanPlugin,
+  PluginContext,
+  TaskHost,
+} from '@/contracts';
 import { createProfiler } from '@/core/profiler';
 import type { ProfilerMemory } from '@/core/profiler/types';
 import type { EnvMethods } from '@/contracts';
@@ -58,6 +63,7 @@ const harness = (plugins: LeviathanPlugin[] = [], extra: any = {}) => {
     logging,
     memory,
     profiler,
+    tasks,
     enableProfiler,
     loadSourceMap,
     report: suppliedReport,
@@ -82,6 +88,8 @@ const harness = (plugins: LeviathanPlugin[] = [], extra: any = {}) => {
         logging,
         memory: memory ?? unassembledMemory,
         profiler,
+        // 未指定时由 Runtime 创建真实 TaskScheduler；任务相关用例可注入记录调用的替身。
+        tasks,
       }
     );
   const framework = createFramework({
@@ -91,6 +99,7 @@ const harness = (plugins: LeviathanPlugin[] = [], extra: any = {}) => {
   });
   return {
     framework,
+    runtime,
     game,
     report,
     write,
@@ -1401,5 +1410,340 @@ describe('Framework service activation', () => {
     // 替换后使用者立刻改用新实例，不会继续持有已释放的服务对象。
     expect(seen).toEqual(['old', 'new', 'new']);
     expect(h.framework.getStatus().failures).toEqual([]);
+  });
+});
+
+describe('Framework task driving', () => {
+  /** 记录调用的 TaskHost 替身；未覆盖的方法为空实现，bind 出的入口在这些用例中不应被使用。 */
+  const stubTasks = (overrides: Partial<TaskHost> = {}): TaskHost => ({
+    bind: () => ({
+      submit: () => {
+        throw new Error('stub scheduler');
+      },
+      get: () => undefined,
+      release: () => undefined,
+    }),
+    persist: () => undefined,
+    drive: () => undefined,
+    releaseOwner: () => undefined,
+    getStatus: () => ({ queued: 0, running: 0 }),
+    ...overrides,
+  });
+
+  it('persists task records before MemoryHost.end and drives tasks after it, with the plugin CpuBudget', () => {
+    const order: string[] = [];
+    const budgets: CpuBudget[] = [];
+    let pluginBudget: CpuBudget | undefined;
+    const memory: MemoryHost = {
+      getStatus: () => ({ loadError: null, rawWriteError: null }),
+      begin: () => {
+        order.push('begin');
+      },
+      end: () => {
+        order.push('end');
+      },
+      bind: () => () => {
+        throw new Error('MemoryManager is not assembled');
+      },
+    };
+    const tasks = stubTasks({
+      persist: (tick) => {
+        order.push('persist:' + tick);
+      },
+      drive: (tick, cpu) => {
+        order.push('drive:' + tick);
+        budgets.push(cpu);
+      },
+    });
+    const h = harness(
+      [
+        plugin('p', {
+          onTickExecute: (c) => {
+            pluginBudget = c.cpu;
+          },
+          onTickEnd: () => {
+            order.push('tickEnd');
+          },
+        }),
+      ],
+      { memory, tasks }
+    );
+    h.next();
+    h.next();
+    expect(order).toEqual([
+      'begin',
+      'tickEnd',
+      'persist:2',
+      'end',
+      'drive:2',
+      'begin',
+      'tickEnd',
+      'persist:3',
+      'end',
+      'drive:3',
+    ]);
+    expect(budgets).toEqual([pluginBudget, pluginBudget]);
+  });
+
+  it('skips task driving in safe mode ticks', () => {
+    const drives: number[] = [];
+    let fail = false;
+    const h = harness(
+      [
+        plugin('core', {
+          manifest: { id: 'core', version: 1, critical: true },
+          onTickExecute: () => {
+            if (fail) throw new Error('down');
+          },
+        }),
+      ],
+      { tasks: stubTasks({ drive: (tick) => drives.push(tick) }) }
+    );
+    h.next();
+    fail = true;
+    h.next();
+    expect(h.framework.getStatus().safeMode).toBe(true);
+    expect(drives).toEqual([2]);
+  });
+
+  it('records a throwing drive as a tasks.drive failure without entering safe mode', () => {
+    const ran: number[] = [];
+    const h = harness(
+      [
+        plugin('p', {
+          onTickExecute: (c) => {
+            ran.push(c.tick);
+          },
+        }),
+      ],
+      {
+        tasks: stubTasks({
+          drive: () => {
+            throw new Error('scheduler bug');
+          },
+        }),
+      }
+    );
+    h.next();
+    h.next();
+    const status = h.framework.getStatus();
+    expect(status.safeMode).toBe(false);
+    expect(status.failures).toEqual([
+      expect.objectContaining({ pluginId: 'framework', phase: 'tasks.drive' }),
+    ]);
+    expect(ran).toEqual([2, 3]);
+  });
+
+  it('binds context.tasks to the plugin id', () => {
+    const h = harness([
+      plugin('a', {
+        onTickExecute: (c) => {
+          c.tasks.submit('job', function* (): Generator<void, void, void> {
+            throw new Error('a failed');
+          });
+        },
+      }),
+      plugin('b', {
+        onTickExecute: (c) => {
+          c.tasks.submit('job', function* () {
+            return 'b';
+          });
+        },
+      }),
+    ]);
+    h.next();
+    expect(h.runtime.tasks.bind('a').get('job')!.failure!.pluginId).toBe('a');
+    expect(h.runtime.tasks.bind('b').get('job')!.result).toBe('b');
+  });
+
+  /**
+   * 插件释放时回收任务：任务每片把 Game.cpu.getUsed 推进 1，admit() 在达到 limit − reserveCpu
+   * （20 − 5）后拒绝，使无尽任务每 tick 只驱动有限片数；每个 tick 开始前把 CPU 计数归零。
+   */
+  const releaseHarness = (plugins: (burn: () => Generator<void, never, void>) => LeviathanPlugin[]) => {
+    let h: ReturnType<typeof harness>;
+    let used = 0;
+    const counter = { slices: 0 };
+    const burn = function* (): Generator<void, never, void> {
+      for (;;) {
+        counter.slices++;
+        h.use(++used);
+        yield;
+      }
+    };
+    h = harness(plugins(burn));
+    const tick = () => {
+      used = 0;
+      h.use(0);
+      h.next();
+    };
+    const handle = (owner: string, id: string) =>
+      h.runtime.tasks.bind(owner).get(id);
+    return { h: () => h, counter, tick, handle };
+  };
+
+  it('rejects publishing through plugin contexts while tasks are driven', () => {
+    const heard = jest.fn();
+    const h = harness([
+      plugin('listener', {
+        setup: (c) =>
+          c.events.subscribe({ scope: 'global' }, 'creep:death', 's', heard),
+      }),
+      plugin('publisher', {
+        onTickExecute: (c) => {
+          c.tasks.submit('announce', function* () {
+            c.events.publish({ scope: 'global' }, 'creep:death', {
+              creepName: 'x',
+            });
+          });
+        },
+      }),
+    ]);
+    h.next();
+    const task = h.runtime.tasks.bind('publisher').get('announce')!;
+    expect(task.state).toBe('failed');
+    expect(task.failure!.message).toContain(
+      'Events cannot be published while tasks are driven'
+    );
+    expect(heard).not.toHaveBeenCalled();
+  });
+
+  it('does not deliver raw-bus events to plugins while tasks are driven and warns once', () => {
+    const heard = jest.fn();
+    const lines: string[] = [];
+    const logging = createLogging({
+      output: { write: (line) => lines.push(line), notify: () => undefined },
+    });
+    let h: ReturnType<typeof harness>;
+    h = harness(
+      [
+        plugin('listener', {
+          setup: (c) =>
+            c.events.subscribe({ scope: 'global' }, 'creep:death', 's', heard),
+        }),
+        plugin('publisher', {
+          onTickExecute: (c) => {
+            // 钩子中的正常发布照常投递。
+            c.events.publish({ scope: 'global' }, 'creep:death', {
+              creepName: 'hook',
+            });
+            c.tasks.submit('announce:' + c.tick, function* () {
+              h.runtime.bus.publish({ scope: 'global' }, 'creep:death', {
+                creepName: 'task',
+              });
+            });
+          },
+        }),
+      ],
+      { logging }
+    );
+    h.next();
+    h.next();
+    expect(heard.mock.calls.map(([data]) => data.creepName)).toEqual([
+      'hook',
+      'hook',
+    ]);
+    expect(
+      lines.filter((line) => line.includes('published while tasks are driven'))
+    ).toHaveLength(1);
+  });
+
+  it('drives tasks only within the regular limit minus reserveCpu, not up to tickLimit', () => {
+    const r = releaseHarness((burn) => [
+      plugin('p', {
+        onTickExecute: (c) => {
+          c.tasks.submit('loop', burn);
+        },
+      }),
+    ]);
+    r.tick();
+    // 桩：limit 20、tickLimit 100、默认 reserveCpu 5；每片 1 CPU，admit() 在 15 之后拒绝。
+    expect(r.counter.slices).toBe(15);
+  });
+
+  it('releases the tasks of a disabled plugin', () => {
+    const r = releaseHarness((burn) => [
+      plugin('p', {
+        onTickExecute: (c) => {
+          c.tasks.submit('loop', burn);
+        },
+      }),
+    ]);
+    r.tick();
+    const task = r.handle('p', 'loop')!;
+    expect(task.state).toBe('running');
+    const slices = r.counter.slices;
+    expect(slices).toBeGreaterThan(0);
+    r.h().framework.disable('p');
+    r.tick();
+    expect(task.state).toBe('cancelled');
+    expect(r.handle('p', 'loop')).toBeUndefined();
+    expect(r.counter.slices).toBe(slices);
+    expect(r.h().runtime.tasks.getStatus()).toEqual({ queued: 0, running: 0 });
+  });
+
+  it('releases the tasks of a circuit-broken plugin', () => {
+    const r = releaseHarness((burn) => [
+      plugin('p', {
+        onTickExecute: (c) => {
+          c.tasks.submit('loop', burn);
+          throw new Error('broken');
+        },
+      }),
+    ]);
+    r.tick();
+    r.tick();
+    r.tick();
+    const task = r.handle('p', 'loop')!;
+    expect(task.state).toBe('running');
+    r.tick();
+    expect(task.state).toBe('cancelled');
+    expect(r.handle('p', 'loop')).toBeUndefined();
+  });
+
+  it('releases tasks when a plugin instance is replaced or its setup fails', () => {
+    let bodyCalls = 0;
+    const r = releaseHarness((burn) => {
+      const make = () =>
+        plugin('p', {
+          onTickExecute: (c) => {
+            c.tasks.submit('loop', () => {
+              bodyCalls++;
+              return burn();
+            });
+          },
+        });
+      return [
+        make(),
+        plugin('broken', {
+          setup: (c) => {
+            c.tasks.submit('boot', burn);
+            throw new Error('setup failed');
+          },
+        }),
+      ];
+    });
+    r.tick();
+    const old = r.handle('p', 'loop')!;
+    // setup 失败的插件在同一 tick 内被释放，它在 setup 中提交的任务一并回收。
+    expect(r.handle('broken', 'boot')).toBeUndefined();
+    r.h().framework.unregister('p');
+    r.h().framework.register(
+      plugin('p', {
+        onTickExecute: (c) => {
+          c.tasks.submit('loop', () => {
+            bodyCalls++;
+            return (function* () {
+              yield;
+            })();
+          });
+        },
+      })
+    );
+    r.tick();
+    expect(old.state).toBe('cancelled');
+    const fresh = r.handle('p', 'loop')!;
+    expect(fresh).not.toBe(old);
+    expect(bodyCalls).toBe(2);
   });
 });

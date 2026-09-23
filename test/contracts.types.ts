@@ -2,7 +2,7 @@
  * 文件摘要：编译期契约回归；由 tsc 检查，不由 Jest 执行。
  *
  * 覆盖范围：Memory 长期访问器（深路径类型另见 types/memoryPath.types.ts）、Logger 惰性内容、事件作用域与载荷对应、Logger 完整形状与作用域
- * 覆盖、插件清单与上下文的边界。负例必须保留 `@ts-expect-error` 错误，防止公共
+ * 覆盖、插件清单与上下文的边界，以及任务体与任务句柄。负例必须保留 `@ts-expect-error` 错误，防止公共
  * 能力、事件载荷或 readonly 边界意外放宽；正例则保证契约仍可被正常实现承诺。
  *
  * 运行方式：随 `npx tsc --noEmit` 编译；不进入 Jest（testMatch 只收 *.test.ts）。
@@ -16,6 +16,7 @@ import type {
   MemoryAccessor,
   PluginContext,
   PluginManifest,
+  TaskScheduler,
 } from '@/contracts';
 import type { RuntimeOptions, RuntimeOverrides } from '@/core/runtime';
 
@@ -101,4 +102,24 @@ export function verifyGlobalObjectTypes(
   // @ts-expect-error 旗帜没有 id
   void flag.id;
   return id;
+}
+
+/**
+ * 任务体必须是“返回生成器的函数”：直接传入生成器对象（使用说明早期示例的写法）会被拒绝；
+ * 包一层箭头函数后，结果类型从生成器的返回值推断，句柄字段保持只读。
+ */
+export function verifyTaskContract(tasks: TaskScheduler): void {
+  function* planLayout(roomName: string) {
+    yield;
+    return [roomName];
+  }
+  // @ts-expect-error 不能直接传入生成器对象
+  tasks.submit('layout:W1N1', planLayout('W1N1'), { label: 'layout' });
+  const plan = tasks.submit('layout:W1N1', () => planLayout('W1N1'), {
+    label: 'layout',
+  });
+  const rooms: string[] | undefined = plan.result;
+  // @ts-expect-error 句柄状态由调度器维护，调用方只读
+  plan.state = 'done';
+  void rooms;
 }

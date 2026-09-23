@@ -17,7 +17,9 @@ export const createConsumer = (log: Logger): LeviathanPlugin => ({
 
 提供方应显式声明返回接口，例如 `createLogging(...): LoggerFactory`、`createBus(logging): Bus`。调用方可以在测试中注入结构兼容对象；这不要求继承具体类，也不意味着该对象已经满足时序和持久化语义。
 
-Framework 的装配入口要求完整 `CoreRuntime`。应用应由 `createRuntime()` 取得它；测试替身也必须同时提供 `getGame`、Logger、EventBus、MemoryHost、Profiler、ErrorMapper 与上下文工厂，不能只拼接 Framework 恰好使用的局部字段。
+Framework 的装配入口要求完整 `CoreRuntime`。应用应由 `createRuntime()` 取得它；测试替身也必须同时提供 `getGame`、Logger、EventBus、MemoryHost、Profiler、ErrorMapper、TaskHost 与上下文工厂，不能只拼接 Framework 恰好使用的局部字段。缺少 TaskHost 时，Framework 在激活插件时绑定 `context.tasks` 失败，每个 tick 都会进入 safeMode。
+
+TaskHost 替身须提供 `bind`（返回含 `submit`、`get`、`release` 的调度入口）、`persist`、`drive`、`releaseOwner` 与 `getStatus(): { queued: number; running: number }`。Framework 每个 tick 在 MemoryHost `end` 之前调用一次 `persist(tick)`，非 safeMode 的 tick 在 `end` 之后调用一次 `drive(tick, cpu)`，释放插件时调用 `releaseOwner(pluginId)`。调度语义见 [TaskScheduler 使用说明](./core/taskScheduler.md)。
 
 类型分工见 [契约设计](../design/contracts.md)。`LogOptions` 不再是全局类型，使用前必须 `import type`。已有模块出口保留部分类型转导兼容，但新代码应直接引用 contracts。ProfilerMemory、ProfilerContext、RuntimeOptions 等内部装配模型仍从所属模块引用。
 

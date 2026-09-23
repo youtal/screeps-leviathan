@@ -93,12 +93,15 @@ framework.register({
 - `cpu.admit()`：当前普通任务是否还在预算内。
 - `onDispose(callback)`：在 setup 登记额外资源清理，清理按逆序执行。
 - `intents`：提交动作与读取本轮、上一轮回执。
+- `tasks`：按插件 id 绑定的跨 tick 任务调度入口，用法见 [TaskScheduler 使用说明](./taskScheduler.md)。插件被停用、熔断、卸载、替换或 setup 失败时，它提交的任务随之释放。
 
 Context 可以跨 tick 保留；停用后不应继续使用，Game 对象不能跨 tick 保存。
 
 ### 事件回调
 
 订阅回调以订阅者身份执行，阶段沿用发布者发布时的阶段：执行阶段发布的事件，回调中可以提交意图，意图归属订阅者。`events.subscribe`、`services.provide` 与 `onDispose` 只能在插件自己的 setup 中调用，在任何事件回调中调用都会抛错，即使发布者正处于 setup；错误进入订阅者的错误边界。收到事件后需要的资源应在 setup 中预先建立，回调只更新状态。
+
+跨 tick 任务在所有插件收尾之后运行，这段时间不让事件进入插件：任务中经插件上下文 `events.publish` 会抛错，该任务以 failed 结束；经 `runtime.bus` 发布的事件不会投递给插件订阅者，每种事件告警一次。需要通知其他插件时，在自己的钩子里读取任务结果后再发布。
 
 ### 读取服务
 
@@ -126,7 +129,7 @@ Framework 不读取或写入 RawMemory，也不挂载全局 Memory。它只驱�
 
 健康记录和默认 Profiler 累计值只存在于实例 heap，global reset 后丢失。业务自己的闭包可保存跨 tick 缓存，但不能依赖它跨 reset 恢复。
 
-每个 tick 先调用 MemoryHost `begin`（首次同步装载存储），插件 setup 与钩子中通过 `context.memory` 同步申请分区；所有插件收尾后调用 `end` 统一提交。装载失败时本 tick 进入安全模式、不执行插件阶段；申请失败抛错并进入插件自身的错误边界。申请、深路径与提交规则见 [MemoryManager 使用说明](./memoryManager.md)。
+每个 tick 先调用 MemoryHost `begin`（首次同步装载存储），插件 setup 与钩子中通过 `context.memory` 同步申请分区；所有插件收尾后先让 TaskHost 写入跨 global 重启记录，再调用 `end` 统一提交，随后驱动 TaskHost 推进跨 tick 任务（用本 tick 常规额度的剩余，bucket 高于水位时另有盈余额度；safeMode 的 tick 跳过驱动；驱动本身出错记为 `tasks.drive` 阶段的框架故障，不进入 safeMode）。任务在 `end` 之后运行，不能在任务体内写入分区。装载失败时本 tick 进入安全模式、不执行插件阶段；申请失败抛错并进入插件自身的错误边界。申请、深路径与提交规则见 [MemoryManager 使用说明](./memoryManager.md)。
 
 重入保护带真实 tick 归属：引擎 CPU 硬终止会跳过 `finally`，若 heap 保留，遗留的运行标记只在同一 tick 内有效，下一个 tick 的 `loop()` 自动恢复，不会被永久判为重入。
 
@@ -166,11 +169,11 @@ onTickExecute(context) {
 | ------------------ | ----------------------- | ---------------------------------------------- |
 | `runtime`          | 必填                    | 完整 Core Runtime；Framework 不创建其中的能力  |
 | `plugins`          | `[]`                    | 初始插件列表                                   |
-| `reserveCpu`       | `5`                     | 收尾预留 CPU                                   |
-| `minBucket`        | `1000`                  | 普通插件准入下限                               |
+| `reserveCpu`       | `5`                     | 收尾预留 CPU；普通插件与跨 tick 任务都只使用 `limit` 减去它以内的额度 |
+| `minBucket`        | `1000`                  | 普通插件与跨 tick 任务的 bucket 准入下限（任务另有自己的门限） |
 | `failureThreshold` | `3`                     | 连续失败 tick 的熔断阈值                       |
 
-Profiler、Logger、MemoryManager、ErrorMapper、Game 访问器及 source map/report 选项在创建 Runtime 时配置，不能通过 `FrameworkOptions` 分散替换。
+Profiler、Logger、MemoryManager、ErrorMapper、TaskScheduler、Game 访问器及 source map/report 选项在创建 Runtime 时配置，不能通过 `FrameworkOptions` 分散替换。
 
 `critical` 仅给基础服务使用。其失败会阻止剩余业务提交（包括它作为事件订阅者在他人发布事件时失败），熔断后需显式 recover。安全模式不会自动执行生存策略。
 

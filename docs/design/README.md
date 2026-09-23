@@ -11,7 +11,7 @@
 - [Framework](./core/framework.md)：生命周期、插件事务、故障隔离、CPU 与意图仲裁。
 - [Profiler](./core/profiler.md)：嵌套计时、统计存储与故障隔离。
 - [Runtime](./core/runtime.md)：共享能力和上下文组合。
-- [TaskScheduler](./core/taskScheduler.md)：生成器驱动的跨 tick 任务调度，未交付。
+- [TaskScheduler](./core/taskScheduler.md)：生成器驱动的跨 tick 任务调度、空闲额度内的 CPU 准入、实例语义、失败归属与硬终止恢复。
 - [能力层](./capabilities/README.md)：与 Screeps 耦合的通用能力如何分层、如何被消费，以及服务令牌协议，未交付。
 - [goto](./modules/goto.md)：原生寻路、AB/ABC 矩阵、有向房间权重、压缩方向缓存与工作状态避让策略。
 - [RoomShortcuts](./modules/roomShortcuts.md)：房间查询缓存、事件更新与租约。

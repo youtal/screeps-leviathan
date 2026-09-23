@@ -1,6 +1,6 @@
 # 跨模块契约设计
 
-交付状态：已交付。契约目录、公共类型抽离、实现显式类型承诺、CoreRuntime、Memory 长期访问器、深路径类型、同步装载错误契约与编译期回归均已交付。服务令牌（`service.ts`）与任务调度契约（`task.ts`，含 `CoreRuntime.tasks`）未交付，设计见下文对应小节。
+交付状态：已交付。契约目录、公共类型抽离、实现显式类型承诺、CoreRuntime、Memory 长期访问器、深路径类型、同步装载错误契约、编译期回归与任务调度契约（`task.ts`，含 `CoreRuntime.tasks`）均已交付。服务令牌（`service.ts`）未交付，设计见下文对应小节。
 
 ## 定位与依赖原则
 
@@ -23,7 +23,7 @@
 | `runtime.ts` | CoreRuntime、模块上下文与派生工厂 |
 | `memory.ts` | JSON、深只读、申请配置、长期 Accessor、深路径类型与宿主生命周期端口 MemoryHost（含装载及写入诊断） |
 | `service.ts` | ServiceToken、defineService（未交付） |
-| `task.ts` | TaskContext、TaskBody、TaskHandle、TaskScheduler、TaskOptions 与宿主生命周期端口 TaskHost（未交付） |
+| `task.ts` | TaskContext、TaskBody、TaskHandle、TaskScheduler、TaskOptions 与宿主生命周期端口 TaskHost |
 
 Profiler 统计记录和存储容器、EventBus 监听器索引、Framework 健康表、TaskScheduler 任务注册表、Goto 缓存及偏好 schema 归各自模块。构造参数包含内部数据结构时保留在模块内，不强制发布所有工厂参数。
 
@@ -53,4 +53,4 @@ MemoryHost 发布 bind、begin、end、getStatus，构造与 bind 无存储副�
 
 ## 任务调度协议
 
-`TaskHost` 是 Runtime 组装、Framework 驱动的生命周期端口，形态对齐 `MemoryHost`：`bind(owner)` 派生按调用方绑定的 `TaskScheduler`，`drive(tick, cpu)` 在 Framework 本 tick 收尾的最后阶段驱动一次就绪任务，`getStatus()` 给出最小诊断快照。`TaskScheduler.submit` 接收一个在安全点 `yield` 的生成器作为任务体，按 id 幂等提交、按状态轮询结果，不使用完成回调。`CoreRuntime` 增加 `tasks: TaskHost`，`ModuleContext` 增加可选的 `tasks?: TaskScheduler`。完整协议、调度算法与故障归属规则见 [TaskScheduler 设计](./core/taskScheduler.md)。
+`TaskHost` 是 Runtime 组装、Framework 驱动的生命周期端口，形态对齐 `MemoryHost`：`bind(owner)` 派生按调用方绑定的 `TaskScheduler`，`persist(tick)` 在 MemoryHost.end 之前写入跨 global 重启记录，`drive(tick, cpu)` 在 Framework 本 tick 收尾的最后阶段驱动一次就绪任务，`releaseOwner(owner)` 在 Framework 释放插件时回收其任务，`getStatus()` 给出最小诊断快照。`TaskScheduler.submit` 接收一个返回生成器的函数作为任务体，只保证同 id 的实例存在（任何状态都返回已有实例），`release` 释放实例，句柄是实例的实时视图，不使用完成回调。`CoreRuntime` 包含 `tasks: TaskHost`，`ModuleContext` 包含可选的 `tasks?: TaskScheduler`。完整协议、调度算法与故障归属规则见 [TaskScheduler 设计](./core/taskScheduler.md)。
