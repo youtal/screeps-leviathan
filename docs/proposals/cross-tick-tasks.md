@@ -1,6 +1,6 @@
 # 提案：跨 tick 高消耗任务框架
 
-- 状态：已采纳——机制选定为生成器方案（§2），调度器归入 Core 作为内核能力；设计见 [TaskScheduler 设计](../design/core/taskScheduler.md)
+- 状态：已采纳并交付——机制选定为生成器方案（§2），调度器归入 Core 作为内核能力；见 [TaskScheduler 设计](../design/core/taskScheduler.md)与[使用说明](../usage/core/taskScheduler.md)
 - 提出日期：2026-09-23
 - 范围：为业务模块提供“把一段高消耗计算分摊到多个 tick 完成”的能力
 - 导航：[提案索引](./README.md)
@@ -92,6 +92,8 @@ function* planLayout(roomName: string) {
   return result;
 }
 ```
+
+> 注（2026-09-23）：上例把 `planLayout('W1N1')` 返回的生成器对象直接传给 `submit`，与 `TaskBody`（返回生成器的函数）不符，正确写法是 `() => planLayout('W1N1')`。实例语义（终态保留与 `release`）、CPU 口径与硬终止恢复在落地时均有调整，以 [TaskScheduler 设计](../design/core/taskScheduler.md) 为准。
 
 不采用完成回调的理由：回调的执行阶段与归属插件由调度器决定，会重演事件回调那一类归属问题（参见 [Framework 设计 §5.2](../design/core/framework.md)）。轮询状态让结果读取发生在调用方自己的钩子里，错误边界与 CPU 归属都清晰。
 

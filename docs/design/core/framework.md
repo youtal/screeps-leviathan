@@ -1,6 +1,6 @@
 # Leviathan Framework 设计
 
-交付状态：已交付。Framework 协议、Runtime 消费、插件事务、Memory 同步装载错误契约接入与带 tick 归属的 loop 重入锁均已交付。服务令牌读取重载（`services.get`/`provide`/`optional`，见 §5.3）与任务驱动（TaskHost.drive，见 §8）未交付。
+交付状态：已交付。Framework 协议、Runtime 消费、插件事务、Memory 同步装载错误契约接入、带 tick 归属的 loop 重入锁与任务驱动（TaskHost.drive，见 §8）均已交付。服务令牌读取重载（`services.get`/`provide`/`optional`，见 §5.3）未交付。
 
 ## 1. 模块定位
 
@@ -72,7 +72,7 @@ onTickExecute（plan） → arbitrate → commit
 
 所有已经进入 begin 的插件按逆序执行 `onTickEnd`，包括自身 begin 或 execute 失败的插件；从未进入 begin 的插件不会收到 end。
 
-随后更新失败、熔断等关键健康状态，并把本 tick 意图回执留在 heap 供下一 tick 核验。end 钩子异常不会阻断其他插件 end 或健康统计。
+随后更新失败、熔断等关键健康状态，并把本 tick 意图回执留在 heap 供下一 tick 核验。end 钩子异常不会阻断其他插件 end 或健康统计。健康统计之后先让 TaskHost 写入跨 global 记录，再执行 MemoryHost.end，最后驱动 TaskHost（§8）。
 
 `OK` 或其他同步返回码只反映 API 提交情况；它们不证明世界变化已经完成。业务插件在下一 tick 对照 Game 状态核验事实。loop 若跳过了若干 tick，插件必须检查回执中的 `tick`，不能将旧回执视为紧邻上一 tick 的结果。
 
@@ -114,6 +114,8 @@ Context 在 setup 时创建并缓存；`tick`、意图队列都在使用时读�
 回调通过 Framework 错误边界执行；不可用或本 tick 已失败的插件不会继续收到业务事件。插件手动注册的其他资源通过 `onDispose` 释放。清理函数应捕获需释放的句柄，不依赖新的服务查询。
 
 回调以订阅者身份执行，阶段沿用发布者发布时的阶段，按阶段判定的能力（例如执行阶段提交意图，意图归属订阅者）保持一致。setup 专属接口（`subscribe`、`services.provide`、`onDispose`）只属于插件自己的 setup 主体，事件回调中一律拒绝：否则回调可以在发布者的 setup 期间越权订阅或发布服务，`onDispose` 还会把清理函数登记到发布者名下，使清理在发布者停用时执行。Framework 以事件回调的嵌套层数判定，每个 tick 开始时复位，硬终止遗留的层数不会延续。
+
+任务驱动阶段（`tasks.drive`）不让事件进入插件：插件上下文的 `publish` 直接抛错，发布事件的任务因此失败；绕过插件上下文、经 `runtime.bus` 发布的事件不投递给插件订阅者，每种事件告警一次。此时 Memory 已经提交、健康统计已经结束，订阅者在这里运行既写不了分区，失败也不会计入熔断（见 [TaskScheduler 设计](./taskScheduler.md) §5.7）。
 
 ### 5.3 服务令牌读取
 
@@ -169,9 +171,11 @@ Framework 不承担 RawMemory 解析、Memory 挂载、分区格式转换或写�
 
 ## 8. 任务边界
 
-Framework 不驱动任何具体的跨 tick 计算，只在自己的收尾时序里给 TaskHost 一次驱动机会：所有插件的 tickEnd、健康/熔断统计与 MemoryHost.end 完成后，Framework 调用 Runtime 中的 `TaskHost.drive(tick, cpu)`，把本 tick 剩余的 CPU 交给就绪任务；`cpu` 是驱动本轮插件用的同一个 CpuBudget，任务因此拿不到 `reserveCpu` 预留的部分。`drive` 只做协作式调度，不理解任务的业务内容，也不参与插件依赖排序或 Intent 仲裁。
+Framework 不驱动任何具体的跨 tick 计算，只在自己的收尾时序里给 TaskHost 两个入口：健康/熔断统计之后、MemoryHost.end 之前调用 `TaskHost.persist(tick)`，让它在 Memory 写入阶段内写入跨 global 重启记录；所有插件的 tickEnd、健康/熔断统计与 MemoryHost.end 完成后，调用 Runtime 中的 `TaskHost.drive(tick, cpu)`，safeMode 的 tick 跳过驱动。`cpu` 是驱动本轮插件用的同一个 CpuBudget，TaskHost 每开始一片前调用它的 `admit()`——即普通插件的准入口径——因此任务主要使用常规额度 `limit` 减 `reserveCpu` 以内的剩余，bucket 高于调度器水位时另可使用盈余（口径与理由见 [TaskScheduler 设计](./taskScheduler.md) §5.2）。`drive` 只做协作式调度，不理解任务的业务内容，也不参与插件依赖排序或 Intent 仲裁；此时 Kernel 的执行归属是 `framework`、阶段是 `tasks.drive`，任务体内提交意图、订阅、发布服务或经插件上下文发布事件都会被拒绝（§5.2）。
 
-`drive` 内部对单个任务的异常隔离由 TaskHost 自己完成，不经过 Framework 的按插件错误边界；`drive` 调用本身的异常由 Framework 按宿主级故障处理（与 MemoryHost.begin 同等边界）：记录诊断、本 tick 跳过任务驱动，不触发 safeMode。完整协议、调度算法与故障归属规则由 [TaskScheduler 设计](./taskScheduler.md) 独立管理，Framework 只消费 `src/contracts/runtime.ts` 发布的 TaskHost 契约，不导入或创建具体实现。
+`drive` 内部对单个任务的异常隔离由 TaskHost 自己完成，不经过 Framework 的按插件错误边界；`drive` 调用本身的异常由 Framework 的宿主错误边界处理，诊断的插件归属为 `framework`、阶段为 `tasks.drive`：记录诊断、本 tick 不再驱动任务，不触发 safeMode。
+
+插件提交的任务是它持有的资源：Framework 释放插件（停用、熔断、卸载、替换或 setup 失败）时，在执行完插件登记的清理函数后调用 `TaskHost.releaseOwner(pluginId)`，已释放插件的任务不再消耗 CPU，替换后的新实例也不会拿到旧实例留下的任务。该调用同样经宿主错误边界执行，异常按框架故障记录，不计入该插件。完整协议、调度算法与故障归属规则由 [TaskScheduler 设计](./taskScheduler.md) 独立管理，Framework 只消费 `src/contracts/runtime.ts` 发布的 TaskHost 契约，不导入或创建具体实现。
 
 ## 9. ErrorMapper、Profiler 与故障隔离
 
@@ -242,6 +246,7 @@ Profiler 的初始开关由 Runtime 配置。业务优先级应由后续策略�
 - Framework 不读写宿主存储、不挂载 Memory；global reset 清空 heap 健康状态。
 - 同步 ErrorMapper、Profiler 加固与组合。
 - CPU 准入、基础冲突通道、共享锁及提交回执。
+- 收尾阶段之后驱动 TaskHost，释放插件时回收其任务（§8）；PluginContext 提供按插件绑定的 `tasks` 入口。
 - RoomShortcuts 服务插件与真实应用入口。
 - 单元测试及真实 Rollup 产物的多 tick 沙箱运行和堆栈映射测试。
 

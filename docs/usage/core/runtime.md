@@ -24,7 +24,7 @@ const logistics = runtime.createContext('Logistics');
 const defense = runtime.createContext('Defense', { notify: true });
 ```
 
-两个上下文共享 `bus`、`profiler` 和 `memory` 主机，但拥有独立日志作用域。`env` 提供 `getGame/getRoom/getCreep/getPowerCreep/getFlag/getObjectById`；这些方法每次读取当前 Game。
+两个上下文共享 `bus`、`profiler`、`memory` 主机与任务调度器，但拥有独立日志作用域；`tasks` 按模块名绑定（用法见 [TaskScheduler 使用说明](./taskScheduler.md)）。模块名同时是任务的 owner，与插件 id 共用命名空间，传入空字符串会抛出 `Invalid task owner`。`env` 提供 `getGame/getRoom/getCreep/getPowerCreep/getFlag/getObjectById`；这些方法每次读取当前 Game。
 
 ## RuntimeOptions
 
@@ -35,6 +35,7 @@ const defense = runtime.createContext('Defense', { notify: true });
 | `memoryManager` | MemoryManager 配置（平台端口）；LoggerFactory 与 tick 来源由 Runtime 注入，tick 取自 `platform.getGame().time` |
 | `profiler`      | `{ enabled, storage }`；传入 `false` 完全禁用 Profiler               |
 | `errorMapper`   | `{ loadSourceMap, report }`                                          |
+| `taskScheduler` | `{ defaultMinBucket, defaultMaxCpuPerTick, retainTicks, burstBucket }`：任务缺省 bucket 门限（5000）、缺省每 tick CPU 软上限（不限）、闲置回收期限（1000 tick）、使用 bucket 盈余的水位（9500，`Infinity` 关闭）；`getGame`、Logger、ErrorMapper、Profiler 与 MemoryHost 由 Runtime 注入 |
 
 `profiler: false` 不创建统计器；`profiler: { enabled: false }` 创建统计器但暂停采样，之后可调用 `runtime.profiler.enable()`。
 
@@ -62,14 +63,14 @@ const runtime = createRuntime(
 );
 ```
 
-可替换 `logging`、`bus`、`memory`、`profiler` 和 `errorMapper`。替换项优先于对应的创建配置，未提供的能力仍按配置创建；`overrides.profiler: null` 禁用统计器，即使配置中已启用采样。普通 App 不应使用该参数；生产策略应写入第一个参数，让 Runtime 保持唯一组合根。
+可替换 `logging`、`bus`、`memory`、`profiler`、`errorMapper` 和 `tasks`。替换项优先于对应的创建配置，未提供的能力仍按配置创建；`overrides.profiler: null` 禁用统计器，即使配置中已启用采样。普通 App 不应使用该参数；生产策略应写入第一个参数，让 Runtime 保持唯一组合根。
 
 ## 返回值
 
 `CoreRuntime` 提供：
 
 - `getGame`：取得当前 tick 的 Game；
-- `logging`、`bus`、`memory`、`profiler`、`errorMapper`：唯一 Core 实例；
+- `logging`、`bus`、`memory`、`profiler`、`errorMapper`、`tasks`：唯一 Core 实例，其中 `tasks` 是 TaskHost，由 Framework 驱动；
 - `createContext(name, options)`：派生模块上下文。
 
 Profiler 默认统计只保存在 heap。需要持久化时，不得直接访问 Memory 或 RawMemory；应使用基于 MemoryManager 的存储适配。

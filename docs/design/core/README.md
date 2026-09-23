@@ -1,6 +1,6 @@
 # Core 架构设计及开发原则
 
-交付状态：已交付。统一内核装配、单向依赖边界、事务性插件注册、Memory 同步分区申请及长期访问契约接入均已交付。TaskScheduler 的内核能力身份与 Runtime 组装未交付，设计见 [TaskScheduler](./taskScheduler.md)。
+交付状态：已交付。统一内核装配、单向依赖边界、事务性插件注册、Memory 同步分区申请及长期访问契约接入、TaskScheduler 的内核能力身份与 Runtime/Framework 组装均已交付，详见 [TaskScheduler 设计](./taskScheduler.md)。
 
 本设计定义 Core 的架构与开发原则。模块设计入口：[Framework](./framework.md)、[Runtime](./runtime.md)、[Profiler](./profiler.md)、[ErrorMapper](./errorMapper.md)、[MemoryManager](./memoryManager.md)、[TaskScheduler](./taskScheduler.md)。
 
@@ -88,12 +88,12 @@ Logger
 ├── MemoryManager
 ├── Profiler 的环境日志
 └── ErrorMapper
-    └── TaskScheduler（依赖 Logger、ErrorMapper、Profiler）
+    └── TaskScheduler（依赖 Logger、ErrorMapper、Profiler、MemoryManager 契约）
 
 上述实例 ──→ Runtime ──→ Framework ──→ 普通插件
 ```
 
-同级 Core 模块只依赖 contracts，不导入彼此的工厂。Runtime 是唯一可导入上述具体工厂的组合根；前序模块不得依赖后序模块。ErrorMapper 的计时由 Framework 在 Profiler 已经存在后接入，错误报告和统计回路必须防止递归。TaskScheduler 依赖 Logger（自身诊断）、ErrorMapper（任务失败的堆栈捕获与映射）和 Profiler（任务分片计时），不依赖 EventBus 或 MemoryManager。
+同级 Core 模块只依赖 contracts，不导入彼此的工厂。Runtime 是唯一可导入上述具体工厂的组合根；前序模块不得依赖后序模块。ErrorMapper 的计时由 Framework 在 Profiler 已经存在后接入，错误报告和统计回路必须防止递归。TaskScheduler 依赖 Logger（自身诊断）、ErrorMapper（任务失败的堆栈捕获与映射）、Profiler（任务分片计时）和 MemoryHost 契约（跨 global 重启记录，只申请一个分区），不依赖 EventBus。
 
 Framework 是 tick 驱动者，Runtime 封装内核组件的必要顺序：
 
