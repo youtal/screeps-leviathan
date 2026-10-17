@@ -26,5 +26,10 @@
     "ts-jest": "29.4.15",
     "tslib": "2.8.1",
     "typescript": "6.0.3"
+  },
+  "overrides": {
+    "js-yaml@3": {
+      "argparse": "2.0.1"
+    }
   }
 }
