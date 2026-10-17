@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": [
+      "screeps",
+      "jest",
+      "node"
+    ],
+    "rewriteRelativeImportExtensions": true,
+    "esModuleInterop": true
+  },
+  "include": [
+    "src",
+    "test",
+    "scripts"
+  ]
+}

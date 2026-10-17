@@ -2,13 +2,21 @@
 
 Screeps Leviathan 是一个使用 TypeScript 开发、能长期无人值守运营的 Screeps AI。
 
-**当前状态**：工程已初始化，构建与测试工具链待建立。开发阶段与里程碑见[设计文档](./docs/design/README.md)。
+**当前状态**：工程已初始化，构建、类型检查与单元测试工具链已建立；私服场景测试与部署工具待建立。开发阶段与里程碑见[设计文档](./docs/design/README.md)。
 
 ## 开发命令
 
 环境要求：Node.js 24 及以上、npm 12 及以上，以 `package.json` 的 `engines` 为准。
 
-构建、测试与部署命令随工具链建立后在本节和[验证与发布](#validation)中补充，并以 `package.json` 的 `scripts` 为准。
+```bash
+npm ci                # 安装依赖
+npm run typecheck     # 类型检查（游戏代码与测试代码分别检查）
+npm test              # 单元测试
+npm run build         # 构建 dist/main.js 与 source map
+npm run check         # 依次运行以上三项
+```
+
+命令以 `package.json` 的 `scripts` 为准。私服场景测试与部署命令建立后在本节补充。
 
 部署凭据保存在不会提交到仓库的 `.secret.json` 中；建立部署工具时同时提供只含占位值的 `.secret.json.example`。
 
@@ -102,7 +110,7 @@ Logger 只承载纯文本日志，作用域名和正文在统一出口转义；�
 <a id="validation"></a>
 ### 验证与发布
 
-完成代码或构建系统修改后，按顺序运行与变更相符的检查：类型检查、单元与边界测试、构建；涉及引擎行为、跨 tick 状态或运营闭环的变更，再运行相应的私服场景测试；最后运行 `git diff --check`。其余检查的具体命令随工具链建立后补充。
+完成代码或构建系统修改后，按顺序运行与变更相符的检查：类型检查、单元与边界测试、构建；涉及引擎行为、跨 tick 状态或运营闭环的变更，再运行相应的私服场景测试；最后运行 `git diff --check`。对应的命令为 `npm run typecheck`、`npm test`、`npm run build`（或合并为 `npm run check`）与 `git diff --check`；私服场景测试的命令建立后补充。
 
 纯文档修改至少检查差异空白，并核对改动文档的链接与章节引用。交付说明应列明未通过或未运行的检查、原因和影响。
 
@@ -125,13 +133,28 @@ Logger 只承载纯文本日志，作用域名和正文在统一出口转义；�
 
 **版本号：**
 
-- 每次提交（包括合并提交）都更新 `package.json` 的 `version`。
-- 格式为 `MAJOR.MINOR.PATCH`：
-  - PATCH：每次提交加 1；
-  - MINOR：完成一个里程碑时加 1，PATCH 归零；
-  - MAJOR：首个可长期在线上运行的版本定为 1.0.0，此前保持为 0；之后只在持久化数据或运维方式出现不兼容变更时加 1。
-- 并行分支合并时若 `version` 冲突，取双方中较大的版本号再按上述规则加 1。
-- 初始版本为 `0.1.0`。
+版本号为 `a.b.c`，记录在 `package.json` 的 `version` 中，初始版本为 `0.1.0`。
+
+| 部分 | 何时变化 |
+| --- | --- |
+| `a` | 全部里程碑完成前为 0；全部完成后为 1；之后只在持久化数据或运维方式出现不兼容变更时加 1 |
+| `b` | 取当前里程碑的编号；进入下一个里程碑时加 1，`c` 归零 |
+| `c` | 每个改变构建产物的任务合并进 `dev` 时加 1；紧急修复取 `dev` 与 `master` 中最大的 `c` 再加 1 |
+
+- **何时改版本号**：只在合并提交中修改。任务分支上的普通提交、发布到 `master` 的合并、不改变构建产物的合并（例如只改文档或测试）都不改版本号。发布到 `master` 时直接为当前版本打标签。
+- **构建产物**：`src/`、构建配置（`rollup.config.mjs`、`tsconfig.json`）与 `package.json` 中的依赖声明发生变化，即视为改变了构建产物。
+- **工具**：`npm run version:bump [task|milestone|hotfix]` 按规则写入下一个版本号（默认 `task`）；`npm run check:version` 校验工作区中的版本号是否符合规则。
+
+合并任务分支到 `dev` 的步骤：
+
+```bash
+git switch dev
+git merge --no-ff --no-commit <任务分支>
+npm run version:bump        # 改变了构建产物时执行
+npm run check:version
+git add package.json package-lock.json
+git commit
+```
 
 <a id="secrets"></a>
 ### 密钥与敏感信息
