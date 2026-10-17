@@ -93,6 +93,7 @@
 | 市场 | 每种资源提供近 14 天的每日成交统计；挂单收 5% 手续费；terminal 运输消耗 `ceil(数量 × (1 − e^(−距离/30)))` 能量 | 物价模型以历史为主、挂单簿为辅，运输成本计入价格 |
 | NPC 入侵者 | 房间 source 的累计采集量达到阈值后出现；自有房间 RCL ≥ 4 时为大型入侵者 | 防御基线从 M2 起就必须具备（10.7） |
 | 代码分支 | 官服支持多个代码分支，可切换生效分支 | 发布与回滚以分支切换完成 |
+| JS 运行环境 | 官服运行在 Node 24 上 | 编译目标为 ES2024，可直接使用 ES2024 的语法与内置 API |
 | 运行时依赖 | 只有原生 API | 寻路只用原生 `PathFinder`；运行时零 npm 依赖 |
 
 ---
@@ -1650,6 +1651,7 @@ F1–F7、F10–F18 依据公开发布的 Screeps 服务端组件：`@screeps/en
 | F16 | 每个 WORK 每 tick：`HARVEST_POWER = 2`、`UPGRADE_CONTROLLER_POWER = 1`、`BUILD_POWER = 5`、`REPAIR_POWER = 100`；`REPAIR_COST = 0.01`；`CONTROLLER_MAX_UPGRADE_PER_TICK = 15`；`MAX_CREEP_SIZE = 50`；`MAX_CONSTRUCTION_SITES = 100`；各 RCL 的 extension 数量为 0、0、5、10、20、30、40、50、60（RCL 0–8），容量 RCL 1–6 为 50、RCL 7 为 100、RCL 8 为 200 | common `lib/constants.js` |
 | F17 | rampart 每 100 tick 衰减 300 hits，各 RCL 上限为 300k、1M、3M、10M、30M、100M、300M（RCL 2–8）；道路每 1000 tick 衰减 100 hits；container 每 100 tick 衰减 5000 hits，自有房间为每 500 tick；tower 维修 800 hits、治疗 400、攻击 600（5 格内），每次耗能 10；`CONTROLLER_DOWNGRADE` 为 20000、10000、20000、40000、80000、120000、150000、200000（RCL 1–8）；`SAFE_MODE_COOLDOWN = 50000` | common `lib/constants.js` |
 | F18 | NPC 入侵：source 每次被采集时累计 `invaderHarvested`；房间累计量达到阈值（基准 `INVADERS_ENERGY_GOAL = 100000`）后生成袭击，并把阈值重置为基准的 0.7–1.3 倍，10% 概率再翻倍或减半；自有房间 RCL ≥ 4 时为大型入侵者；九成情况为 1 个，其余为 2–5 个，可能带 boost；由近战、远程、治疗组成；私服还要求同扇区存在入侵者据点。在别人占有或预定的房间里无法采集 | engine `src/processor/intents/creeps/harvest.js`；backend `lib/cronjobs.js` |
+| F19 | 官服的 JS 运行环境为 Node 24 | 项目确认的官服运行环境 |
 
 ---
 
