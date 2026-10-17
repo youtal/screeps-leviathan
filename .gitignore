@@ -1,0 +1,25 @@
+node_modules/
+.venv/
+
+dist/
+
+.secret.json
+
+.tscache/
+
+.nyc_output
+coverage
+
+# Screeps 集成测试为每个场景创建独立的私服数据、日志与性能采样结果。
+test/integration/.cache/
+test/integration/profiles/
+
+server
+
+.history
+npminstall-debug.log
+
+.idea/
+.vscode/
+
+.claude/
