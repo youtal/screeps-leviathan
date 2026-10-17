@@ -4,6 +4,7 @@
   "private": true,
   "description": "能长期无人值守运营的 Screeps AI",
   "license": "UNLICENSED",
+  "type": "module",
   "engines": {
     "node": ">=24",
     "npm": ">=12"
@@ -14,7 +15,8 @@
     "build": "rollup -c",
     "check": "npm run typecheck && npm test && npm run build",
     "version:bump": "node scripts/version/cli.ts bump",
-    "check:version": "node scripts/version/cli.ts check"
+    "check:version": "node scripts/version/cli.ts check",
+    "deploy": "node scripts/deploy/cli.ts"
   },
   "devDependencies": {
     "@rollup/plugin-typescript": "12.3.0",

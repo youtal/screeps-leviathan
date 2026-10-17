@@ -2,7 +2,7 @@
 
 Screeps Leviathan 是一个使用 TypeScript 开发、能长期无人值守运营的 Screeps AI。
 
-**当前状态**：工程已初始化，构建、类型检查与单元测试工具链已建立；私服场景测试与部署工具待建立。开发阶段与里程碑见[设计文档](./docs/design/README.md)。
+**当前状态**：工程已初始化，构建、类型检查、单元测试与部署工具链已建立；私服场景测试待建立。开发阶段与里程碑见[设计文档](./docs/design/README.md)。
 
 ## 开发命令
 
@@ -16,9 +16,24 @@ npm run build         # 构建 dist/main.js 与 source map
 npm run check         # 依次运行以上三项
 ```
 
-命令以 `package.json` 的 `scripts` 为准。私服场景测试与部署命令建立后在本节补充。
+命令以 `package.json` 的 `scripts` 为准。私服场景测试命令建立后在本节补充。
 
-部署凭据保存在不会提交到仓库的 `.secret.json` 中；建立部署工具时同时提供只含占位值的 `.secret.json.example`。
+### 部署
+
+部署凭据保存在不会提交到仓库的 `.secret.json` 中，以账户名为键，可以配置多个账户，格式见只含占位值的 `.secret.json.example`。部署工具不设默认账户：除 `accounts` 外，每条命令都必须用 `--account` 指定目标账户。
+
+```bash
+npm run deploy -- accounts                                    # 列出已配置的账户与服务器（不显示令牌）
+npm run deploy -- branches --account <账户>                   # 列出该账户的代码分支与生效分支
+npm run deploy -- upload   --account <账户> [--branch <分支>]  # 构建、上传并回读校验
+npm run deploy -- upload   --account <账户> --activate         # 上传后把生效分支切换到该分支
+npm run deploy -- activate --account <账户> --branch <分支>    # 切换生效分支
+npm run deploy -- rollback --account <账户>                   # 把生效分支切回上一个版本分支
+```
+
+- 未指定 `--branch` 时上传到版本分支 `v<版本号>`。版本分支是回滚的依据，只能在工作区干净且 HEAD 带同名标签（即 `master` 上的发布提交）时上传；开发调试用 `--branch` 指定其他分支名。
+- 覆盖当前生效分支会立即改变线上运行的代码，只在同时给出 `--activate` 时允许。
+- 上传、切换生效分支与回滚都是外部操作，需单独发起（见[验证与发布](#validation)）。
 
 ## 文档
 
