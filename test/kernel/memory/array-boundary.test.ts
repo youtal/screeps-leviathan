@@ -1,5 +1,5 @@
 /** MD-01 回归：非普通数组必须被拒绝，不能丢弃原型或调用继承的 toJSON。 */
-import { copyJson, validateJson } from '../../../src/kernel/memory/json';
+import { copyJson, validateJson } from '@/kernel/memory/json';
 import { harness, marker, spec } from './harness';
 
 class CustomArray extends Array<number> {}

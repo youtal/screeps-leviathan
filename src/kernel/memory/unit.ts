@@ -4,7 +4,7 @@
  * 初始化与迁移先对副本计算，校验成功后才替换 record；失败不改变旧数据或发布访问器。
  * 脏集合由模块实例创建，删除/销毁会使旧单元失效；global reset 后从记录重新创建。
  */
-import type { Json, UnitSpec } from '../../contracts/memory';
+import type { Json, UnitSpec } from '@/contracts/memory';
 import { copyJson } from './json';
 
 export type Space = 'part' | 'rooms' | 'creeps' | 'flags';

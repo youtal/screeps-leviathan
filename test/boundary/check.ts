@@ -8,7 +8,8 @@
  * 检查的规则：
  * - layer：依赖只能从上往下；除 app 与 main 外，任何层都不得导入 kernel 的实现；
  *   独立入口 src/fallback.ts 不得导入项目模块，包括类型依赖和自身；
- * - package：src 不导入外部包，运行时代码全部打入构建产物；
+ * - package：src 不导入外部包，运行时代码全部打入构建产物；`@/` 是 src/ 的别名（tsconfig.json 的 paths），不算外部包；
+ * - alias：跨模块导入必须使用 `@/` 别名，相对路径只用于模块内部（README 开发规范）；
  * - domain：领域之间不互相导入，领域以 domains/<分组>/<领域>/ 为单位；
  * - storage：全局 Memory、RawMemory、InterShardMemory，游戏对象的原生 memory 属性，以及
  *   spawnCreep 的 memory 选项，只能在 kernel 的 memory、segments、intershard 模块中使用；
@@ -23,7 +24,10 @@ import ts from 'typescript';
 
 import { classifySpawnOptions } from './spawn-options';
 
-export type Rule = 'layer' | 'package' | 'domain' | 'storage' | 'libState';
+export type Rule = 'layer' | 'package' | 'domain' | 'alias' | 'storage' | 'libState';
+
+/** src/ 的导入别名前缀。 */
+const ALIAS = '@/';
 
 export interface Violation {
   readonly file: string;
@@ -86,6 +90,19 @@ const layerOf = (srcPath: string): Layer | null => {
  * @returns 前三级路径；不在领域目录内的文件返回其所在目录。
  */
 const domainOf = (srcPath: string): string => srcPath.split('/').slice(0, 3).join('/');
+
+/**
+ * @description 取出文件所属的模块，用于判断导入是否跨模块：src 根目录文件各自为一个模块；contracts 整体为一个模块；
+ * 领域为 domains/<分组>/<领域>；其余为 <层>/<模块>（层下的单个文件以去掉后缀的文件名为模块）。
+ * @param srcPath 相对 src 的路径，可带或不带 .ts 后缀与 /index。
+ * @returns 模块标识。
+ */
+const moduleOf = (srcPath: string): string => {
+  const parts = srcPath.replace(/\.ts$/, '').replace(/\/index$/, '').split('/');
+  if (parts.length === 1) return parts[0];
+  if (parts[0] === 'contracts') return 'contracts';
+  return parts.slice(0, parts[0] === 'domains' ? 3 : 2).join('/');
+};
 
 /**
  * @description 递归列出目录下的 .ts 源文件（不含 .d.ts）。
@@ -191,13 +208,14 @@ export const checkBoundaries = (options: CheckOptions): Violation[] => {
     }
 
     /**
-     * @description 检查一个导入说明符：外部包、fallback 的任何导入、src 之外的文件、跨层与跨领域导入都登记为违规。
+     * @description 检查一个导入说明符：外部包、fallback 的任何导入、src 之外的文件、跨层与跨领域导入，以及用相对路径的跨模块导入都登记为违规。
      * @param node 导入所在的语法节点。
      * @param specifier 导入路径文本。
      * @returns 无返回值；违规时登记。
      */
     const checkSpecifier = (node: ts.Node, specifier: string): void => {
-      if (!specifier.startsWith('.')) {
+      const aliased = specifier.startsWith(ALIAS);
+      if (!aliased && !specifier.startsWith('.')) {
         report(node, 'package', `不得导入外部包 ${specifier}`);
         return;
       }
@@ -206,7 +224,9 @@ export const checkBoundaries = (options: CheckOptions): Violation[] => {
         report(node, 'layer', `fallback.ts 不得导入项目模块（${specifier}）`);
         return;
       }
-      const targetPath = toSrcPath(srcRoot, resolve(dirname(fileName), specifier));
+      const targetPath = aliased
+        ? toSrcPath(srcRoot, resolve(srcRoot, specifier.slice(ALIAS.length)))
+        : toSrcPath(srcRoot, resolve(dirname(fileName), specifier));
       if (targetPath.startsWith('..')) {
         report(node, 'layer', `不得导入 src 之外的文件 ${specifier}`);
         return;
@@ -219,6 +239,10 @@ export const checkBoundaries = (options: CheckOptions): Violation[] => {
       }
       if (layer === 'domains' && targetLayer === 'domains' && domainOf(srcPath) !== domainOf(targetPath)) {
         report(node, 'domain', `${domainOf(srcPath)} 不得导入其他领域 ${domainOf(targetPath)}`);
+        return;
+      }
+      if (!aliased && moduleOf(srcPath) !== moduleOf(targetPath)) {
+        report(node, 'alias', `跨模块导入须使用 @/ 别名：${specifier}（${moduleOf(srcPath)} → ${moduleOf(targetPath)}）`);
       }
     };
 

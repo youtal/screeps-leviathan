@@ -276,7 +276,7 @@ contracts 只有类型声明，没有初始化步骤和运行时错误。各接�
 一个模块的典型写法：
 
 ```ts
-import type { ModuleDefinition } from '../../contracts/module';
+import type { ModuleDefinition } from '@/contracts/module';
 
 type SiteData = { lastSeen: number; tasks: { a: string; id: string }[] };
 const LAST_SEEN = ['lastSeen'] as const;           // 热路径上的路径声明为常量元组

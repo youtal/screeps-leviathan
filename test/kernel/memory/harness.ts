@@ -1,7 +1,7 @@
 /** Memory 集成测试宿主：沿用严格平台替身，传播用户 tick 异常，避免假阳性。 */
-import type { ProjectMarker } from '../../../src/contracts/boot';
-import type { UnitSpec } from '../../../src/contracts/memory';
-import { createMemory, type TickFacts } from '../../../src/kernel/memory';
+import type { ProjectMarker } from '@/contracts/boot';
+import type { UnitSpec } from '@/contracts/memory';
+import { createMemory, type TickFacts } from '@/kernel/memory';
 import { createMemoryPlatform } from '../../platform/memory';
 
 export const marker: ProjectMarker = {

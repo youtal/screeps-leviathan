@@ -18,25 +18,25 @@ describe('边界检查规则', () => {
   const files: Record<string, string> = {
     'contracts/memory.ts': 'export interface Store { readonly memory: number }',
     'kernel/memory/index.ts': 'export const raw = (): string => RawMemory.get();\nexport const mem = (): unknown => Memory;',
-    'kernel/process/index.ts': "import { raw } from '../memory/index';\nexport const run = (): string => raw();",
+    'kernel/process/index.ts': "import { raw } from '@/kernel/memory/index';\nexport const run = (): string => raw();",
     'lib/hash.ts': 'export const hash = (text: string): number => text.length;\nexport const TABLE = { a: 1 } as const;',
-    'lib/value.ts': "import type { Store } from '../contracts/memory';\nexport const value = (store: Store): number => store.memory;",
+    'lib/value.ts': "import type { Store } from '@/contracts/memory';\nexport const value = (store: Store): number => store.memory;",
     'lib/dependencies.ts': [
-      "import { run } from '../kernel/process/index';",
-      "import { x } from '../world/roomCache/index';",
-      "import { m } from '../services/movement/index';",
-      "import { s } from '../colony/stage/index';",
-      "import { mine } from '../domains/economy/mining/index';",
-      "import { all } from '../app/assembly/index';",
+      "import { run } from '@/kernel/process/index';",
+      "import { x } from '@/world/roomCache/index';",
+      "import { m } from '@/services/movement/index';",
+      "import { s } from '@/colony/stage/index';",
+      "import { mine } from '@/domains/economy/mining/index';",
+      "import { all } from '@/app/assembly/index';",
     ].join('\n'),
     'lib/state.ts': 'let counter = 0;\nexport const cache = new Map<string, number>();\nexport const next = (): number => ++counter;',
-    'world/roomCache/index.ts': "import { run } from '../../kernel/process/index';\nexport const x = run;",
-    'services/movement/index.ts': "import { hash } from '../../lib/hash';\nimport type { Store } from '../../contracts/memory';\nexport const m = (s: Store): number => hash('a') + s.memory;",
-    'colony/stage/index.ts': "import { m } from '../../services/movement/index';\nexport const s = m;",
-    'domains/economy/mining/index.ts': "import { m } from '../../../services/movement/index';\nexport const mine = m;",
+    'world/roomCache/index.ts': "import { run } from '@/kernel/process/index';\nexport const x = run;",
+    'services/movement/index.ts': "import { hash } from '@/lib/hash';\nimport type { Store } from '@/contracts/memory';\nexport const m = (s: Store): number => hash('a') + s.memory;",
+    'colony/stage/index.ts': "import { m } from '@/services/movement/index';\nexport const s = m;",
+    'domains/economy/mining/index.ts': "import { m } from '@/services/movement/index';\nexport const mine = m;",
     'domains/economy/mining/plan.ts': "import { mine } from './index';\nexport const plan = mine;",
-    'domains/economy/upgrade/index.ts': "import { plan } from '../mining/plan';\nexport const up = plan;",
-    'app/assembly/index.ts': "import { run } from '../../kernel/process/index';\nimport { up } from '../../domains/economy/upgrade/index';\nexport const all = [run, up];",
+    'domains/economy/upgrade/index.ts': "import { plan } from '@/domains/economy/mining/plan';\nexport const up = plan;",
+    'app/assembly/index.ts': "import { run } from '@/kernel/process/index';\nimport { up } from '@/domains/economy/upgrade/index';\nexport const all = [run, up];",
     'app/boot/index.ts': "import lodash from 'lodash';\nexport const l = lodash;",
     'domains/economy/build/index.ts': [
       'export const f = (creep: Creep, spawn: StructureSpawn, room: Room): void => {',
@@ -59,7 +59,7 @@ describe('边界检查规则', () => {
       '  creep.move(TOP);',
       '};',
     ].join('\n'),
-    'main.ts': "import { run } from './fallback';\nexport const loop = run;",
+    'main.ts': "import { run } from '@/fallback';\nexport const loop = run;",
   };
 
   let violations: Violation[];
@@ -93,6 +93,28 @@ describe('边界检查规则', () => {
     expect(of('fallback.ts')).toEqual([]);
     expect(of('main.ts')).toEqual([]);
     expect(of('fallback/index.ts')).toEqual(['layer:1']);
+  });
+
+  test('alias：跨模块导入必须使用 @/ 别名，相对路径只用于模块内部', () => {
+    const result = checkBoundaries({
+      root, srcRoot,
+      files: Object.fromEntries(Object.entries({
+        'contracts/memory.ts': "import type { Json } from './json';\nexport type Store = Json;",
+        'contracts/json.ts': 'export type Json = number;',
+        'kernel/memory/index.ts': "import { json } from './json';\nimport type { Store } from '@/contracts/memory';\nexport const raw = (s: Store): number => json + s;",
+        'kernel/memory/json.ts': 'export const json = 1;',
+        'kernel/process/index.ts': "import { raw } from '../memory/index';\nimport type { Store } from '../../contracts/memory';\nexport const run = (s: Store): number => raw(s);",
+        'lib/hash.ts': "import type { Json } from '../contracts/json';\nexport const hash = (j: Json): number => j;",
+        'fallback.ts': 'export const run = (): void => {};',
+        'main.ts': "import { run } from './fallback';\nexport const loop = run;",
+        'app/assembly/index.ts': "import { raw } from '@/kernel/memory';\nexport const all = raw;",
+      }).map(([path, text]) => [join(srcRoot, path), text])),
+    });
+    const at = (file: string) => result.filter((v) => v.file === file).map((v) => `${v.rule}:${v.line}`);
+    expect([at('contracts/memory.ts'), at('kernel/memory/index.ts'), at('app/assembly/index.ts')]).toEqual([[], [], []]);
+    expect(at('kernel/process/index.ts')).toEqual(['alias:1', 'alias:2']);
+    expect(at('lib/hash.ts')).toEqual(['alias:1']);
+    expect(at('main.ts')).toEqual(['alias:1']);
   });
 
   test('KC-03：fallback 禁止项目依赖（包括自身、类型、重导出和动态导入）及持久化', () => {

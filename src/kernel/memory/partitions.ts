@@ -3,7 +3,7 @@
  * 工厂由模块实例持有，重复取得不会重新分配；初始化先完成再写入根表，抛错不会留下空记录。
  * 不提供跨 owner 访问给业务模块，宿主只注入绑定后的工厂。销毁后的旧工厂与访问器均拒绝使用。
  */
-import type { Json, PartitionFactory, UnitSpec } from '../../contracts/memory';
+import type { Json, PartitionFactory, UnitSpec } from '@/contracts/memory';
 import { accessorFor } from './accessor';
 import { checkKey } from './json';
 import { type Runtime, unitId } from './runtime';

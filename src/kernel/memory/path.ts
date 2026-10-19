@@ -4,7 +4,7 @@
  * create 仅建立普通对象，缺失分支在完整构造成功后才接回根，失败不留下半条路径。
  * 数组长度固定，删除元素须由 update/splice 完成。函数无跨 tick 状态，复杂度 O(路径长度)。
  */
-import type { Json, PathSegment } from '../../contracts/memory';
+import type { Json, PathSegment } from '@/contracts/memory';
 import { isObject } from './json';
 
 /** 存储内部可变视图；对外 Json 是只读类型，写入权只由 Accessor 授予。 */

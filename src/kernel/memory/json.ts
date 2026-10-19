@@ -5,7 +5,7 @@
  * 递归集合仅记录当前祖先链，共享但不循环的子对象合法；每次调用结束释放，无跨 tick 状态。
  * 设计见 docs/design/kernel/memory.md。复杂度与值大小成正比，仅在实际写入/脏编码时使用。
  */
-import type { Json } from "../../contracts/memory";
+import type { Json } from "@/contracts/memory";
 
 /**
  * @description 判断输入是否为非 null、非数组的普通对象或无原型字典；不递归校验其属性。
