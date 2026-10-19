@@ -5,7 +5,7 @@
  * 每 tick 累计最多处理 limit 条实体记录，不每次分配全量 key 数组；reset 后重新积累缺席证据。
  * 房间回收依据宿主提供的保护/观测事实，缺失则保留，不在持久层推断 colony 业务。
  */
-import type { EntitySpace, EntitySlices, Json, UnitSpec } from '../../contracts/memory';
+import type { EntitySpace, EntitySlices, Json, UnitSpec } from '@/contracts/memory';
 import { accessorFor } from './accessor';
 import { checkKey } from './json';
 import { recordId, type Runtime, unitId } from './runtime';
