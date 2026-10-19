@@ -32,8 +32,19 @@ const SECRET_FILE = '.secret.json';
 const MAIN_FILE = 'dist/main.js';
 const MAP_FILE = 'dist/main.js.map';
 
+/**
+ * @description 同步执行一条 git 命令并返回去掉首尾空白的输出。
+ * @param args git 子命令及参数。
+ * @returns 命令的标准输出。
+ * @throws {Error} git 以非零状态退出。
+ */
 const git = (...args: string[]): string => execFileSync('git', args, { encoding: 'utf8' }).trim();
 
+/**
+ * @description 读取并解析当前目录的 .secret.json；内容可能含令牌，只在内存中使用，不输出。
+ * @returns 解析后的 JSON 值，交给 lib.ts 校验。
+ * @throws {Error} 文件不存在或不是合法 JSON（消息不包含文件内容）。
+ */
 const readSecret = (): unknown => {
   if (!existsSync(SECRET_FILE)) {
     throw new Error(`未找到 ${SECRET_FILE}；参照 .secret.json.example 创建`);
@@ -45,7 +56,13 @@ const readSecret = (): unknown => {
   }
 };
 
-/** 切换后重新读取分支列表，确认服务器上的生效分支确实已变更。 */
+/**
+ * @description 切换世界的生效分支，然后重新读取分支列表，确认服务器上的生效分支确实已变更。
+ * @param api 绑定目标账户的客户端。
+ * @param branch 要切换到的分支名。
+ * @returns 无返回值；成功时输出切换结果。
+ * @throws {Error} 请求失败，或切换后生效分支与目标不一致。
+ */
 const activateAndConfirm = async (api: ScreepsApi, branch: string): Promise<void> => {
   await api.setActiveWorld(branch);
   const active = activeWorldBranch(await api.listBranches());
@@ -55,6 +72,12 @@ const activateAndConfirm = async (api: ScreepsApi, branch: string): Promise<void
   console.log(`生效分支已切换为 ${branch}`);
 };
 
+/**
+ * @description 输出账户的全部代码分支，并标注生效与模拟分支。
+ * @param api 绑定目标账户的客户端。
+ * @returns 无返回值；结果写到标准输出。
+ * @throws {Error} 请求失败。
+ */
 const listBranches = async (api: ScreepsApi): Promise<void> => {
   for (const { branch, activeWorld, activeSim } of await api.listBranches()) {
     const marks = [activeWorld ? '生效' : '', activeSim ? '模拟' : ''].filter(Boolean).join('、');
@@ -62,6 +85,14 @@ const listBranches = async (api: ScreepsApi): Promise<void> => {
   }
 };
 
+/**
+ * @description 执行 upload 命令：校验目标分支，构建，新建或覆盖分支，回读校验，按需切换生效分支。
+ * 版本分支须满足发布条件；覆盖生效分支须同时给出 --activate（由 planUpload 检查）。
+ * @param api 绑定目标账户的客户端。
+ * @param args 解析后的命令行参数，使用其中的 branch 与 activate。
+ * @returns 无返回值；成功时输出上传与切换结果。
+ * @throws {Error} 分支名非法、不满足版本分支条件、构建失败、请求失败或回读校验不一致。
+ */
 const upload = async (api: ScreepsApi, args: DeployArgs): Promise<void> => {
   const version = (JSON.parse(readFileSync('package.json', 'utf8')) as { version: string }).version;
   const target = args.branch ?? versionBranch(version);
@@ -96,6 +127,11 @@ const upload = async (api: ScreepsApi, args: DeployArgs): Promise<void> => {
   }
 };
 
+/**
+ * @description 命令行主流程：解析参数、读取账户，按命令分派；除 accounts 外都会访问服务器。
+ * @returns 无返回值；结果写到标准输出。
+ * @throws {Error} 参数、账户配置、校验或请求失败；由文件末尾统一输出消息并设置退出码。
+ */
 const main = async (): Promise<void> => {
   const args = parseDeployArgs(process.argv.slice(2));
   const secret = readSecret();

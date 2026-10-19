@@ -32,7 +32,12 @@ export interface CheckResult {
  */
 export const BUILD_PATHS: readonly string[] = ['src/', 'rollup.config.mjs', 'tsconfig.json'];
 
-/** 解析 a.b.c 形式的版本号；不接受预发布或构建元数据后缀。 */
+/**
+ * @description 解析 a.b.c 形式的版本号；不接受预发布或构建元数据后缀。
+ * @param text 版本号文本。
+ * @returns 解析后的版本号。
+ * @throws {Error} 文本不是 a.b.c 形式。
+ */
 export const parseVersion = (text: string): Version => {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(text);
   if (!match) {
@@ -41,15 +46,29 @@ export const parseVersion = (text: string): Version => {
   return { a: Number(match[1]), b: Number(match[2]), c: Number(match[3]) };
 };
 
+/**
+ * @description 把版本号格式化为 a.b.c 文本。
+ * @param v 版本号。
+ * @returns a.b.c 形式的文本。
+ */
 export const formatVersion = (v: Version): string => `${v.a}.${v.b}.${v.c}`;
 
-/** 比较两个版本号：返回负数表示 x 较小，0 表示相等，正数表示 x 较大。 */
+/**
+ * @description 按 a、b、c 的顺序比较两个版本号。
+ * @param x 左侧版本号。
+ * @param y 右侧版本号。
+ * @returns 负数表示 x 较小，0 表示相等，正数表示 x 较大。
+ */
 export const compareVersion = (x: Version, y: Version): number => x.a - y.a || x.b - y.b || x.c - y.c;
 
 /**
- * 按规则计算下一个版本号。
+ * @description 按规则计算下一个版本号。
  * hotfix 需要传入其他分支（dev、master）的版本号：c 取同一 a.b 下所有已知版本的最大值再加 1，
  * 避免与 dev 上已经用过、但内容不同的版本号重名。
+ * @param kind 计算方式：task 使 c 加 1；milestone 使 b 加 1、c 归零；hotfix 如上。
+ * @param current 当前版本号。
+ * @param others 其他分支的版本号，只有 hotfix 使用，默认为空。
+ * @returns 下一个版本号。
  */
 export const nextVersion = (kind: BumpKind, current: Version, others: readonly Version[] = []): Version => {
   switch (kind) {
@@ -69,7 +88,11 @@ export const nextVersion = (kind: BumpKind, current: Version, others: readonly V
   }
 };
 
-/** 改动的文件中是否有影响构建产物的路径（路径相对于仓库根目录，使用 `/` 分隔）。 */
+/**
+ * @description 判断改动的文件中是否有影响构建产物的路径。
+ * @param changedFiles 改动文件列表，路径相对于仓库根目录、使用 `/` 分隔。
+ * @returns 任一文件命中 BUILD_PATHS 时为 true。
+ */
 export const touchesBuildPaths = (changedFiles: readonly string[]): boolean =>
   changedFiles.some((file) =>
     BUILD_PATHS.some((path) => (path.endsWith('/') ? file.startsWith(path) : file === path)),
@@ -81,8 +104,19 @@ export interface DependencyFields {
   readonly devDependencies?: Readonly<Record<string, string>>;
 }
 
-/** 两份 package.json 的依赖声明是否不同。依赖变化会改变构建工具或打包内容，按影响构建产物处理。 */
+/**
+ * @description 判断两份 package.json 的依赖声明是否不同。依赖变化会改变构建工具或打包内容，按影响构建产物处理。
+ * @param before 基准的依赖声明。
+ * @param after 当前的依赖声明。
+ * @returns dependencies 或 devDependencies 任一不同时为 true。
+ */
 export const dependencyChanged = (before: DependencyFields, after: DependencyFields): boolean => {
+  /**
+   * @description 比较两个依赖表的键集合与版本是否完全相同；缺失视为空表。
+   * @param x 一个依赖表。
+   * @param y 另一个依赖表。
+   * @returns 完全相同时为 true。
+   */
   const same = (x?: Readonly<Record<string, string>>, y?: Readonly<Record<string, string>>): boolean => {
     const xKeys = Object.keys(x ?? {});
     const yKeys = Object.keys(y ?? {});
@@ -92,11 +126,14 @@ export const dependencyChanged = (before: DependencyFields, after: DependencyFie
 };
 
 /**
- * 校验一次提交中的版本号是否符合规则。
- * - merging：是否正在完成一次合并（存在 MERGE_HEAD）；
- * - base：合并目标分支（即 HEAD）上的版本号；
- * - current：工作区中的版本号；
- * - buildChanged：相对 HEAD 是否改变了构建产物。
+ * @description 校验一次提交中的版本号是否符合规则：普通提交与不改变构建产物的合并保持版本号；
+ * 改变构建产物的合并须在同一里程碑内增大 c，或进入下一里程碑时 b 加 1、c 归零；a 的变化须人工确认。
+ * @param input 校验依据。
+ * @param input.merging 是否正在完成一次合并（存在 MERGE_HEAD）。
+ * @param input.base 合并目标分支（即 HEAD）上的版本号。
+ * @param input.current 工作区中的版本号。
+ * @param input.buildChanged 相对 HEAD 是否改变了构建产物。
+ * @returns ok 表示是否符合规则，message 说明结论或违反的规则。
  */
 export const checkVersion = (input: {
   readonly merging: boolean;

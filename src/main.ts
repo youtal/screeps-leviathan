@@ -6,6 +6,10 @@
  * kernel 与保底循环实现后，本文件改为装配 kernel，并用保底循环包住整个 tick
  * （见 docs/design/architecture.md 的"保底循环"一节）。
  */
+/**
+ * @description Screeps 每 tick 调用的入口；当前为占位实现。
+ * @returns 无返回值；kernel 实现前不执行任何游戏逻辑。
+ */
 export const loop = (): void => {
   // 占位：kernel 实现前不执行任何游戏逻辑。
 };

@@ -44,14 +44,35 @@ export type BackupState = "pending" | "done" | "failed";
 
 /** boot 阶段的特权操作（架构设计 5.6）。只在 boot 阶段有效，其他阶段调用即报错。 */
 export interface BootPort {
+  /**
+   * @description 读取原始 Memory 的概要，不触发全局 Memory 的惰性解析，也不修改存储。
+   * @returns 原始文本是否为空、能否解析、根键列表及结构合法的项目标记。
+   * @throws {Error} 不在 boot 阶段调用。
+   */
   summary(): RawMemorySummary;
-  /** 把原始 Memory 写入备份区；可能跨 tick，重复调用推进进度。 */
+  /**
+   * @description 把原始 Memory 写入 segment 备份区；可能跨 tick 完成，重复调用推进进度。
+   * @returns 备份进度：pending 表示仍需在后续 tick 继续调用，done 表示已完成，failed 表示无法完成。
+   * @throws {Error} 不在 boot 阶段调用。
+   */
   backup(): BackupState;
-  /** 整体清空 Memory，并按当前 epoch + 1 重建项目标记。 */
+  /**
+   * @description 整体清空主 Memory，并按当前 epoch + 1 重建项目标记；属于不可逆操作，须先满足闸门条件（架构设计 11.8）。
+   * @returns 无返回值；清空并重建项目标记，等待本 tick 提交。
+   * @throws {Error} 不在 boot 阶段调用。
+   */
   clearMemory(): void;
-  /** 清空本 shard 的 InterShardMemory；不可用时什么也不做。 */
+  /**
+   * @description 清空本 shard 的 InterShardMemory；运行环境没有 InterShardMemory 时什么也不做。
+   * @returns 无返回值；清空本 shard 的 InterShardMemory 内容。
+   * @throws {Error} 不在 boot 阶段调用。
+   */
   clearInterShard(): void;
-  /** 软重置，下一 tick 生效（架构设计 5.5）。 */
+  /**
+   * @description 请求软重置：丢弃 heap 缓存、进程实例与路径缓存，效果等同于一次 global reset（架构设计 5.5）。
+   * @returns 无返回值；软重置在下一 tick 生效。
+   * @throws {Error} 不在 boot 阶段调用。
+   */
   softReset(): void;
 }
 
@@ -59,10 +80,26 @@ export interface BootPort {
 export interface BootContext extends ModuleContext {
   readonly port: BootPort;
   readonly sys: Accessor<ProjectMarker>;
+  /**
+   * @description 发布本次启动判定的结果，所有模块经只读的 BootModeView 看到更新后的模式。
+   * @param view 判定得到的模式、证据强度与进入该模式的 tick。
+   * @returns 无返回值；更新注入给各模块的模式视图。
+   */
   setMode(view: BootModeView): void;
 }
 
 /** 启动判定的定义。kernel 只接受一个，由 app.boot 提供，在每 tick 的 boot 阶段最先运行。 */
 export interface BootDefinition {
-  setup(ctx: BootContext): { boot(): void };
+  /**
+   * @description 每个 global 调用一次，取得 boot 阶段的钩子；上下文在此时由闭包持有。
+   * @param ctx boot 专用上下文，包含特权端口、项目标记访问器与模式写入。
+   * @returns 含 boot 钩子的对象。
+   */
+  setup(ctx: BootContext): {
+    /**
+     * @description 每 tick 最先运行的启动判定：global reset 时完整判定，平时只检查廉价不变量（架构设计 11.1）。
+     * @returns 无返回值；判定结果经 setMode 发布，不可逆操作经 port 执行。
+     */
+    boot(): void;
+  };
 }

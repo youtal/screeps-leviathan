@@ -10,7 +10,11 @@ import ts from 'typescript';
 
 export type SpawnOptionsState = 'absent' | 'present' | 'unknown';
 
-/** 类型断言及语法包装不会改变实际对象，不能成为排除 memory 的证据。 */
+/**
+ * @description 剥去括号、类型断言、satisfies 与非空断言等语法包装；它们不会改变实际对象，不能成为排除 memory 的证据。
+ * @param expression 待剥离的表达式。
+ * @returns 去掉全部包装后的内层表达式。
+ */
 const unwrap = (expression: ts.Expression): ts.Expression => {
   while (ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression)
     || ts.isTypeAssertionExpression(expression) || ts.isSatisfiesExpression(expression)
@@ -20,12 +24,21 @@ const unwrap = (expression: ts.Expression): ts.Expression => {
   return expression;
 };
 
-/** 只认语法可证的键；动态表达式即使被断言为字面量类型也不能据此放行。 */
+/**
+ * @description 取出语法上可证的字面量键；动态表达式即使被断言为字面量类型也不能据此放行。
+ * @param expression 键表达式。
+ * @returns 字符串或数字字面量的文本；不是字面量时为 undefined。
+ */
 const literalKey = (expression: ts.Expression): string | undefined => {
   const value = unwrap(expression);
   return ts.isStringLiteralLike(value) || ts.isNumericLiteral(value) ? value.text : undefined;
 };
 
+/**
+ * @description 取出对象字面量属性名的静态文本；计算属性名只接受字面量。
+ * @param name 属性名节点。
+ * @returns 属性名文本；无法静态确定时为 undefined。
+ */
 const propertyKey = (name: ts.PropertyName): string | undefined => {
   if (ts.isComputedPropertyName(name)) {
     return literalKey(name.expression);
@@ -33,7 +46,11 @@ const propertyKey = (name: ts.PropertyName): string | undefined => {
   return ts.isIdentifier(name) || ts.isStringLiteralLike(name) || ts.isNumericLiteral(name) ? name.text : undefined;
 };
 
-/** 找到当前执行位置的直接语句；不跨函数边界推测执行时机。 */
+/**
+ * @description 找到节点所在的、直接位于语句块或源文件中的语句；不跨函数边界推测执行时机。
+ * @param node 起始节点。
+ * @returns 直接所在的语句；途经函数边界或找不到时为 undefined。
+ */
 const statementAt = (node: ts.Node): ts.Statement | undefined => {
   for (let current: ts.Node | undefined = node; current; current = current.parent) {
     if (ts.isFunctionLike(current)) {
@@ -46,6 +63,14 @@ const statementAt = (node: ts.Node): ts.Statement | undefined => {
   return undefined;
 };
 
+/**
+ * @description 判定 spawnCreep 第三参数是否实际构造了 memory 字段。
+ * 仅证明对象字面量、可证展开及同一语句块内的直接赋值；其余来源一律返回 unknown，由调用方诊断。
+ * @param options spawnCreep 的第三参数表达式。
+ * @param call 所在的 spawnCreep 调用，用于确认参数与调用位于同一源文件。
+ * @param checker 解析符号所用的类型检查器。
+ * @returns absent 表示可证没有 memory，present 表示可证构造了 memory，unknown 表示无法静态证明。
+ */
 export const classifySpawnOptions = (
   options: ts.Expression,
   call: ts.CallExpression,
@@ -54,6 +79,13 @@ export const classifySpawnOptions = (
   // 只记录当前递归链中的本地变量，阻止循环构造无限展开；返回时删除，不作结果缓存。
   const resolving = new Set<ts.Symbol>();
 
+  /**
+   * @description 判断子树中是否引用了指定符号（含简写属性），跳过类型节点。
+   * @param node 子树根节点。
+   * @param symbol 要查找的值符号。
+   * @param before 只统计起始位置早于此偏移的引用，默认不限。
+   * @returns 找到引用时为 true。
+   */
   const hasReference = (node: ts.Node, symbol: ts.Symbol, before = Infinity): boolean => {
     if (ts.isTypeNode(node) || node.getStart() >= before) {
       return false;
@@ -68,6 +100,12 @@ export const classifySpawnOptions = (
     return ts.forEachChild(node, (child) => hasReference(child, symbol, before) || undefined) ?? false;
   };
 
+  /**
+   * @description 判断符号是否被子树中的任何函数（含箭头函数）捕获；被捕获的变量可能在任意时刻被修改。
+   * @param node 子树根节点。
+   * @param symbol 要检查的值符号。
+   * @returns 任一函数体引用了该符号时为 true。
+   */
   const captured = (node: ts.Node, symbol: ts.Symbol): boolean => {
     if (ts.isFunctionLike(node)) {
       return hasReference(node, symbol);
@@ -75,6 +113,11 @@ export const classifySpawnOptions = (
     return ts.forEachChild(node, (child) => captured(child, symbol) || undefined) ?? false;
   };
 
+  /**
+   * @description 判定对象字面量是否构造了 memory：逐个检查属性与展开，明确出现 memory 即为 present。
+   * @param object 对象字面量。
+   * @returns 属性集合的判定结果；含动态键、__proto__、访问器或无法证明的展开时为 unknown。
+   */
   const objectState = (object: ts.ObjectLiteralExpression): SpawnOptionsState => {
     let state: SpawnOptionsState = 'absent';
     for (const property of object.properties) {
@@ -99,12 +142,22 @@ export const classifySpawnOptions = (
     return state;
   };
 
-  /** 本地绑定只跟随新对象构造；直接以其他变量初始化会共享身份，按别名处理。 */
+  /**
+   * @description 判定变量初始化或重新赋值的值；只跟随新对象构造，直接以其他变量初始化会共享身份，按别名处理。
+   * @param expression 初始化或赋值表达式；省略时视为无法证明。
+   * @returns 是对象字面量时为其判定结果，否则为 unknown。
+   */
   const constructed = (expression: ts.Expression | undefined): SpawnOptionsState => {
     const value = expression && unwrap(expression);
     return value && ts.isObjectLiteralExpression(value) ? objectState(value) : 'unknown';
   };
 
+  /**
+   * @description 判定本地变量引用处的对象是否含 memory：要求声明与引用位于同一语句块，
+   * 依次跟踪其间的整体重新赋值与字面量键属性赋值；遇到别名、闭包捕获或无法识别的写法即为 unknown。
+   * @param reference 作为 spawnCreep 第三参数的变量引用。
+   * @returns 引用处对象的判定结果。
+   */
   const localState = (reference: ts.Identifier): SpawnOptionsState => {
     const symbol = checker.getSymbolAtLocation(reference);
     const declaration = symbol?.valueDeclaration;
@@ -172,6 +225,11 @@ export const classifySpawnOptions = (
     }
   };
 
+  /**
+   * @description 按表达式形式分派判定：对象字面量、void 与内建 undefined、本地变量引用，其余为 unknown。
+   * @param expression 待判定的表达式。
+   * @returns 判定结果。
+   */
   const classify = (expression: ts.Expression): SpawnOptionsState => {
     const value = unwrap(expression);
     if (ts.isObjectLiteralExpression(value)) {

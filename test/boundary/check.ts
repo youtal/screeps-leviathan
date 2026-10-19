@@ -56,9 +56,19 @@ const STORAGE_OWNERS: readonly string[] = ['kernel/memory/', 'kernel/segments/',
 
 const STORAGE_GLOBALS = new Set(['Memory', 'RawMemory', 'InterShardMemory']);
 
-/** 相对 src 的路径（以 / 分隔）。 */
+/**
+ * @description 把绝对路径换算成相对源码根目录、以 / 分隔的路径。
+ * @param srcRoot 源码根目录的绝对路径。
+ * @param file 文件的绝对路径。
+ * @returns 相对 src 的路径；位于 src 之外时以 .. 开头。
+ */
 const toSrcPath = (srcRoot: string, file: string): string => relative(srcRoot, file).split(sep).join('/');
 
+/**
+ * @description 判定源文件所属的层：根目录只识别 main.ts 与 fallback.ts，其余取 src 下的第一级目录。
+ * @param srcPath 相对 src 的路径。
+ * @returns 所属层；不在任何已知层中时为 null（包括伪装成目录的 main、fallback）。
+ */
 const layerOf = (srcPath: string): Layer | null => {
   if (srcPath === 'main.ts') {
     return 'main';
@@ -70,10 +80,18 @@ const layerOf = (srcPath: string): Layer | null => {
   return LAYERS.has(first) && first !== 'main' && first !== 'fallback' ? (first as Layer) : null;
 };
 
-/** 领域单位：domains/<分组>/<领域>；不在领域目录内的文件返回所在目录。 */
+/**
+ * @description 取出文件所属的领域单位 domains/<分组>/<领域>。
+ * @param srcPath 相对 src 的路径。
+ * @returns 前三级路径；不在领域目录内的文件返回其所在目录。
+ */
 const domainOf = (srcPath: string): string => srcPath.split('/').slice(0, 3).join('/');
 
-/** 递归列出目录下的 .ts 源文件（不含 .d.ts）。 */
+/**
+ * @description 递归列出目录下的 .ts 源文件（不含 .d.ts）。
+ * @param dir 目录的绝对路径。
+ * @returns 源文件绝对路径列表；目录不存在时为空数组。
+ */
 const listSources = (dir: string): string[] => {
   if (!existsSync(dir)) {
     return [];
@@ -90,7 +108,11 @@ const listSources = (dir: string): string[] => {
   return files;
 };
 
-/** 符号是否声明在 @types/screeps 中，用于识别平台提供的全局变量与游戏对象属性。 */
+/**
+ * @description 判断符号是否声明在 @types/screeps 中，用于识别平台提供的全局变量与游戏对象属性。
+ * @param symbol 类型检查器解析出的符号。
+ * @returns 任一声明位于 @types/screeps 时为 true；符号为空时为 false。
+ */
 const fromScreepsTypes = (symbol: ts.Symbol | undefined): boolean =>
   (symbol?.declarations ?? []).some((declaration) =>
     declaration.getSourceFile().fileName.split(/[\\/]/).join('/').includes('/@types/screeps/'),
@@ -105,6 +127,12 @@ export interface CheckOptions {
   readonly files?: Readonly<Record<string, string>>;
 }
 
+/**
+ * @description 对 src 下全部源文件（以及虚拟文件）建立 TypeScript 程序，逐文件检查依赖边界规则。
+ * @param options 检查选项：项目根目录、源码根目录与虚拟文件。
+ * @returns 违规列表；没有违规时为空数组。
+ * @throws {Error} 无法读取 tsconfig.json。
+ */
 export const checkBoundaries = (options: CheckOptions): Violation[] => {
   const root = resolve(options.root);
   const srcRoot = resolve(options.srcRoot ?? join(root, 'src'));
@@ -113,6 +141,12 @@ export const checkBoundaries = (options: CheckOptions): Violation[] => {
 
   const config = ts.getParsedCommandLineOfConfigFile(join(root, 'tsconfig.json'), {}, {
     ...ts.sys,
+    /**
+     * @description tsconfig.json 无法解析时由编译器调用，转为异常中止检查。
+     * @param diagnostic 编译器给出的诊断。
+     * @returns 不返回；总是抛出异常。
+     * @throws {Error} 诊断消息文本。
+     */
     onUnRecoverableConfigFileDiagnostic: (diagnostic) => {
       throw new Error(ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'));
     },
@@ -139,6 +173,13 @@ export const checkBoundaries = (options: CheckOptions): Violation[] => {
     const srcPath = toSrcPath(srcRoot, fileName);
     const layer = layerOf(srcPath);
     const storageOwner = STORAGE_OWNERS.some((prefix) => srcPath.startsWith(prefix));
+    /**
+     * @description 登记一条违规，行号取节点起始位置。
+     * @param node 违规所在的语法节点。
+     * @param rule 违反的规则。
+     * @param message 违规说明。
+     * @returns 无返回值；追加到违规列表。
+     */
     const report = (node: ts.Node, rule: Rule, message: string): void => {
       const { line } = source.getLineAndCharacterOfPosition(node.getStart(source));
       violations.push({ file: srcPath, line: line + 1, rule, message });
@@ -149,6 +190,12 @@ export const checkBoundaries = (options: CheckOptions): Violation[] => {
       continue;
     }
 
+    /**
+     * @description 检查一个导入说明符：外部包、fallback 的任何导入、src 之外的文件、跨层与跨领域导入都登记为违规。
+     * @param node 导入所在的语法节点。
+     * @param specifier 导入路径文本。
+     * @returns 无返回值；违规时登记。
+     */
     const checkSpecifier = (node: ts.Node, specifier: string): void => {
       if (!specifier.startsWith('.')) {
         report(node, 'package', `不得导入外部包 ${specifier}`);
@@ -175,6 +222,11 @@ export const checkBoundaries = (options: CheckOptions): Violation[] => {
       }
     };
 
+    /**
+     * @description 递归遍历语法树：检查各种导入形式，并在非存储模块中检查持久化存储的访问。
+     * @param node 当前语法节点。
+     * @returns 无返回值；违规时登记。
+     */
     const visit = (node: ts.Node): void => {
       if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
         checkSpecifier(node, node.moduleSpecifier.text);
