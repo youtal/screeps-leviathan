@@ -6,7 +6,11 @@
  * interface 没有隐式索引签名，不满足 Json 约束。本文件只含类型声明，没有运行时代码。
  */
 
-/** 可持久化的值。对象属性允许 undefined，以便声明可选字段；写入时值本身仍须是合法 JSON。 */
+/**
+ * 可持久化数据的静态类型；对象索引中的 undefined 仅用于兼容可选字段声明。
+ * 运行时字段可以缺省，但禁止显式 undefined（包括嵌套字段）；移除字段使用 delete。
+ * 非 JSON 类型不静默转换；Map 须由调用方显式转换为普通对象或键值对数组。
+ */
 export type Json = null | boolean | number | string | readonly Json[] | { readonly [key: string]: Json | undefined };
 
 /** 路径段：字符串对应对象键，非负整数对应数组下标。 */
