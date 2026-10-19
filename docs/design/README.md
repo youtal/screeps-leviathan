@@ -20,7 +20,7 @@
 | — | [architecture.md](./architecture.md) | 总体架构 |
 | app | [app/config.md](./app/config.md) | 劳动力配置、身体模板、孵化优先级与运营参数 |
 | contracts | [contracts/README.md](./contracts/README.md) | 注入接口与跨模块协议 |
-| kernel | [kernel/memory.md](./kernel/memory.md) | Memory 块级标脏与分级序列化缓存 |
+| kernel | [kernel/memory.md](./kernel/memory.md) | Memory v1 与候选块级优化 |
 | world | [world/market.md](./world/market.md) | 物价模型 |
 | colony | [colony/inventory.md](./colony/inventory.md) | 资源库存控制 |
 | domains | [domains/industry/economics.md](./domains/industry/economics.md) | 产业规划 |

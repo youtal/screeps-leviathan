@@ -1,8 +1,108 @@
-# 模块设计：Memory 块级标脏与分级序列化缓存
+# 模块设计：Memory v1 与候选块级优化
 
 | 项目 | 内容 |
 | --- | --- |
-| 源码 | `src/kernel/memory/`（未实现） |
+| 源码 | `src/kernel/memory/` |
+| 架构章节 | 6.1–6.7；公共契约见 [contracts](../contracts/README.md#5-持久化) |
+| 成熟度 | 单元级 v1 定稿 · M1；下文块级优化保持候选 |
+
+## v1：职责与文件
+
+Memory 管理 JSON 数据及其持久化，不判断开局、接管或清空权限。主循环装配时显式提供平台端口，不使用隐藏的单例或测试默认依赖。
+
+| 文件 | 职责 |
+| --- | --- |
+| `index.ts` | 模块实例装配、生命周期入口、宿主侧类型 |
+| `runtime.ts` | Memory 接管、一次解析、根结构验证、加载状态与索引 |
+| `unit.ts` | 单元身份、版本、标脏、初始化/迁移与失效 |
+| `accessor.ts` | 实现公共 Accessor 契约，缓存每个单元的访问器 |
+| `path.ts` | 1–8 段路径校验与定位，不允许原型链访问 |
+| `json.ts` | JSON 校验与复制，不执行 getter/toJSON |
+| `partitions.ts` | owner/localId 分区注册与工厂缓存 |
+| `entities.ts` | owner 私有切片、声明缓存、维护回收与迁移扫描 |
+| `commit.ts` | 单元编码、根串拼接、写回确认及缓存体积 |
+
+## v1：数据与状态
+
+根是普通 JSON 对象；宿主指定项目命名空间及 signature/schema。命名空间包含 `sys`（现有 ProjectMarker）以及 `part`、`rooms`、`creeps`、`flags`。分区为 `part[owner][localId]`，实体为 `<space>[key][owner]`，每个单元保存 `{version,data}`。名字按独立键保存，不拼接成有分隔符歧义的持久键。其他根键保留，未知命名空间结构拒绝写入。
+
+加载时本项目命名空间缺失（空文本、空根、引擎默认空对象形状或外来根键）返回 empty：其他根键原样只读保留，不解读、不清空。是否允许初始化由 boot 判定；宿主授权后 `initialize` 只在根上加入本项目命名空间，必须显式提供匹配身份的完整项目标记，其他根键保持在前。损坏 JSON、非对象根、结构或身份不符的同名命名空间、不同的 schema 不自动修复或清空，也不允许初始化覆盖；读取失败后该实例不可写。启动判定及授权由后续 boot 装配承担。M1 不提供 core 的业务写入接口，已有 core 单元原样保留。
+
+每个运行实例拥有根对象、单元索引、脏集合、单元编码缓存、工厂与访问器缓存。无模块级可变状态；dispose 使全部已发布对象失效。global reset 创建新实例，从已提交文本恢复，首次 commit 完整编码，后续只编码脏单元。单元内原地修改避免热路径复制整棵数据；`set`/`replace` 复制输入，`update` 标脏后调用回调，异常不回滚。
+
+版本号为正安全整数。初始化与迁移在副本上计算并验证，成功后才发布单元/访问器；失败保留原数据。一个身份只接受同一份 spec 声明，防止不同使用方覆盖迁移规则。实体切片惰性迁移；维护扫描只迁移已声明 spec 的切片。
+
+### 纯数据原则：显式转换，非法类型直接拒绝
+
+Memory 只持久化纯 JSON 数据，不承担一般对象的序列化适配。非支持类型必须直接报错，不得静默省略、降级成其他类型，或调用自定义 `toJSON` 转换。
+
+| 数据 | 规则 |
+| --- | --- |
+| 普通对象／Record、无原型字典、普通 Array | 递归校验字段或元素，仅包含支持的数据值时接受 |
+| string、有限 number、boolean、null | 直接接受 |
+| 原生 Map | 调用方在写入前显式转换为 Record 或键值对数组；Memory 不自动转换或恢复 Map |
+| 一般类实例（包括 Array 子类）、Date、Set、RegExp、包装对象、游戏对象 | 直接拒绝，不丢弃原型后当作普通数据保存 |
+| undefined、函数、BigInt、Symbol、非有限数字 | 在根值、对象字段及数组元素中均直接拒绝 |
+| 循环引用、数组空洞或附加属性、symbol 键、访问器或不可枚举数据属性 | 直接拒绝，不依赖原生 JSON 编码器省略或转换；数组内建 length 属性除外 |
+
+可选字段可以缺省，但显式赋值 `undefined` 不等于缺省；移除字段使用 `delete`。TypeScript 中对可选字段的类型兼容不放宽运行时规则。显式转换 Map 时，键的表达方式与可能发生的键碰撞由调用方负责，转换结果仍须递归通过校验。
+
+普通数组要求直接原型为当前运行域的 `Array.prototype`；数组子类、自定义原型数组和无原型数组均拒绝。无原型字典的支持不延伸到数组，也不借数组复制移除其自定义原型。
+
+`set`/`replace` 在修改存储前校验并复制；初始化及迁移在发布结果前使用同一规则。`update` 按原地修改契约在 `commit` 时校验，不自动回滚；非法值不得写回。
+
+**单元级隔离**：校验失败只影响该单元，不阻塞其他单元的持久化。
+
+- 被隔离的单元沿用最近一次已知合法的编码写出：上次成功写入的编码，或 `update` 在单元尚无编码基线时（reset 后或新建后的首次 `update`）对当时已校验数据的编码。因此新单元当 tick 失败时以初始数据落盘，不产生空记录或缺失的索引项。
+- 被隔离单元保持脏状态与待校验标记，每次提交重新校验一次；校验通过即恢复正常编码。
+- 只剩被隔离单元待写、且没有结构变化时不写入。
+- 每个单元每次进入隔离，经告警端口报告一次单元身份；恢复后再次失败会重新告警。
+- 持久文本因此可能包含不同时刻的单元版本：被隔离单元停在其最近合法版本，其余单元为最新版本。
+
+`commit` 只重新校验经 `update` 修改过的单元：`update` 为单元置待校验标记，校验通过或 `replace` 以已校验副本整体替换才清除；`set` 只校验写入的那一处，不清除标记；校验失败的提交保留标记。加载、初始化与迁移的数据在发布前已完整校验，reset 后首次提交不重复遍历。由此划定的信任边界是：业务违反只读约定、直接修改 `get`/`root` 返回的引用时，不保证在提交时被拦截，可能按 `JSON.stringify` 规则被省略或转换；开发期抽查只覆盖未标脏单元。普通数据复制不保留对象引用身份，但不得借复制默许非支持类型。
+
+读取缺失路径返回 undefined，`has` 为 false，缺失路径的 `keys` 返回空数组；对标量取 keys 或 update 缺失值报错。路径拒绝危险键；数组不能通过 set 扩容，不能通过 delete 制造空洞。create 只补普通对象，失败不会留下半条路径。
+
+## v1：平台接管与提交
+
+宿主每 tick 在任何 Memory 读取之前调用 `beginTick`，用 `Object.defineProperty` 替换惰性访问器为空临时对象，不触发原 getter。每个 global 只解析一次真实文本。重复进入同一 tick 不重复安装；发现原访问器已被读取时拒绝接管。
+
+平台依据：[engine game.js](https://github.com/screeps/engine/blob/master/src/game/game.js) 安装可配置的惰性 Memory 访问器；[driver runtime.js](https://github.com/screeps/driver/blob/master/lib/runtime/runtime.js) 在 RawMemory.set 时丢弃解析缓存，并在用户回调结束后校验 segment、最终返回 Memory。模块不读写内部 `_parsed`。源码核实不代替真实私服验证。
+
+commit 先校验/编码脏单元（被隔离单元沿用已有编码）、生成完整候选文本，再调用平台写入；成功后发布编码缓存、体积快照，并清除已成功编码单元的脏状态。返回 true 表示写入口成功，其中可能包含被隔离的单元；尺寸快照与待确认文本均以实际写出的候选文本为准。写入失败或超限时保留全部脏状态；缓存发布期间中断最多导致重复编码/写入。无结构变化且没有脏单元的稳定 tick 不写入。
+
+RawMemory.set 返回不代表驱动已接受整个 tick。提交前保留待确认文本，下一 tick 用 RawMemory.get 的字符串比较确认，**不重新解析**；不一致时保留 heap 修改并重新提交。这同时覆盖用户代码提交后出错及引擎收尾拒绝保存。待确认期间 global reset 则以实际持久文本为准。宿主独占真实存储写入口；外部修改需重建实例，不自动合并两套状态。
+
+编码缓存以完整单元为界；每次脏提交仍需拼接根串。模块/空间/总文本长度在成功提交时更新，查询 O(1)，代表最近成功调用写入口的快照；下一 tick 确认才代表平台接受。模块长度是该 owner 的单元包络长度之和，不含索引键；空间长度含其完整对象文本。默认告警线 1.8 Mi 字符、硬上限 2 Mi 字符，沿用平台字符串长度口径。告警回调由宿主提供，告警失败不能阻止保存或清理状态，告警与写入口期间禁止重入访问器或销毁实例。开发期可配置每次提交轮转校验若干未标脏单元，以编码指纹发现绕过访问器的修改，失败拒绝提交。
+
+## v1：维护与宿主接口
+
+`createMemory({namespace, signature, schema, platform, auditUnits?})` 创建实例，不访问平台。platform 显式提供 `target`、`read()`、`write(text)`、`warn(message)`；游戏装配的 read/write 转发当前 tick 的 RawMemory，不能缓存上一 tick 的平台对象。
+
+实例提供 `beginTick(facts)`、`initialize(marker)`、`partitions(owner)`、`entities(owner)`、`maintain(limit?)`、`commit()`、`sizes()`、`dispose()`。`partitions` 返回已有 PartitionFactory；`entities` 返回三个已有 EntitySpace。其余是 kernel.memory 宿主入口，不向 contracts 扩展业务 API。创建实例、加载、初始化、注册分区/切片、commit 的先后由宿主控制；初始化不立即写入。
+
+facts 包含递增的 tick（同 tick 重入不重复处理）、当前 creep/flag 名称集合，以及可选的房间事实表 `{owned, protected, lastSeen}`。维护上限默认每 tick 累计 50 条记录，limit 指定本 tick 累计预算，游标跨 tick 轮转，不在每次维护创建全部记录数组。名称快照在 beginTick 时复制，看不到之后才创建的 creep/flag，因此每条实体记录在 heap 中保存创建 tick（不持久化）：creep 记录至少存在 2 tick、flag 记录至少存在 1 tick 才可因缺席回收。创建 tick 属于整条记录，为已有记录增加其他 owner 的切片不刷新；加载得到的记录不受此保护；回收后同名重建得到新的创建 tick。creep 只在相邻两个已观测 tick 均缺席时回收；跳 tick/reset 后重新积累证据。flag 不存在即回收。房间需完整可靠事实，且非自有、未受殖民地保护、距 lastSeen 超过 20000 tick 才回收；缺少事实时保留，Memory 不推断 colony 归属。维护同时推进已声明切片迁移。记录删除后所有原访问器失效；同名记录重新创建不会复用旧对象。
+
+初始化示例（平台端口由装配提供）：
+
+```ts
+const memory = createMemory({ namespace: 'leviathan', signature: 'leviathan', schema: 1, platform });
+const state = memory.beginTick({ time: 1, creeps: new Set(), flags: new Set() });
+if (state === 'empty') memory.initialize(marker); // marker 由已获授权的启动流程提供
+const factory = memory.partitions('mining');
+const store = factory.partition('config', spec);
+// 后续每 tick：beginTick → 模块读写 → 维护准入时 maintain → commit。
+```
+
+## v1：验证
+
+覆盖路径与复制、初始化/迁移失败、单元增删、访问器失效、回收上限、编码等价性、逐单元编码次数、无脏写入、丢弃整个 tick、提交中断、重新加载与开发期抽查。集成测试使用现有严格平台替身并显式传播 tick.error；私服场景独立记录运行条件及结果，不以替身代替引擎验收。
+
+## 候选：Memory 块级标脏与分级序列化缓存
+
+| 项目 | 内容 |
+| --- | --- |
+| 源码 | `src/kernel/memory/`（块级优化未实现） |
 | 所属架构章节 | 架构设计 6.2 标脏与序列化 |
 | 成熟度 | 候选（由数据触发实施） |
 | 日期 | 2026-10-16 |
