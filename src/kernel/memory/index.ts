@@ -4,7 +4,7 @@
  * 分区和实体能力只向宿主发布 owner 绑定入口，业务侧使用 contracts 中的窄接口。
  * 生命周期状态由闭包持有，无全局单例；dispose 后所有旧能力失效。
  */
-import type { ProjectMarker } from '../../contracts/boot';
+import type { ProjectMarker } from '@/contracts/boot';
 import { createCommitter } from './commit';
 import { createEntities } from './entities';
 import { createPartitions } from './partitions';

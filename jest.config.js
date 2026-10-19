@@ -8,7 +8,9 @@ export default {
     '^.+\\.ts$': ['ts-jest', { tsconfig: 'tsconfig.test.json' }],
   },
   // 由 Node 直接运行的脚本以 `.ts` 后缀互相导入，编译时被改写为 `.js`；这里去掉后缀，让 Jest 解析到源文件。
+  // `@/` 是 src/ 的别名（tsconfig.json 的 paths），跨模块导入一律使用；Jest 不读 paths，需要在此同步映射。
   moduleNameMapper: {
+    '^@/(.*)$': '<rootDir>/src/$1',
     '^(\\.{1,2}/.*)\\.js$': '$1',
   },
 };

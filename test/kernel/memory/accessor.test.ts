@@ -1,7 +1,7 @@
 /** 验证公共存储契约，非法输入通过类型断言模拟 JavaScript 调用方。 */
-import type { Json } from '../../../src/contracts/memory';
-import { copyJson, validateJson } from '../../../src/kernel/memory/json';
-import { checkPath } from '../../../src/kernel/memory/path';
+import type { Json } from '@/contracts/memory';
+import { copyJson, validateJson } from '@/kernel/memory/json';
+import { checkPath } from '@/kernel/memory/path';
 import { harness, marker, spec, type Data } from './harness';
 
 test('分区隔离、访问器缓存、输入复制与只读引用', () => {

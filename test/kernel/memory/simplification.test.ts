@@ -1,7 +1,7 @@
 /** MS-01～04：用行为与操作计数验证简化，不以 Node 耗时推断 Screeps CPU 收益。 */
-import { copyJson, isObject, validateJson } from '../../../src/kernel/memory/json';
-import { deleteAt, getAt, hasAt, setAt } from '../../../src/kernel/memory/path';
-import { touch, type Unit } from '../../../src/kernel/memory/unit';
+import { copyJson, isObject, validateJson } from '@/kernel/memory/json';
+import { deleteAt, getAt, hasAt, setAt } from '@/kernel/memory/path';
+import { touch, type Unit } from '@/kernel/memory/unit';
 import { harness, marker, spec } from './harness';
 
 test('MS-01：has 区分缺失字段和 update 暂存非法值，删除非法字段后可提交', () => {

@@ -1,5 +1,5 @@
 /** 跨 tick、平台拒绝、reset、序列化计数与实体维护集成验证；不替代真实私服。 */
-import type { Accessor } from '../../../src/contracts/memory';
+import type { Accessor } from '@/contracts/memory';
 import { MEMORY_LIMIT, PlatformError } from '../../platform/memory';
 import { harness, marker, spec, type Data } from './harness';
 

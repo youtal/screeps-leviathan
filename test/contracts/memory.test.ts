@@ -4,7 +4,7 @@
  * 非法路径、超过 8 段的路径与 interface 声明的数据类型被拒绝（以 @ts-expect-error 标注，未报错即检查失败）。
  * 运行时只确认类型断言函数存在，不调用任何 Accessor。
  */
-import type { Accessor, DeepReadonly, Json, Path, UnitSpec, ValueAt } from '../../src/contracts/memory';
+import type { Accessor, DeepReadonly, Json, Path, UnitSpec, ValueAt } from '@/contracts/memory';
 
 /** 两个类型严格相等时为 true。 */
 type Equal<A, B> = (<X>() => X extends A ? 1 : 2) extends <X>() => X extends B ? 1 : 2 ? true : false;

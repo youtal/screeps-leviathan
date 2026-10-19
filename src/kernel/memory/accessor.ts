@@ -4,7 +4,7 @@
  * update 在执行回调前标脏，抛错仍保留修改，commit 统一校验；标量替换使用 set/replace。
  * 每单元缓存一个访问器，删除/模块销毁后所有方法均拒绝访问；无模块级状态。
  */
-import type { Accessor, Json, PathSegment } from '../../contracts/memory';
+import type { Accessor, Json, PathSegment } from '@/contracts/memory';
 import { copyJson, isObject } from './json';
 import { checkPath, deleteAt, getAt, hasAt, setAt } from './path';
 import { assertUnit, touch, type Unit } from './unit';

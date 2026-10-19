@@ -6,8 +6,8 @@
  * 损坏文本、同名命名空间结构不符或 schema 不匹配时拒绝写入；命名空间缺失时其他根键只读保留，
  * 初始化仅在宿主显式授权后加入命名空间，不承担 boot 判定或清空。
  */
-import type { ProjectMarker } from '../../contracts/boot';
-import type { Json } from '../../contracts/memory';
+import type { ProjectMarker } from '@/contracts/boot';
+import type { Json } from '@/contracts/memory';
 import { checkKey, copyJson, isObject, validateJson } from './json';
 import type { Space, Unit, UnitRecord } from './unit';
 
