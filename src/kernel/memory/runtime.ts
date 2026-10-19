@@ -255,6 +255,27 @@ export const createRuntime = (options: MemoryOptions): Runtime => {
   return state;
 };
 
+/** 接管标记：带有此属性的全局 Memory 值是 takeoverMemory 安装的临时对象。模块级常量，不可变。 */
+const TAKEOVER = Symbol('kernel.memory.takeover');
+
+/**
+ * @description 把全局 Memory 换成空的临时对象，使引擎自身与原生 *.memory 的读写只落在临时对象上（架构 6.6）。
+ * 与具体 Memory 实例无关，不解析文本，同一 tick 内重复调用无副作用；入口每 tick 最先调用，
+ * 装配失败或冷却期只运行保底时同样适用（内核设计第 6 节）。只检查属性描述符，不触发引擎的惰性 getter。
+ * @param target 安装全局 Memory 的对象；游戏中为 globalThis。
+ * @returns 无返回值。
+ * @throws {Error} Memory 已被读取（属性已变为非临时对象的值）或访问器不可替换。
+ */
+export const takeoverMemory = (target: object): void => {
+  const descriptor = Object.getOwnPropertyDescriptor(target, 'Memory');
+  const value: unknown = descriptor && !descriptor.get ? descriptor.value : undefined;
+  if (typeof value === 'object' && value !== null && Object.hasOwn(value, TAKEOVER)) return;
+  if (!descriptor?.get || !descriptor.configurable) throw new Error('Memory 接管过晚或平台访问器不可替换');
+  const temporary = {};
+  Object.defineProperty(temporary, TAKEOVER, { value: true });
+  Object.defineProperty(target, 'Memory', { value: temporary, writable: true, enumerable: true, configurable: true });
+};
+
 /**
  * @description 必须早于任何原生 Memory 访问调用，接管临时全局值并更新 tick 事实。
  * 每 tick 更新临时全局值及事实；真实文本只在首次解析，待确认写入只做字符串比较。
@@ -272,12 +293,8 @@ export const beginTick = (state: Runtime, facts: TickFacts): 'empty' | 'ready' =
     if (state.failure !== undefined) throw state.failure;
     return state.data ? 'ready' : 'empty';
   }
-  // 检查属性描述符不触发 getter；原生读取后属性已变为值，此时接管无法保证未发生解析。
-  const descriptor = Object.getOwnPropertyDescriptor(state.options.platform.target, 'Memory');
-  if (!descriptor?.get || !descriptor.configurable) throw new Error('Memory 接管过晚或平台访问器不可替换');
-  Object.defineProperty(state.options.platform.target, 'Memory', {
-    value: {}, writable: true, enumerable: true, configurable: true,
-  });
+  // 入口可能已在本 tick 先行接管；takeoverMemory 识别自己的临时对象，否则按访问器状态接管或报接管过晚。
+  takeoverMemory(state.options.platform.target);
   state.previousCreeps = state.facts?.time === facts.time - 1 ? state.facts.creeps : undefined;
   state.facts = { ...facts, creeps: new Set(facts.creeps), flags: new Set(facts.flags) };
   state.written = false;

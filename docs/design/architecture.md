@@ -171,6 +171,7 @@ services 每 tick 主动运行，对阶段顺序敏感，这是"意图收集后�
 src/
 ├── main.ts          入口与正常 / 保底循环切换
 ├── fallback.ts      独立保底循环
+├── settings.ts      使用者设置：经常手动切换的运行开关（日志级别默认值等）
 ├── kernel/          lifecycle、process、cpu、context、memory、segments、intershard、
 │                    logger、profiler、errorMapper、stats、console、bootPort
 ├── lib/             grid、geometry、body、naming、combat、layout、tables、collections、hash
@@ -185,6 +186,8 @@ src/
 ├── contracts/       注入接口与跨模块协议
 └── app/             assembly、config、profiles、boot、ops、policy
 ```
+
+`settings.ts` 集中存放使用者经常手动切换的运行开关，例如日志各级别的默认开关；调参用的配置表（身体模板、阈值等）仍在 `app.config`。它只导入 contracts 的类型，只被 `app.assembly` 与 `main.ts` 导入；其他层不直接读取它，由装配方把其中的值作为参数注入（4.2 的显式注入）。
 
 **代码按领域组织，运行时按殖民地实例化。** 多数领域同时跨越房间范围和 shard 范围（例如物流同时负责房内运输和终端跨房平衡）。按作用域拆分代码，会让本该在模块内部直接协作的逻辑被迫改走公共协议。因此一个领域目录同时包含殖民地实例部分和全局单例部分，运行时由 kernel 为每个殖民地或站点派生实例。
 

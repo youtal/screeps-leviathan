@@ -65,7 +65,7 @@ Memory 只持久化纯 JSON 数据，不承担一般对象的序列化适配。�
 
 ## v1：平台接管与提交
 
-宿主每 tick 在任何 Memory 读取之前调用 `beginTick`，用 `Object.defineProperty` 替换惰性访问器为空临时对象，不触发原 getter。每个 global 只解析一次真实文本。重复进入同一 tick 不重复安装；发现原访问器已被读取时拒绝接管。
+宿主每 tick 在任何 Memory 读取之前完成接管，用 `Object.defineProperty` 替换惰性访问器为空临时对象，不触发原 getter。接管由独立导出的 `takeoverMemory(target)` 完成：它与具体实例无关、不解析文本，临时对象带有接管标记，同一 tick 内重复调用无副作用。入口每 tick 最先调用它，冷却期或装配失败只运行保底循环时同样适用（[内核骨架](./README.md) 第 6 节）；`beginTick` 内部也调用它，识别同 tick 已完成的接管。发现原访问器已被读取时拒绝接管。每个 global 只解析一次真实文本。
 
 平台依据：[engine game.js](https://github.com/screeps/engine/blob/master/src/game/game.js) 安装可配置的惰性 Memory 访问器；[driver runtime.js](https://github.com/screeps/driver/blob/master/lib/runtime/runtime.js) 在 RawMemory.set 时丢弃解析缓存，并在用户回调结束后校验 segment、最终返回 Memory。模块不读写内部 `_parsed`。源码核实不代替真实私服验证。
 
@@ -79,7 +79,7 @@ RawMemory.set 返回不代表驱动已接受整个 tick。提交前保留待确�
 
 `createMemory({namespace, signature, schema, platform, auditUnits?})` 创建实例，不访问平台。platform 显式提供 `target`、`read()`、`write(text)`、`warn(message)`；游戏装配的 read/write 转发当前 tick 的 RawMemory，不能缓存上一 tick 的平台对象。
 
-实例提供 `beginTick(facts)`、`initialize(marker)`、`partitions(owner)`、`entities(owner)`、`maintain(limit?)`、`commit()`、`sizes()`、`dispose()`。`partitions` 返回已有 PartitionFactory；`entities` 返回三个已有 EntitySpace。其余是 kernel.memory 宿主入口，不向 contracts 扩展业务 API。创建实例、加载、初始化、注册分区/切片、commit 的先后由宿主控制；初始化不立即写入。
+实例提供 `beginTick(facts)`、`initialize(marker)`、`partitions(owner)`、`entities(owner)`、`maintain(limit?)`、`commit()`、`sizes()`、`ready()`、`failed()`、`dispose()`。`ready()` 表示数据可用（命名空间已加载或已初始化），`failed()` 表示加载失败已锁存，两者都不抛错，供 kernel 判断 Memory 为空的阶段与健康状态。游戏装配用 `createGamePlatform(warn)` 取得绑定全局 RawMemory 的平台端口，装配方自身不访问 RawMemory（架构 4.2）。`partitions` 返回已有 PartitionFactory；`entities` 返回三个已有 EntitySpace。其余是 kernel.memory 宿主入口，不向 contracts 扩展业务 API。创建实例、加载、初始化、注册分区/切片、commit 的先后由宿主控制；初始化不立即写入。
 
 facts 包含递增的 tick（同 tick 重入不重复处理）、当前 creep/flag 名称集合，以及可选的房间事实表 `{owned, protected, lastSeen}`。维护上限默认每 tick 累计 50 条记录，limit 指定本 tick 累计预算，游标跨 tick 轮转，不在每次维护创建全部记录数组。名称快照在 beginTick 时复制，看不到之后才创建的 creep/flag，因此每条实体记录在 heap 中保存创建 tick（不持久化）：creep 记录至少存在 2 tick、flag 记录至少存在 1 tick 才可因缺席回收。创建 tick 属于整条记录，为已有记录增加其他 owner 的切片不刷新；加载得到的记录不受此保护；回收后同名重建得到新的创建 tick。creep 只在相邻两个已观测 tick 均缺席时回收；跳 tick/reset 后重新积累证据。flag 不存在即回收。房间需完整可靠事实，且非自有、未受殖民地保护、距 lastSeen 超过 20000 tick 才回收；缺少事实时保留，Memory 不推断 colony 归属。维护同时推进已声明切片迁移。记录删除后所有原访问器失效；同名记录重新创建不会复用旧对象。
 

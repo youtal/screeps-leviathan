@@ -95,6 +95,30 @@ describe('边界检查规则', () => {
     expect(of('fallback/index.ts')).toEqual(['layer:1']);
   });
 
+  test('settings.ts：只能导入 contracts，只有 app 与 main 可以导入它；同名目录不属于任何层', () => {
+    const check = (extra: Record<string, string>) => checkBoundaries({
+      root, srcRoot,
+      files: Object.fromEntries(Object.entries({
+        'contracts/log.ts': "export type LogLevel = 'debug' | 'info';",
+        'kernel/logger/index.ts': 'export const createLogRoot = (): number => 1;',
+        ...extra,
+      }).map(([path, text]) => [join(srcRoot, path), text])),
+    });
+    const ok = check({
+      'settings.ts': "import type { LogLevel } from '@/contracts/log';\nexport const levels: Record<LogLevel, boolean> = { debug: false, info: true };",
+      'app/assembly/index.ts': "import { levels } from '@/settings';\nexport const assembled = levels;",
+      'main.ts': "import { levels } from '@/settings';\nexport const loop = (): unknown => levels;",
+      'kernel/process/index.ts': "import { levels } from '@/settings';\nexport const run = levels;",
+      'settings/index.ts': 'export const misplaced = 1;',
+    });
+    const at = (file: string) => ok.filter((v) => v.file === file).map((v) => `${v.rule}:${v.line}`);
+    expect([at('settings.ts'), at('app/assembly/index.ts'), at('main.ts')]).toEqual([[], [], []]);
+    expect(at('kernel/process/index.ts')).toEqual(['layer:1']);
+    expect(at('settings/index.ts')).toEqual(['layer:1']);
+    const bad = check({ 'settings.ts': "import { createLogRoot } from '@/kernel/logger/index';\nexport const x = createLogRoot;" });
+    expect(bad.filter((v) => v.file === 'settings.ts').map((v) => `${v.rule}:${v.line}`)).toEqual(['layer:1']);
+  });
+
   test('alias：跨模块导入必须使用 @/ 别名，相对路径只用于模块内部', () => {
     const result = checkBoundaries({
       root, srcRoot,
