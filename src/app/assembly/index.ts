@@ -11,7 +11,7 @@ import type { BootDefinition } from '@/contracts/boot';
 import type { ModuleDefinition } from '@/contracts/module';
 import { createErrorMapper } from '@/kernel/errorMapper';
 import { type GamePort, type Kernel, createKernel } from '@/kernel/lifecycle';
-import { type LogRoot, createLogRoot } from '@/kernel/logger';
+import { type LogRoot, type LogSink, createLogRoot } from '@/kernel/logger';
 import { createGamePlatform } from '@/kernel/memory';
 import { createProfiler } from '@/kernel/profiler';
 import { loggerSettings } from '@/settings';
@@ -50,6 +50,36 @@ export interface GameServices {
   readonly game: GamePort;
   readonly logRoot: LogRoot;
 }
+
+/**
+ * @description 选择日志输出端。官服的 console.log 会把内容整体转成 HTML 实体，彩色前缀会显示为标签原文；
+ * console.logUnsafe 原样下发，由客户端渲染。存在 logUnsafe 时用它并允许上色，否则用 console.log 且不上色。
+ * 只输出 logger 拼出的行：作用域与正文已在 logger 出口转义，HTML 只来自 logger 自己的前缀。
+ * @returns 输出端，以及它能否渲染 HTML。
+ */
+export const consoleSink = (): { readonly sink: LogSink; readonly html: boolean } => {
+  const unsafe = console.logUnsafe;
+  if (typeof unsafe === 'function') {
+    return {
+      /**
+       * @description 经 console.logUnsafe 输出一行，内容按 HTML 渲染。
+       * @param line logger 拼出的一行，作用域与正文已转义。
+       * @returns 无返回值。
+       */
+      sink: (line) => unsafe.call(console, line),
+      html: true,
+    };
+  }
+  return {
+    /**
+     * @description 经 console.log 输出一行纯文本。
+     * @param line logger 拼出的一行。
+     * @returns 无返回值。
+     */
+    sink: (line) => console.log(line),
+    html: false,
+  };
+};
 
 /**
  * @description 创建游戏环境的服务：GamePort、错误映射与日志根对象。不读取持久化存储。
@@ -98,12 +128,13 @@ export const createGameServices = (): GameServices => {
     bucket: game.bucket,
     remaining: () => game.tickLimit() - game.cpuUsed() - Math.max(2, game.limit() * 0.1),
   });
+  const output = consoleSink();
   const logRoot = createLogRoot({
-    sink: (line) => console.log(line),
+    sink: output.sink,
     time: game.time,
     format: (error) => errors.format(error),
     levels: loggerSettings.levels,
-    color: loggerSettings.color,
+    color: output.html && loggerSettings.color,
   });
   return { game, logRoot };
 };
