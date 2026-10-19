@@ -6,7 +6,7 @@
  * 组织方式：每个模块一个具名常量，命名为 `<模块名>Settings`，类型为 src/contracts/settings.ts 中的同名接口。
  * 本文件只含常量，没有运行时副作用。
  */
-import type { LoggerSettings } from './contracts/settings';
+import type { LoggerSettings } from '@/contracts/settings';
 
 /** kernel.logger：各级别默认开关（debug 关闭，其余打开）与前缀上色。 */
 export const loggerSettings: LoggerSettings = {

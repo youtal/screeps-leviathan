@@ -9,7 +9,7 @@
  * - overflow：因超过标签上限而丢弃的计时次数，累计到实例销毁。
  * 成本：begin/end 各调用一次 cpuUsed；beginTick 的结算与标签数成正比，每 tick 一次。
  */
-import type { Measure } from '../../contracts/log';
+import type { Measure } from '@/contracts/log';
 
 /** 平滑系数，约等于近 10 tick 的窗口。 */
 export const PROFILE_ALPHA = 0.1;

@@ -4,8 +4,8 @@
  * 多源文件与 1 值段。errorMapper 测试覆盖帧映射、帧数上限、CPU 保护、映射不可用、只解码一次、缓存与淘汰、
  * 非 Error 抛出值及访问器抛错。
  */
-import { ERROR_MAP_BUCKET, createErrorMapper } from '../../../src/kernel/errorMapper';
-import { decodeMappings, lookup } from '../../../src/kernel/errorMapper/vlq';
+import { ERROR_MAP_BUCKET, createErrorMapper } from '@/kernel/errorMapper';
+import { decodeMappings, lookup } from '@/kernel/errorMapper/vlq';
 
 describe('decodeMappings 与 lookup', () => {
   // 第 0 行 AAAA：[0,0,0,0]。第 1 行 AACA：[0,0,+1,0]；EAAE：[+2,0,0,+2]。

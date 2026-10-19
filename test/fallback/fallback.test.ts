@@ -8,7 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { runFallback } from '../../src/fallback';
+import { runFallback } from '@/fallback';
 import { type FakeMatrix, creep, installWorld, pos, store, structure } from './world';
 
 const W = ['work', 'carry', 'move'];

@@ -3,8 +3,8 @@
  * 覆盖输出格式与五个级别、默认开关必须完整、双层开关（默认值、作用域覆盖、取消覆盖、实例继承模块覆盖、
  * 修改默认值）、关闭时正文函数不求值、error 附带格式化文本、上色与转义，以及各种失败不向调用方传播。
  */
-import type { LogLevel, LogLevelSwitches } from '../../../src/contracts/log';
-import { LEVEL_COLORS, createLogRoot } from '../../../src/kernel/logger';
+import type { LogLevel, LogLevelSwitches } from '@/contracts/log';
+import { LEVEL_COLORS, createLogRoot } from '@/kernel/logger';
 
 const ALL_ON: LogLevelSwitches = { debug: true, info: true, success: true, warn: true, error: true };
 

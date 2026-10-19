@@ -21,7 +21,7 @@ import type {
   LogLevelSwitches,
   LogMessage,
   Logger,
-} from "../../contracts/log";
+} from "@/contracts/log";
 
 /** 日志输出端：接收一行完整文本。 */
 export type LogSink = (line: string) => void;

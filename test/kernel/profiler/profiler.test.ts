@@ -3,7 +3,7 @@
  * 以注入的 CPU 读数驱动，覆盖标签拼接、同 tick 累计、beginTick 结算与清零、平滑值计算与衰减、
  * 标签上限与 overflow，以及快照与内部记录隔离。
  */
-import { PROFILE_ALPHA, createProfiler } from '../../../src/kernel/profiler';
+import { PROFILE_ALPHA, createProfiler } from '@/kernel/profiler';
 
 /**
  * @description 创建可控 CPU 读数的 profiler。
