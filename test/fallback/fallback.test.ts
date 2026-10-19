@@ -191,6 +191,24 @@ describe('creep 工作', () => {
     expect(w.actions).toEqual([['w', 'withdraw', container.id]]);
   });
 
+  test('采集中途的工人紧挨活跃 source 且未装满时继续采集，不带着零碎能量去补能', () => {
+    const spawn = structure('spawn', pos(20, 20), { store: store(100, 300) });
+    const source = structure('source', pos(30, 30));
+    const worker = creep({ name: 'w', at: pos(30, 31), body: W, energy: 2 });
+    const w = installWorld({ rooms: [{ structures: [spawn], creeps: [worker], sources: [source] }] });
+    runFallback();
+    expect(w.actions).toEqual([['w', 'harvest', source.id]]);
+  });
+
+  test('装满后的工人离开 source 去补能', () => {
+    const spawn = structure('spawn', pos(20, 20), { store: store(100, 300) });
+    const source = structure('source', pos(30, 30));
+    const worker = creep({ name: 'w', at: pos(30, 31), body: W, energy: 50 });
+    const w = installWorld({ rooms: [{ structures: [spawn], creeps: [worker], sources: [source] }] });
+    runFallback();
+    expect(w.actions).toEqual([['w', 'move', 1]]);
+  });
+
   test('空载工人在没有可取能量时前往 source 采集', () => {
     const source = structure('source', pos(30, 30));
     const worker = creep({ name: 'w', at: pos(10, 10), body: W });
