@@ -17,6 +17,7 @@ interface GamePort {                     // 当 tick 的游戏事实，由装配
   time(): number;
   cpuUsed(): number;
   tickLimit(): number;
+  limit(): number;                       // Game.cpu.limit，用于计算收尾预留
   bucket(): number;
   creepNames(): ReadonlySet<string>;     // 含孵化中的 creep
   flagNames(): ReadonlySet<string>;
@@ -27,8 +28,9 @@ interface KernelOptions {
   readonly boot: BootDefinition;
   readonly memory: MemoryOptions;        // kernel.memory 的配置，实例由 kernel 创建并管理
   readonly game: GamePort;
-  readonly log: LogSink;                 // 日志输出端，游戏中为 console.log
-  readonly errors: ErrorMapper;          // 错误规范化与源码映射
+  readonly logRoot: LogRoot;             // 日志根对象，由装配方按 settings.ts 的 loggerSettings 创建，错误格式化接 errorMapper
+  readonly profiler: Profiler;           // 计时聚合器
+  readonly profileInstances?: boolean;   // 是否对实例钩子单独计时，默认 false
 }
 
 type KernelHealth = 'ok' | 'degraded';
@@ -39,7 +41,8 @@ interface Kernel {
 }
 ```
 
-- `createKernel` 只校验清单、分配状态，不读取游戏对象；第一次 `tick` 时才创建 Memory 实例并对各模块调用 `setup`。
+- `createKernel` 只校验选项与清单、分配状态，不读取游戏对象；Memory 实例在此创建，首个 `tick` 才加载，Memory 就绪后才对各模块调用 `setup`。
+- 日志根对象与计时器由装配方创建后传入：logger 的默认开关来自 `src/settings.ts`，而 kernel 不导入设置文件（架构 4.3）。
 - 依赖全部显式注入（架构 4.2）：kernel 不读全局 `Game`，测试以假 `GamePort` 驱动。
 
 ## 2. tick 流水线
@@ -72,7 +75,7 @@ tick()
 启动时对清单做一次稳定拓扑排序：在所有依赖已排好的模块中，按"层级 → priority → id"选出下一个。
 
 清单校验按 contracts 第 2 节隔离：只拒绝有问题的模块及经 `requires` 依赖它的模块，记录原因，其余模块照常启动。被拒绝的模块按"初始化失败"计入健康状态。拒绝条件：
-- id 为空，或与其他模块重复（重复的各方都拒绝）；
+- id 为空、为保留名（`boot` 是启动判定上下文的 owner，`core` 是实体空间公共切片的 owner），或与其他模块重复（重复的各方都拒绝）；
 - `requires` 或 `optional` 指向未知模块；
 - 处在依赖环上；
 - `requires` 了层级更低的模块。例如生存层模块依赖经济层模块：经济层可能不被准入，而生存层总是运行，两者矛盾。`optional` 不受此限。
@@ -89,7 +92,7 @@ tick()
 
 - 每次阶段钩子调用都在 try/catch 中。抛错使该进程的连续失败计数加 1，任一调用成功则归零。setup 与 dispose 也在 try/catch 中，但 setup 失败直接进入"初始化失败"（第 2 节），不参与计数。
 - 计数达到熔断阈值（附录 B：连续 3 次）时进程熔断，不再调用其钩子，只记录一次熔断日志。
-- 静态模块熔断或初始化失败时，它的全部实例，以及经 `requires` 直接或间接依赖它的模块，一同暂停。
+- 静态模块熔断或初始化失败时，它的全部实例，以及经 `requires` 直接或间接依赖它的模块，一同暂停。每个阶段访问模块时重新判断能否运行，依赖在某个阶段熔断后，依赖它的模块从同一阶段起即暂停。
 - 实例熔断只影响该实例。
 - 运维命令 `recover(id)`（第 5 步随 console 交付）只清除熔断状态与失败计数，保留原有钩子与上下文，不重新 setup，与 Memory 的 spec 身份规则一致。初始化失败的模块不能就地恢复，须经软重置。
 - 启停标志（5.5）随 console 与 ops 在第 5 步交付；在此之前，所有未熔断的进程都运行。
@@ -145,7 +148,7 @@ kernel.context 为每个模块派生一个 `ModuleContext`，在整个 global �
 | 安全模式（degraded） | 满足任一条件：本 tick boot 抛错；生存层的任一静态模块已熔断、初始化失败或因依赖暂停；Memory 实例加载失败，所有模块都无法读写持久数据 | — |
 | `SAFE_MODE_TICKS`（即 N） | 连续处于 degraded 的 tick 数达到此值后，每 tick 在正常循环之后追加运行保底循环，直到恢复 | 3 |
 | `KERNEL_CRASH_LIMIT` | kernel 连续抛出可捕获异常的次数上限；达到后停用正常循环 | 3 |
-| `KERNEL_COOLDOWN` | 停用冷却期，期间只运行保底循环，到期后重新装配 | 100 tick |
+| `KERNEL_COOLDOWN` | 停用冷却期：触发停用的那个 tick 之后的这么多个 tick 只运行保底循环，之后重新装配 | 100 tick |
 
 - **先接管 Memory**：引擎的 `spawnCreep` 即使不传 `memory` 选项也会访问 `Memory.creeps`，保底循环也会孵化。装配可能失败，冷却期也不装配 kernel，所以入口在任何其他工作之前先完成接管，使这类引擎内部写入只落在临时对象上，不触发真实 Memory 的解析与写回。takeover 由 kernel.memory 提供，入口不直接操作全局 Memory（架构 4.2 的持久化边界）；Memory 实例的 `beginTick` 识别同 tick 已完成的接管，不视为接管过晚。这需要对已合并的 Memory 模块做一处配套修改，随内核实现一并交付。
 - **抛错后重建**：异常可能使 kernel 内部状态不一致，所以抛错后丢弃实例，下一 tick 重新装配；Memory 从 RawMemory 重新加载，未提交的 heap 修改随之丢弃。

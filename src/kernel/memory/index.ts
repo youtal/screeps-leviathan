@@ -8,9 +8,33 @@ import type { ProjectMarker } from '@/contracts/boot';
 import { createCommitter } from './commit';
 import { createEntities } from './entities';
 import { createPartitions } from './partitions';
-import { beginTick, createRuntime, initialize, type MemoryOptions, type TickFacts } from './runtime';
+import { beginTick, createRuntime, initialize, type MemoryOptions, type MemoryPlatformPort, type TickFacts } from './runtime';
 
+export { takeoverMemory } from './runtime';
 export type { MemoryOptions, MemoryPlatformPort, SizeSnapshot, TickFacts } from './runtime';
+
+/**
+ * @description 创建绑定游戏全局 RawMemory 的平台端口。按架构 4.2，只有 kernel.memory 可以访问 RawMemory，
+ * 所以装配方通过此函数取得端口，自身不触碰 RawMemory。read/write 每次调用时读取当前 tick 的全局 RawMemory，不缓存平台对象。
+ * @param warn 容量告警的输出函数。
+ * @returns 游戏环境的 Memory 平台端口。
+ */
+export const createGamePlatform = (warn: (message: string) => void): MemoryPlatformPort => ({
+  target: globalThis,
+  /**
+   * @description 读取当前 tick 的原始 Memory 文本。
+   * @returns RawMemory.get()。
+   */
+  read: () => RawMemory.get(),
+  /**
+   * @description 写入完整根文本。
+   * @param text 已校验并编码的根文本。
+   * @returns 无返回值。
+   * @throws {Error} 平台拒绝写入（例如超过 2 MB）。
+   */
+  write: (text) => RawMemory.set(text),
+  warn,
+});
 
 /**
  * @description 每个 global 由宿主创建一个实例；各子工厂共享同一 Runtime，缓存随实例保留。
@@ -71,6 +95,16 @@ export const createMemory = (options: MemoryOptions) => {
      * @throws {Error} 实例未准备好、已销毁或正在提交。
      */
     sizes: () => { state.check(); return state.sizes; },
+    /**
+     * @description 判断存储是否可用：实例未销毁、未加载失败，且本项目命名空间已加载或已初始化。不抛错。
+     * @returns 可用时为 true；空存储待初始化、加载失败或已销毁时为 false。
+     */
+    ready: () => state.active && state.failure === undefined && state.data !== undefined,
+    /**
+     * @description 判断加载是否已失败并锁存；失败后本实例不可再用，须等新的 global 或重建实例。
+     * @returns 加载失败时为 true。
+     */
+    failed: () => state.failure !== undefined,
     /**
      * @description 撤销本实例能力，不清空平台文本、不自动提交未保存修改。
      * 外部仍持有的访问器会保留其闭包引用，但 active 闸门保证不可再使用。
