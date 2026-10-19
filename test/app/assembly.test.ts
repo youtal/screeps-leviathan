@@ -2,7 +2,9 @@
  * 文件摘要：真实入口与装配的冒烟测试：以最小全局 Game 与 Memory 平台替身运行 src/main.ts 的 loop。
  * 验证 Memory 接管、createGamePlatform、kernel 与临时 boot 的整条链路连续多个 tick 不报错：
  * 空存储保持不变（临时 boot 不初始化），已初始化的存储内容不变，控制台没有错误输出。
+ * 另测日志输出端的选择：存在 console.logUnsafe 时经它输出彩色前缀，否则经 console.log 输出纯文本。
  */
+import { createGameServices } from '@/app/assembly';
 import { loop } from '@/main';
 import { createMemoryPlatform } from '../platform/memory';
 
@@ -42,5 +44,20 @@ test('真实 loop 连续运行：空存储不被初始化，已初始化存储�
   }
   expect(JSON.parse(ready.memory)).toEqual(JSON.parse(text));
   expect(lines.filter((l) => l.includes('ERROR'))).toEqual([]);
+  jest.restoreAllMocks();
+});
+
+test('日志输出端：存在 console.logUnsafe 时经它输出并上色，否则经 console.log 输出纯文本', () => {
+  installGame(7);
+  const unsafe: string[] = [];
+  const plain: string[] = [];
+  jest.spyOn(console, 'log').mockImplementation((line: unknown) => { plain.push(String(line)); });
+  const host = console as { logUnsafe?: (line: string) => void };
+  host.logUnsafe = (line) => { unsafe.push(line); };
+  createGameServices().logRoot.scope('m').info('a<b');
+  delete host.logUnsafe;
+  createGameServices().logRoot.scope('m').info('a<b');
+  expect(unsafe).toEqual(['<span style="color:#95a5a6">[7] INFO</span> m: a&lt;b']);
+  expect(plain).toEqual(['[7] INFO m: a<b']);
   jest.restoreAllMocks();
 });

@@ -2,13 +2,13 @@
  * 文件摘要：kernel.logger，按作用域输出日志（设计见 docs/design/kernel/README.md 第 5 节，契约见 src/contracts/log.ts）。
  *
  * 所属位置：src/kernel/logger/，kernel 内部模块，零依赖：输出端、当前 tick、错误格式化函数与各级别默认开关
- * 都由装配方注入，游戏中分别为 console.log、Game.time、errorMapper.format 与装配配置，测试中可替换。
+ * 都由装配方注入，游戏中分别为 console.logUnsafe（不存在时为 console.log）、Game.time、errorMapper.format 与装配配置，测试中可替换。
  * 级别：debug、info、success（游戏内关键状态转移成功）、warn、error。
  * 双层开关：第一层是根对象的默认值（初始化时必须为每个级别给出，可由 setDefault 修改）；第二层是作用域的覆盖值
  * （业务模块经 Logger.configLevel 设置）。实际开关取本作用域覆盖值，其次是父作用域（实例作用域继承所属模块）的覆盖值，
  * 都没有时取默认值。覆盖只存于 heap，global reset 后由模块在 setup 中重新设置。
  * 输出格式：`[<tick>] <级别> <作用域>: <正文>`；error 另起一行附上格式化后的错误文本。
- * 上色（color 选项）：游戏控制台把输出当 HTML 渲染，前缀 `[<tick>] <级别>` 包在按级别着色的 span 中；
+ * 上色（color 选项，只在输出端渲染 HTML 时由装配方开启）：前缀 `[<tick>] <级别>` 包在按级别着色的 span 中；
  * 同时转义作用域与正文中的 &、<、>，否则堆栈里的 `<anonymous>` 等文本会被当成标签吞掉；正文中的换行改为 `<br>`，
  * 否则 HTML 会把换行折叠成空格，多行堆栈挤成一行。
  * 状态：根对象的共享状态（注入的选项与默认开关）只有一份；每个作用域是一个 ScopedLogger 扁平对象，
@@ -46,7 +46,7 @@ export const LEVEL_COLORS: Readonly<Record<LogLevel, string>> = {
 
 /** 创建日志根对象的选项。 */
 export interface LoggerOptions {
-  /** 输出端，游戏中为 console.log。 */
+  /** 输出端，游戏中为 console.logUnsafe，不存在时为 console.log。 */
   readonly sink: LogSink;
   /** 当前 tick，游戏中为 () => Game.time。 */
   readonly time: () => number;
@@ -54,7 +54,7 @@ export interface LoggerOptions {
   readonly format: (error: unknown) => string;
   /** 各级别的默认开关（第一层），必须为每个级别给出。 */
   readonly levels: LogLevelSwitches;
-  /** 是否按级别给前缀上色（输出 HTML），默认 false；游戏控制台装配时设为 true。 */
+  /** 是否按级别给前缀上色（输出 HTML），默认 false；输出端能渲染 HTML 时由装配方按使用者设置开启。 */
   readonly color?: boolean;
 }
 

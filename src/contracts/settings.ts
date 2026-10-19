@@ -11,6 +11,6 @@ import type { LogLevelSwitches } from './log';
 export interface LoggerSettings {
   /** 各日志级别的默认开关，即双层开关的第一层；业务模块可经 ctx.log.configLevel 覆盖。 */
   readonly levels: LogLevelSwitches;
-  /** 是否给日志前缀按级别上色（游戏控制台把输出当 HTML 渲染）。 */
+  /** 是否给日志前缀按级别上色；只在输出端能渲染 HTML（游戏中存在 console.logUnsafe）时生效。 */
   readonly color: boolean;
 }

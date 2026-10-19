@@ -123,7 +123,7 @@ kernel.context 为每个模块派生一个 `ModuleContext`，在整个 global �
 - 输出格式：`[<tick>] <级别> <作用域>: <正文>`，经 `LogSink` 输出。
 - **级别**：debug、info、success（游戏内关键状态转移成功）、warn、error。
 - **双层开关**：第一层是日志根对象的默认值，`createLogRoot` 的 `levels` 必须为每个级别给出，缺一即报错；默认值由装配方从 `src/settings.ts` 的 `loggerSettings` 读取后注入，可由 `setDefault` 修改（供运维命令使用）。第二层是作用域覆盖值，业务模块经 `ctx.log.configLevel({ [级别]: 开关 })` 一次设置一个或多个级别，值为 `undefined` 时恢复默认。实例作用域以所属模块作用域为父，继承其覆盖值。级别关闭时，函数形式的正文不求值。
-- **上色**：游戏控制台把输出当 HTML 渲染。装配时开启上色，前缀 `[<tick>] <级别>` 按级别着色（debug 天青、info 灰、success 绿、warn 橙、error 红），同时转义作用域与正文中的 `&`、`<`、`>`，否则堆栈里的 `<anonymous>` 等文本会被当成标签吞掉；正文中的换行改为 `<br>`，否则多行堆栈会被折叠成一行。不开启时输出纯文本，供测试与不渲染 HTML 的使用方。
+- **上色**：官服的 `console.log` 会把输出整体转成 HTML 实体，标签显示为原文；`console.logUnsafe` 原样下发，由客户端按 HTML 渲染。装配方存在 `logUnsafe` 时以它为输出端并按使用者设置开启上色，不存在时以 `console.log` 为输出端且不上色。上色时前缀 `[<tick>] <级别>` 按级别着色（debug 天青、info 灰、success 绿、warn 橙、error 红），同时转义作用域与正文中的 `&`、`<`、`>`，否则堆栈里的 `<anonymous>` 等文本会被当成标签吞掉；正文中的换行改为 `<br>`，否则多行堆栈会被折叠成一行。不开启时输出纯文本，供测试与不渲染 HTML 的使用方。
 - `error` 附带经 `ErrorMapper` 规范化的堆栈。映射受 CPU 保护，规则见 [errorMapper](./errorMapper.md)。
 - 同一进程连续失败时最多记录到熔断为止，熔断后只记一次熔断日志，避免刷屏。
 
@@ -161,5 +161,5 @@ kernel.context 为每个模块派生一个 `ModuleContext`，在整个 global �
 `app.assembly` 提供：
 - 模块清单：第 2 步为空，业务模块从 M2 开始加入；
 - Memory 配置：命名空间、签名、schema，取自 `app.config`；
-- `GamePort`、`LogSink`、`ErrorMapper` 的游戏实现；日志根对象的各级别默认开关与上色开关取自 `src/settings.ts` 的 `loggerSettings`；
+- `GamePort`、`LogSink`、`ErrorMapper` 的游戏实现；`LogSink` 按第 5 节在 `console.logUnsafe` 与 `console.log` 之间选择；日志根对象的各级别默认开关与上色开关取自 `src/settings.ts` 的 `loggerSettings`；
 - **临时 boot**：只发布 `AMBIGUOUS`/`medium`，不执行任何不可逆操作，也不初始化 Memory；在第 6 步由 `app.boot` 替换。在此之前，空存储保持 empty，普通模块不会 setup，也不运行业务钩子（第 2 节）。

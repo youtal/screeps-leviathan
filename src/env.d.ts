@@ -14,6 +14,13 @@ interface Console {
    * @returns 无返回值。
    */
   log(...args: unknown[]): void;
+  /**
+   * @description 向游戏控制台输出一行，内容原样交给客户端按 HTML 渲染，转义由调用方负责。官服的 log 会把内容整体
+   * 转成 HTML 实体，标签无法渲染；logUnsafe 不做这一步。私服或旧版本可能没有此方法，使用前须检查。
+   * @param args 输出内容，按空格连接。
+   * @returns 无返回值。
+   */
+  logUnsafe?(...args: unknown[]): void;
 }
 
 declare var console: Console;
