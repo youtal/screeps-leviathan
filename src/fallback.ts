@@ -302,7 +302,11 @@ const work = (creep: Creep, info: RoomInfo, state: TickState): void => {
     return;
   }
   if (energy > 0) {
-    if (!deliver(creep, info, state) && hasWork) upgrade(creep, info, state);
+    // 采集中途不离开：紧挨活跃 source 且未装满时继续采集，否则每采到一次就往返一趟，几乎运不回能量。
+    const source = hasWork && creep.store.getFreeCapacity(RESOURCE_ENERGY) > 0
+      ? info.sources.find((s) => creep.pos.isNearTo(s)) : undefined;
+    if (source) creep.harvest(source);
+    else if (!deliver(creep, info, state) && hasWork) upgrade(creep, info, state);
     return;
   }
   acquire(creep, info, state, hasWork);
