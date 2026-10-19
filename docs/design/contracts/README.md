@@ -18,13 +18,16 @@ contracts 是各层共同依赖的接口层。kernel 通过上下文向模块注
 
 | 文件 | 内容 | 依赖 |
 | --- | --- | --- |
-| `log.ts` | `Logger`、`Measure` | — |
+| `log.ts` | `LogLevel`、`LogMessage`、`LogLevelSwitches`、`Logger`、`Measure` | — |
 | `cpu.ts` | `Tier`、`CpuBudget` | — |
 | `memory.ts` | `Json`、路径类型、`Accessor`、分区与切片的声明、实体空间 | — |
 | `mode.ts` | `BootMode`、`Strength`、`BootModeView` | — |
 | `context.ts` | `ModuleId`、阶段钩子、实例钩子、`ProcessTable`、`ModuleContext`、`InstanceContext` | log、cpu、memory、mode |
 | `module.ts` | `ModuleManifest`、`ModuleDefinition` | context、cpu |
 | `boot.ts` | 项目标记、`BootPort`、`BootContext`、`BootDefinition` | context、memory、mode |
+| `settings.ts` | 各模块的使用者设置类型，命名为 `<模块名>Settings`，目前有 `LoggerSettings` | log |
+
+**使用者设置**：`src/settings.ts`（架构 4.3）为每个需要使用者设置的模块导出一个常量 `<模块名>Settings`，类型定义在 `contracts/settings.ts` 的同名接口中；装配方读取后作为参数注入对应模块，模块自身不导入设置文件。新增模块的设置时，两处同时增加。
 
 ## 2. 模块定义与阶段钩子
 
@@ -108,11 +111,17 @@ interface InstanceContext {
 ## 4. 日志、计时与 CPU
 
 ```ts
+type LogLevel = 'debug' | 'info' | 'success' | 'warn' | 'error';
+type LogMessage = string | (() => string);       // 函数形式只在该级别开启时求值
+
 interface Logger {
-  debug(message: string | (() => string)): void;   // 函数形式只在 debug 开启时求值
-  info(message: string): void;
-  warn(message: string): void;
-  error(message: string, error?: unknown): void;   // error 经 errorMapper 映射源码位置
+  debug(message: LogMessage): void;
+  info(message: LogMessage): void;
+  success(message: LogMessage): void;             // 游戏内关键状态转移成功：RCL 升级、订单创建或成交、殖民地扩张等
+  warn(message: LogMessage): void;
+  error(message: LogMessage, error?: unknown): void; // error 经 errorMapper 映射源码位置
+  configLevel(levels: Partial<Record<LogLevel, boolean | undefined>>): void; // 一次覆盖一个或多个级别；undefined 恢复默认
+  enabled(level: LogLevel): boolean;
 }
 
 interface Measure {
@@ -127,7 +136,8 @@ interface CpuBudget {
 }
 ```
 
-计时采用 `begin` / `end` 两次调用，不使用 `measure(op, fn)` 形式，避免热路径每次创建闭包。
+- **日志的双层开关**：每个级别的实际开关取本作用域的覆盖值，其次所属模块作用域的覆盖值（实例作用域继承模块），都没有时取日志根对象的默认值。默认值由装配方在初始化时为每个级别给出。覆盖只存于 heap，模块在 setup 中按需设置。
+- 计时采用 `begin` / `end` 两次调用，不使用 `measure(op, fn)` 形式，避免热路径每次创建闭包。
 
 ## 5. 持久化
 

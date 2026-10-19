@@ -8,6 +8,7 @@
  * 检查的规则：
  * - layer：依赖只能从上往下；除 app 与 main 外，任何层都不得导入 kernel 的实现；
  *   独立入口 src/fallback.ts 不得导入项目模块，包括类型依赖和自身；
+ *   使用者设置 src/settings.ts 只能导入 contracts（类型），且只有 app 与 main 可以导入它（架构 4.3）；
  * - package：src 不导入外部包，运行时代码全部打入构建产物；
  * - domain：领域之间不互相导入，领域以 domains/<分组>/<领域>/ 为单位；
  * - storage：全局 Memory、RawMemory、InterShardMemory，游戏对象的原生 memory 属性，以及
@@ -32,13 +33,20 @@ export interface Violation {
   readonly message: string;
 }
 
-/** 源码的层：main 与 fallback 只对应根目录的独立入口，其余取 src 下的第一级目录。 */
-type Layer = 'main' | 'fallback' | 'app' | 'kernel' | 'lib' | 'world' | 'services' | 'colony' | 'domains' | 'contracts';
+/** 源码的层：main、fallback、settings 只对应根目录的同名文件，其余取 src 下的第一级目录。 */
+type Layer = 'main' | 'fallback' | 'settings' | 'app' | 'kernel' | 'lib' | 'world' | 'services' | 'colony' | 'domains' | 'contracts';
 
-/** 各层允许导入的层（fallback 单独禁止全部项目依赖；其余同层允许，domains 另受 domain 规则约束）。 */
+/** 只对应根目录同名文件的层；同名目录不属于任何层。 */
+const ROOT_FILES: ReadonlySet<string> = new Set(['main', 'fallback', 'settings']);
+
+/**
+ * 各层允许导入的层：fallback 单独禁止全部项目依赖；settings 只能导入 contracts，除 app 与 main（any）外没有层可以导入它；
+ * 其余同层允许，domains 另受 domain 规则约束。
+ */
 const ALLOWED: Readonly<Record<Layer, readonly Layer[] | 'any'>> = {
   main: 'any',
   fallback: [],
+  settings: ['contracts'],
   app: 'any',
   kernel: ['lib', 'contracts'],
   world: ['lib', 'contracts'],
@@ -65,19 +73,17 @@ const STORAGE_GLOBALS = new Set(['Memory', 'RawMemory', 'InterShardMemory']);
 const toSrcPath = (srcRoot: string, file: string): string => relative(srcRoot, file).split(sep).join('/');
 
 /**
- * @description 判定源文件所属的层：根目录只识别 main.ts 与 fallback.ts，其余取 src 下的第一级目录。
+ * @description 判定源文件所属的层：根目录只识别 main.ts、fallback.ts 与 settings.ts，其余取 src 下的第一级目录。
  * @param srcPath 相对 src 的路径。
- * @returns 所属层；不在任何已知层中时为 null（包括伪装成目录的 main、fallback）。
+ * @returns 所属层；不在任何已知层中时为 null（包括伪装成目录的 main、fallback、settings）。
  */
 const layerOf = (srcPath: string): Layer | null => {
-  if (srcPath === 'main.ts') {
-    return 'main';
-  }
-  if (srcPath === 'fallback.ts') {
-    return 'fallback';
+  const rootFile = srcPath.endsWith('.ts') && !srcPath.includes('/') ? srcPath.slice(0, -3) : undefined;
+  if (rootFile !== undefined && ROOT_FILES.has(rootFile)) {
+    return rootFile as Layer;
   }
   const first = srcPath.split('/')[0];
-  return LAYERS.has(first) && first !== 'main' && first !== 'fallback' ? (first as Layer) : null;
+  return LAYERS.has(first) && !ROOT_FILES.has(first) ? (first as Layer) : null;
 };
 
 /**

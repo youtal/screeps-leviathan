@@ -11,15 +11,19 @@
 | `<层>/README.md` | 该层内跨模块的设计，按需建立 |
 | `<层>/<模块>.md` | 模块设计，与 `src/<层>/<模块>/` 一一对应；领域模块为 `domains/<分组>/<领域>.md` |
 
-层与 `src/` 下的目录一致：`kernel`、`lib`、`world`、`services`、`colony`、`domains`、`contracts`、`app`。
+层与 `src/` 下的目录一致：`kernel`、`lib`、`world`、`services`、`colony`、`domains`、`contracts`、`app`。`src/` 根目录下的独立文件（`fallback.ts`）对应 `docs/design/` 根目录下的同名文档。
 
 ## 索引
 
 | 层 | 文档 | 内容 |
 | --- | --- | --- |
 | — | [architecture.md](./architecture.md) | 总体架构 |
+| — | [fallback.md](./fallback.md) | 独立保底循环（`src/fallback.ts`） |
 | app | [app/config.md](./app/config.md) | 劳动力配置、身体模板、孵化优先级与运营参数 |
 | contracts | [contracts/README.md](./contracts/README.md) | 注入接口与跨模块协议 |
+| kernel | [kernel/README.md](./kernel/README.md) | 内核骨架：宿主接口、tick 流水线、进程表、上下文、日志、入口切换 |
+| kernel | [kernel/errorMapper.md](./kernel/errorMapper.md) | 错误规范化与源码映射 |
+| kernel | [kernel/profiler.md](./kernel/profiler.md) | 计时聚合（只放 heap） |
 | kernel | [kernel/memory.md](./kernel/memory.md) | Memory v1 与候选块级优化 |
 | world | [world/market.md](./world/market.md) | 物价模型 |
 | colony | [colony/inventory.md](./colony/inventory.md) | 资源库存控制 |
