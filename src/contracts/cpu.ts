@@ -13,8 +13,14 @@ export type Tier = 'survival' | 'economy' | 'maintenance' | 'planning';
 export interface CpuBudget {
   /** 进程所属的层级。 */
   readonly tier: Tier;
-  /** 本进程本 tick 剩余可用的 CPU。 */
+  /**
+   * @description 查询本进程本 tick 剩余可用的 CPU，用于决定还能处理多少工作。
+   * @returns 剩余 CPU；已用尽时为 0 或负数。
+   */
   remaining(): number;
-  /** 长计算每批检查一次；返回 true 时保存游标并结束本 tick 的计算。 */
+  /**
+   * @description 长计算每处理一批检查一次，判断是否应让出本 tick。
+   * @returns 为 true 时调用方保存游标并结束本 tick 的计算，下一 tick 从游标继续。
+   */
   shouldYield(): boolean;
 }

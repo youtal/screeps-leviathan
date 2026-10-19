@@ -21,6 +21,10 @@ export interface ModuleManifest {
 
 /** 模块定义。 */
 export interface ModuleDefinition extends ModuleManifest {
-  /** 每个 global 调用一次，返回本模块的阶段钩子。 */
+  /**
+   * @description 每个 global 调用一次：声明分区与切片、解析所需服务，并返回本模块的阶段钩子。
+   * @param ctx 本模块的上下文，在整个 global 生命周期内稳定，可由钩子闭包持有。
+   * @returns 本模块实现的阶段钩子。
+   */
   setup(ctx: ModuleContext): PhaseHooks;
 }

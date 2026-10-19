@@ -47,9 +47,18 @@ export interface MemoryPlatform {
   readonly memory: string;
   /** 当前生效的激活请求（下一 tick 加载这些页）。 */
   readonly activeSegments: readonly number[];
-  /** 已持久化的 segment 内容；从未写过的页返回 undefined。 */
+  /**
+   * @description 读取已持久化的 segment 内容。
+   * @param id 页号 0–99。
+   * @returns 页内容；从未写过的页为 undefined。
+   */
   segment(id: number): string | undefined;
-  /** 执行一个 tick：安装全局对象、运行 run、按平台规则持久化。 */
+  /**
+   * @description 执行一个 tick：安装 Memory 访问器与 RawMemory，运行 run，再按平台规则持久化。
+   * @param run 本 tick 的用户代码。
+   * @returns 用户代码抛出的异常；未抛出时 error 为 undefined。
+   * @throws {PlatformError} tick 结束时 segment 数量、页号、类型或长度违规，本 tick 的写入全部丢弃。
+   */
   tick(run: () => void): TickResult;
 }
 
@@ -58,8 +67,18 @@ interface RawMemoryInternal extends RawMemory {
   _parsed?: unknown;
 }
 
+/**
+ * @description 判断页号是否为 0–99 的整数。
+ * @param id 待判断的页号。
+ * @returns 合法页号时为 true。
+ */
 const isSegmentId = (id: number): boolean => Number.isInteger(id) && id >= 0 && id <= 99;
 
+/**
+ * @description 创建 Memory 与 segment 的严格平台模拟，持久状态保存在返回对象的闭包中。
+ * @param options 初始 Memory 文本、初始 segment 与安装全局对象的目标，均可省略。
+ * @returns 可逐 tick 驱动并查询持久状态的平台模拟。
+ */
 export const createMemoryPlatform = (options: MemoryPlatformOptions = {}): MemoryPlatform => {
   const target = (options.target ?? globalThis) as Record<string, unknown>;
   let memory = options.memory ?? '';
@@ -67,6 +86,12 @@ export const createMemoryPlatform = (options: MemoryPlatformOptions = {}): Memor
   const segments = new Map<number, string>(Object.entries(options.segments ?? {}).map(([id, text]) => [Number(id), text]));
   let active: readonly number[] = [];
 
+  /**
+   * @description 执行一个 tick，语义见 MemoryPlatform.tick 与文件摘要中的平台规则。
+   * @param run 本 tick 的用户代码。
+   * @returns 用户代码抛出的异常；未抛出时 error 为 undefined。
+   * @throws {PlatformError} tick 结束时 segment 保存违规。
+   */
   const tick = (run: () => void): TickResult => {
     let data = memory;
     let requested: number[] | null = null;
@@ -77,8 +102,20 @@ export const createMemoryPlatform = (options: MemoryPlatformOptions = {}): Memor
 
     const raw = Object.create(null) as RawMemoryInternal;
     Object.defineProperties(raw, {
-      get: { value: (): string => data },
+      get: {
+        /**
+         * @description RawMemory.get：返回本 tick 当前的原始文本。
+         * @returns 原始 Memory 文本。
+         */
+        value: (): string => data
+      },
       set: {
+        /**
+         * @description RawMemory.set：替换原始文本，并丢弃已解析的 Memory 缓存。
+         * @param value 新的原始文本。
+         * @returns 无返回值。
+         * @throws {Error} 不是字符串，或长度超过 2 MB。
+         */
         value(value: unknown): void {
           if (typeof value !== 'string') {
             throw new Error('Raw memory value is not a string');
@@ -92,6 +129,12 @@ export const createMemoryPlatform = (options: MemoryPlatformOptions = {}): Memor
       },
       segments: { value: loaded },
       setActiveSegments: {
+        /**
+         * @description RawMemory.setActiveSegments：替换激活请求，下一 tick 生效并持续到再次调用。
+         * @param ids 页号数组，最多 10 个。
+         * @returns 无返回值。
+         * @throws {Error} 不是数组、超过 10 个或含非法页号。
+         */
         value(ids: unknown): void {
           if (!Array.isArray(ids)) {
             throw new Error(`"${String(ids)}" is not an array`);
@@ -116,6 +159,10 @@ export const createMemoryPlatform = (options: MemoryPlatformOptions = {}): Memor
     Object.defineProperty(target, 'Memory', {
       configurable: true,
       enumerable: true,
+      /**
+       * @description 引擎的惰性 Memory 访问器：首次读取时解析原始文本，结果无原型并缓存为 _parsed，随后把属性替换为值。
+       * @returns 解析后的 Memory；解析失败时为 null。
+       */
       get() {
         let parsed: unknown;
         try {
@@ -177,6 +224,11 @@ export const createMemoryPlatform = (options: MemoryPlatformOptions = {}): Memor
     get activeSegments() {
       return active;
     },
+    /**
+     * @description 读取已持久化的 segment 内容。
+     * @param id 页号。
+     * @returns 页内容；从未写过的页为 undefined。
+     */
     segment: (id) => segments.get(id),
     tick,
   };
