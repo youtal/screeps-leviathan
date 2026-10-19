@@ -144,7 +144,7 @@ Logger 只承载纯文本日志，作用域名和正文在统一出口转义；�
 <a id="validation"></a>
 ### 验证与发布
 
-完成代码或构建系统修改后，按顺序运行与变更相符的检查：类型检查、单元与边界测试、构建；涉及引擎行为、跨 tick 状态或运营闭环的变更，再运行相应的私服场景测试；最后运行 `git diff --check`。对应的命令为 `npm run typecheck`、`npm test`、`npm run build`（或合并为 `npm run check`）与 `git diff --check`；私服场景测试的命令建立后补充。
+完成代码或构建系统修改后，按顺序运行与变更相符的检查：类型检查、单元与边界测试、构建；涉及引擎行为、跨 tick 状态或运营闭环的变更，再运行相应的私服场景测试；最后运行 `git diff --check`。对应的命令为 `npm run typecheck`、`npm test`、`npm run build`（或合并为 `npm run check`）与 `git diff --check`；私服场景测试为 `npm run test:scenarios`（需要 Docker，`-- --only <场景名>` 只运行单个场景）。
 
 纯文档修改至少检查差异空白，并核对改动文档的链接与章节引用。交付说明应列明未通过或未运行的检查、原因和影响。
 
