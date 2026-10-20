@@ -290,13 +290,16 @@ test('Memory 已就绪：软重置 → 新实例备份 → 清空，期间业务
   healths.push(h.tick(), h.tick());
   expect(h.kernel.resetRequested()).toBe(true);
   expect(calls).toEqual(['setup', 'sense']); // 软重置的 tick 不运行业务阶段
+  // 第一个实例提交后的文本：setup 时 kernel 申请了启停标志分区（part.kernel.switches），与初始文本不同。
+  const committed = h.platform.memory;
   h.rebuild();
   healths.push(h.tick(), h.tick(), h.tick());
   expect(healths).toEqual(['ok', 'paused', 'paused', 'paused', 'ok']);
   expect(calls).toEqual(['setup', 'sense', 'setup', 'sense']);
   expect(JSON.parse(h.platform.memory).leviathan.sys.epoch).toBe(1);
-  // 新实例备份的是第一个实例提交后的文本，内容与初始文本相同。
-  expect(backupOf(h).body).toBe(READY_MEMORY);
+  // 新实例备份的是第一个实例提交后的文本。
+  expect(backupOf(h).body).toBe(committed);
+  expect(JSON.parse(committed).leviathan.part).toEqual({ kernel: { switches: { version: 1, data: {} } } });
 });
 
 test('SR-01：boot 登记软重置后抛错，本 tick 的登记作废；之后正常登记仍生效', () => {

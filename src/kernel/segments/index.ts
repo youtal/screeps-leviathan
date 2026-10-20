@@ -134,6 +134,11 @@ export interface SegmentsHost {
    */
   reader(store: 'backup'): PageReader;
   /**
+   * @description 统计全部 store 尚未写出的页数，供 stats 观测写回积压。
+   * @returns 待写页数。
+   */
+  pending(): number;
+  /**
    * @description commit 阶段每 tick 一次：按优先级与变脏顺序写出待写页，并提交激活请求。
    * @returns 无返回值。
    * @throws {*} 平台 setActiveSegments 的异常原样传播；待写页已写出部分保持写出。
@@ -292,6 +297,11 @@ export const createSegments = (options: SegmentsOptions): SegmentsHost => {
         },
       };
     },
+    /**
+     * @description 统计全部 store 尚未写出的页数。
+     * @returns 待写页数。
+     */
+    pending: () => pending.size,
     /**
      * @description 写出待写页并提交激活请求，语义见 SegmentsHost.commit。
      * @returns 无返回值。

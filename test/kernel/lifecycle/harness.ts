@@ -4,7 +4,7 @@
 import type { ProjectMarker } from '@/contracts/boot';
 import type { BootDefinition } from '@/contracts/boot';
 import type { ModuleDefinition } from '@/contracts/module';
-import { type Kernel, createKernel } from '@/kernel/lifecycle';
+import { type GamePort, type Kernel, createKernel } from '@/kernel/lifecycle';
 import { createLogRoot } from '@/kernel/logger';
 import { createProfiler } from '@/kernel/profiler';
 import { createMemoryPlatform } from '../../platform/memory';
@@ -27,11 +27,15 @@ export const READY_MEMORY = JSON.stringify({ leviathan: { sys: marker, part: {},
  * @param options.segments 平台上已有的 segment 内容。
  * @param options.interShard InterShardMemory 所在的对象，默认不提供 InterShardMemory（与私服一致）。
  * @param options.creeps 每 tick 的 creep 名称集合，默认为空。
- * @returns kernel（rebuild 后为新实例）、日志行、平台替身、全局目标对象、按 tick 驱动的函数与模拟入口重建的 rebuild。
+ * @param options.game 覆盖默认 GamePort 的部分方法（CPU 读数、bucket、额度等）。
+ * @returns kernel（rebuild 后为新实例）、日志行、平台替身、Memory 全局目标、控制台全局目标 globals、日志根对象、
+ * 按 tick 驱动的函数与模拟入口重建的 rebuild。
  */
 export const kernelHarness = (options: { modules: ModuleDefinition[]; boot?: BootDefinition; memory?: string;
-  segments?: Record<number, string>; interShard?: object; creeps?: () => ReadonlySet<string> }) => {
+  segments?: Record<number, string>; interShard?: object; creeps?: () => ReadonlySet<string>; game?: Partial<GamePort> }) => {
   const target = {} as { Memory: unknown; RawMemory: RawMemory };
+  // 控制台命名空间的安装目标，跨 rebuild 共用，与游戏中的 globalThis 一致。
+  const globals: Record<string, unknown> = {};
   const platform = createMemoryPlatform({ target, memory: options.memory ?? READY_MEMORY, segments: options.segments });
   const lines: string[] = [];
   let time = 0;
@@ -59,7 +63,7 @@ export const kernelHarness = (options: { modules: ModuleDefinition[]; boot?: Boo
     memory: { namespace: 'leviathan', signature: 'leviathan', schema: 1,
       platform: { target, read: () => target.RawMemory.get(), write: (v) => target.RawMemory.set(v), warn: () => undefined } },
     game: { time: () => time, cpuUsed: () => 0, tickLimit: () => 500, limit: () => 20, bucket: () => 10000,
-      shard: () => 'x', creepNames: options.creeps ?? (() => new Set()), flagNames: () => new Set() },
+      shard: () => 'x', creepNames: options.creeps ?? (() => new Set()), flagNames: () => new Set(), ...options.game },
     logRoot,
     profiler: createProfiler({ cpuUsed: () => 0 }),
     release: 'test-release',
@@ -77,6 +81,7 @@ export const kernelHarness = (options: { modules: ModuleDefinition[]; boot?: Boo
       setActive: (ids) => target.RawMemory.setActiveSegments([...ids]),
     },
     interShard: options.interShard ?? {},
+    console: globals,
   });
   let kernel = create();
   /**
@@ -91,7 +96,7 @@ export const kernelHarness = (options: { modules: ModuleDefinition[]; boot?: Boo
     if (result.error !== undefined) throw result.error;
     return health;
   };
-  return { lines, platform, target, tick,
+  return { lines, platform, target, globals, logRoot, tick,
     /**
      * @description 当前 kernel 实例。
      * @returns kernel。

@@ -20,9 +20,10 @@ contracts 是各层共同依赖的接口层。kernel 通过上下文向模块注
 | --- | --- | --- |
 | `log.ts` | `LogLevel`、`LogMessage`、`LogLevelSwitches`、`Logger`、`Measure` | — |
 | `cpu.ts` | `Tier`、`CpuBudget` | — |
+| `console.ts` | `CommandName`、`ConsoleRegistry` | — |
 | `memory.ts` | `Json`、路径类型、`Accessor`、分区与切片的声明、实体空间 | — |
 | `mode.ts` | `BootMode`、`Strength`、`BootModeView` | — |
-| `context.ts` | `ModuleId`、阶段钩子、实例钩子、`ProcessTable`、`ModuleContext`、`InstanceContext` | log、cpu、memory、mode |
+| `context.ts` | `ModuleId`、阶段钩子、实例钩子、`ProcessTable`、`ModuleContext`、`InstanceContext` | console、log、cpu、memory、mode |
 | `module.ts` | `ModuleManifest`、`ModuleDefinition` | context、cpu |
 | `boot.ts` | 项目标记、`BootPort`、`BootContext`、`BootDefinition` | context、memory、mode |
 | `settings.ts` | 各模块的使用者设置类型，命名为 `<模块名>Settings`，目前有 `LoggerSettings` | log |
@@ -41,6 +42,7 @@ interface ModuleManifest {
   readonly optional?: readonly ModuleId[];    // 软依赖：只影响拓扑排序
   readonly tier: Tier;
   readonly priority: number;                  // 同层内的顺序，越小越先
+  readonly startPaused?: boolean;             // 没有运维覆盖时是否暂停，默认 false（5.5、13.3）
 }
 
 interface PhaseHooks {
@@ -64,6 +66,8 @@ interface ModuleDefinition extends ModuleManifest {
 - **钩子不带参数**：上下文在 `setup` 时由闭包持有，每 tick 调用钩子不分配参数对象。
 - **错误边界**：每次钩子调用各自隔离，抛错计入该进程的连续失败次数，达到阈值即熔断（5.1）。
 - **清单在构建期确定**：app.assembly 把全部 `ModuleDefinition` 交给 kernel，kernel 在每个 global 启动时做一次稳定拓扑排序。依赖环和未知依赖在启动时报错，并拒绝启动该模块及依赖它的模块。
+- **保留 id**：`boot`、`core`、`kernel`、`ops` 不能用作模块 id。前两个是启动判定上下文与实体公共切片的 owner，`kernel` 是 kernel 自身分区（启停标志）的 owner，`ops` 是运维命令的控制台命名空间；模块 id 同时是控制台命名空间（第 3 节）。
+- **默认暂停**：`startPaused` 为 true 的模块在没有运维覆盖时暂停：仍执行 `setup`，但不运行钩子；运维经 `ops.resume(id)` 启用（[ops](../app/ops.md#3-启停标志55)）。生存层模块不能暂停，此项对其无效。
 
 ### 动态实例
 
@@ -93,6 +97,7 @@ interface ModuleContext {
   readonly flags: EntitySpace;
   readonly mode: BootModeView;
   readonly processes: ProcessTable;
+  readonly console: ConsoleRegistry;          // 命名空间为模块 id
   instance(key: string): InstanceContext;
   onDispose(fn: () => void): void;            // 软重置时调用
 }
@@ -105,7 +110,16 @@ interface InstanceContext {
 }
 ```
 
-- 与 5.4 相比，增加了 `processes`，用于增删动态实例；`segments` 与 `services` 随第一个使用方加入（第 7 节）。
+- 与 5.4 相比，增加了 `processes`，用于增删动态实例，以及 `console`，用于注册控制台命令；`segments` 与 `services` 随第一个使用方加入（第 7 节）。
+
+```ts
+interface ConsoleRegistry {
+  command(name: string, help: string, fn: (...args: readonly unknown[]) => unknown): void;
+  setting(name: string, help: string, get: () => unknown, set: (value: unknown) => void): void;
+}
+```
+
+- **控制台**：注册即安装为全局对象 `<模块 id>.<名称>`，例如 boot 的 `boot.assess()`、`boot.dryRun`（11.9）。命令在主循环之后运行，对 Memory 的写入在下一 tick 提交；处理函数抛错时控制台输出 `错误：<消息>`。命令名取自有限集合；实例上下文不提供 `console`，针对实例的命令以实例键为参数。安装、冲突与 kernel 重建时的行为见 [console](../kernel/console.md)。
 - 上下文对象在整个 global 生命周期内稳定，`instance(key)` 惰性创建并缓存。实例的持久数据放在所属模块的分区或切片中，按实例键区分（6.4），所以 `InstanceContext` 不带存储接口。
 
 ## 4. 日志、计时与 CPU
@@ -279,7 +293,6 @@ interface BootDefinition {
 | creep / room / flag 的 core 切片类型、`core(key)` 只读视图与专用写入接口 | 6.4、9.1 | M2，随 colony、spawnQueue |
 | 实例准入过滤 `admit` | 5.2 | M2，随 colony.posture |
 | `ModuleContext.segments`（`SegmentStore`、`PENDING`） | 6.8 | 第一个使用 segment 的模块交付时 |
-| 启停标志与运维命令注册 | 5.5、5.8 | M1，随 kernel.console 与 app.ops |
 
 ## 8. 接口与用法
 

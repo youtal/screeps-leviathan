@@ -8,11 +8,12 @@
 
 ## 职责与边界
 
-实现 `Measure` 契约：按标签聚合 CPU 耗用，以只读快照交给 stats 与 console（第 5 步）。
+实现 `Measure` 契约：按标签聚合 CPU 耗用，以只读快照供诊断读取。
 
-- **只放 heap**：计时是诊断数据，丢失只影响平滑值的预热，不影响运营正确性；写入主 Memory 会让一个存储单元每 tick 变脏。长期统计由 stats 读取快照后写入统计 segment（架构 6.8 第 50 页）。依赖方向是 stats → profiler。
+- **只放 heap**：计时是诊断数据，丢失只影响平滑值的预热，不影响运营正确性；写入主 Memory 会让一个存储单元每 tick 变脏。
+- **与 cpu 计量分开**：准入与统计所用的进程耗用来自 [cpu](./cpu.md) 的平滑计量，不依赖 profiler；统计页（[stats](./stats.md)）写出的是 cpu 的进程耗用，不读取本模块的快照。profiler 按标签提供更细的计时明细，M1 中没有读取快照的使用方，快照接口保留给后续的诊断命令。
 - **零依赖**：CPU 读数由装配方注入（游戏中为 `Game.cpu.getUsed`）；不写日志，不访问 Memory 与 segment。
-- **计时粒度由调用方决定**：profiler 只负责聚合；kernel 默认只对模块级钩子计时，实例级明细是否计时由 kernel 的配置决定。原因是每对 `begin`/`end` 要调用两次 `Game.cpu.getUsed()`，并非零成本。
+- **计时粒度由调用方决定**：profiler 只负责聚合；kernel 默认只对模块级钩子计时，实例级明细是否计时由 kernel 的配置决定。原因是每次计时都要读 `Game.cpu.getUsed()`，并非零成本。kernel 的阶段循环不调用 `begin`，而是把 cpu 计量的读数作为开始读数传给 `end`，每次计时只多读一次（[cpu](./cpu.md#5-计量)）。
 
 ## 接口
 
@@ -32,7 +33,7 @@ interface ProfileEntry {
 interface Profiler {
   scope(prefix: string): Measure;        // 计时标签为 `${prefix}.${op}`
   beginTick(): void;                     // 每 tick 开始时调用，结算上一 tick 并清零本 tick 累计
-  snapshot(): readonly ProfileEntry[];   // 新数组；供 stats、console 低频读取
+  snapshot(): readonly ProfileEntry[];   // 新数组；供诊断低频读取
   readonly overflow: number;             // 因超过标签上限而丢弃的计时次数（累计）
 }
 ```

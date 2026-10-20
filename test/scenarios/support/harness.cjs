@@ -123,6 +123,15 @@ const projectNamespace = (marker = {}) => ({
 });
 
 /**
+ * @description 已初始化存储经正常循环运行后的预期内容：kernel 在普通模块首次 setup 前申请启停标志分区
+ * part.kernel.switches（docs/design/app/ops.md 第 3.2 节），其余内容不变。
+ * @param {object} memory 初始 Memory，其中 leviathan 为 projectNamespace() 的结果。
+ * @returns {object} 预期的 Memory。
+ */
+const withKernelPartition = (memory) => ({ ...memory, leviathan: { ...memory.leviathan,
+  part: { ...memory.leviathan.part, kernel: { switches: { version: 1, data: {} } } } } });
+
+/**
  * @description 生成设置初始 Memory 的 createWorld 选项。框架创建世界前会递归扫描 memory 选项，把其中任何字符串值
  * 都当成 fixture 名去查找文件（screeps-integration-tests 3.0.0），而本项目的标记含字符串字段；memoryOverrides
  * 不参与该扫描，在没有 memory 时它本身就是初始 Memory，所以统一经它传入。
@@ -132,4 +141,4 @@ const projectNamespace = (marker = {}) => ({
  */
 const initialMemory = (bot, memory) => ({ memoryOverrides: { [bot]: memory } });
 
-module.exports = { assertRuntimeClean, initialMemory, leviathanBot, loopRuns, projectNamespace, withWorld };
+module.exports = { assertRuntimeClean, initialMemory, leviathanBot, loopRuns, projectNamespace, withKernelPartition, withWorld };

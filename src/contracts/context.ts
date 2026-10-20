@@ -4,8 +4,9 @@
  *
  * kernel.context 为每个模块派生 ModuleContext，并惰性派生 InstanceContext；上下文在整个 global 生命周期内稳定。
  * 有状态的 kernel 能力只能经由上下文取得（架构设计 4.2）。钩子与实例表放在这里而不是 module.ts，
- * 使 contracts 的依赖图无环：本文件只依赖叶子文件 log、cpu、memory、mode。本文件只含类型声明，没有运行时代码。
+ * 使 contracts 的依赖图无环：本文件只依赖叶子文件 console、log、cpu、memory、mode。本文件只含类型声明，没有运行时代码。
  */
+import type { ConsoleRegistry } from './console';
 import type { CpuBudget } from './cpu';
 import type { Logger, Measure } from './log';
 import type { EntitySpace, PartitionFactory } from './memory';
@@ -97,6 +98,8 @@ export interface ModuleContext {
   readonly mode: BootModeView;
   /** 本模块的动态实例表。 */
   readonly processes: ProcessTable;
+  /** 控制台命令注册器，命名空间为模块 id（docs/design/kernel/console.md）；在 setup 中注册。 */
+  readonly console: ConsoleRegistry;
   /**
    * @description 惰性派生并缓存实例上下文；同一键多次调用返回同一对象。
    * @param key 实例键（不含模块 ID）。
