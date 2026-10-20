@@ -2,10 +2,12 @@
  * 文件摘要：入口切换逻辑（src/main.ts 的 createEntry）的单元测试，以假依赖驱动，不需要 Game。
  * 覆盖：正常运行只装配一次、抛错（含装配抛错）当 tick 转保底并在下一 tick 重新装配、连续 3 次抛错进入
  * 100 tick 冷却、连续 3 个 degraded tick 追加保底并在恢复后停止、接管失败与保底抛错只报告、
- * 软重置后重新装配且不计入抛错、暂停 tick 不改变 degraded 计数且连续暂停超过上限后按 degraded 计数。
+ * 软重置后重新装配且不计入抛错、暂停 tick 不改变 degraded 计数且连续暂停超过上限后按 degraded 计数、
+ * 保底接管开始时通知且间隔内不重复（审计 LC-07）、入口状态（审计 LC-04）。
  */
+import type { EntryStatus } from '@/app/ops';
 import type { Kernel, KernelHealth } from '@/kernel/lifecycle';
-import { KERNEL_COOLDOWN, KERNEL_CRASH_LIMIT, PAUSE_LIMIT, SAFE_MODE_TICKS, createEntry } from '@/main';
+import { FALLBACK_NOTIFY_GAP, KERNEL_COOLDOWN, KERNEL_CRASH_LIMIT, PAUSE_LIMIT, SAFE_MODE_TICKS, createEntry } from '@/main';
 
 /**
  * @description 创建可编排的入口：每次 kernel.tick 依次取 script 中的结果（'throw' 表示抛错，'reset' 表示登记软重置的暂停 tick）。
@@ -18,10 +20,12 @@ import { KERNEL_COOLDOWN, KERNEL_CRASH_LIMIT, PAUSE_LIMIT, SAFE_MODE_TICKS, crea
  */
 const setup = (script: (KernelHealth | 'throw' | 'reset')[], options: { takeoverFails?: boolean; fallbackFails?: boolean; assembleFails?: boolean } = {}) => {
   let time = 0;
-  const seen = { assembled: 0, ticks: 0, disposed: 0, fallbacks: [] as number[], reports: [] as string[] };
+  const seen = { assembled: 0, ticks: 0, disposed: 0, fallbacks: [] as number[], reports: [] as string[], notices: [] as string[],
+    entry: undefined as (() => EntryStatus) | undefined };
   const loop = createEntry({
     takeover: () => { if (options.takeoverFails) throw new Error('late'); },
-    assemble: (): Kernel => {
+    assemble: (entryStatus): Kernel => {
+      seen.entry = entryStatus;
       if (options.assembleFails) throw new Error('装配失败');
       seen.assembled += 1;
       let reset = false;
@@ -35,9 +39,12 @@ const setup = (script: (KernelHealth | 'throw' | 'reset')[], options: { takeover
         },
         resetRequested: () => reset,
         dispose: () => { seen.disposed += 1; },
+        ops: undefined as never,
+        console: undefined as never,
       };
     },
     fallback: () => { seen.fallbacks.push(time); if (options.fallbackFails) throw new Error('保底失败'); },
+    notify: (message) => { seen.notices.push(message); },
     time: () => time,
     report: (message) => { seen.reports.push(message); },
   });
@@ -140,4 +147,49 @@ test('SB-01：超限后软重置与普通暂停交替，失败计数不清零，
   run(40);
   expect(seen.reports.some((r) => r.includes('停用'))).toBe(true);
   expect(seen.assembled).toBe(8);
+});
+
+test('LC-07：保底接管开始时通知一次并写明原因；持续接管不重复；间隔内的再次接管不通知，超过间隔后再通知', () => {
+  const { run, seen } = setup(['throw', 'throw', 'throw']);
+  run(1);
+  expect(seen.notices).toEqual(['tick 1：保底循环接管（正常循环抛错）']);
+  run(2 + KERNEL_COOLDOWN); // 继续抛错并进入冷却：保底一直在运行，不再通知
+  expect(seen.notices).toHaveLength(1);
+  run(1); // 冷却结束，重新装配后恢复 ok
+  expect(seen.fallbacks.at(-1)).toBeLessThan(KERNEL_COOLDOWN + 4);
+  const late = setup([...Array.from({ length: FALLBACK_NOTIFY_GAP }, () => 'ok' as const), 'degraded', 'degraded', 'degraded']);
+  late.run(FALLBACK_NOTIFY_GAP + SAFE_MODE_TICKS);
+  expect(late.seen.notices).toEqual([`tick ${FALLBACK_NOTIFY_GAP + SAFE_MODE_TICKS}：保底循环接管（连续 degraded）`]);
+});
+
+test('LC-07：两次接管间隔不足 FALLBACK_NOTIFY_GAP 时只通知一次；通知失败只报告', () => {
+  const { run, seen } = setup(['throw', 'ok', 'throw']);
+  run(3);
+  expect(seen.fallbacks).toEqual([1, 3]);
+  expect(seen.notices).toHaveLength(1);
+  let time = 0;
+  const reports: string[] = [];
+  const loop = createEntry({
+    takeover: () => undefined,
+    assemble: () => { throw new Error('装配失败'); },
+    fallback: () => undefined,
+    notify: () => { throw new Error('平台拒绝'); },
+    time: () => time,
+    report: (message) => { reports.push(message); },
+  });
+  time = 1;
+  loop();
+  expect(reports).toContain('保底接管通知发送失败');
+});
+
+test('LC-04：入口状态包含连续失败、冷却剩余与最近一次失败', () => {
+  const { run, seen } = setup(['ok', 'throw', 'throw', 'throw']);
+  run(1);
+  expect(seen.entry!()).toEqual({ time: 1, cooldown: 0, crashes: 0, degraded: 0, paused: 0, lastFailure: undefined });
+  run(2);
+  expect(seen.entry!()).toMatchObject({ time: 3, crashes: 2, lastFailure: { tick: 3, message: '正常循环抛错：kernel 崩溃' } });
+  run(1); // 第 3 次失败进入冷却
+  expect(seen.entry!()).toMatchObject({ time: 4, cooldown: KERNEL_COOLDOWN + 1, crashes: 0 });
+  run(10);
+  expect(seen.entry!().cooldown).toBe(KERNEL_COOLDOWN + 1 - 10);
 });

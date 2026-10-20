@@ -5,10 +5,13 @@
  * 以参数注入 kernel；RawMemory 经 kernel.memory 的 createGamePlatform 与 kernel.segments 的 createGameSegmentsPlatform 绑定，
  * InterShardMemory 由 kernel.intershard 在 globalThis 上检测，本模块不直接访问持久化存储。
  * 版本号来自构建时注入的虚拟模块 virtual:release（rollup 内联插件，docs/design/kernel/bootPort.md 第 6 节）。
+ * 控制台命名空间安装在 globalThis 上（kernel.console）；每次装配 kernel 后以 createOps 注册 ops 运维命令，
+ * 入口状态的读取函数由 main.ts 传入，供 kernel 不可用时的 ops.status（docs/design/app/ops.md 第 4 节）。
  * 第 2 步的临时内容：模块清单为空；临时 boot 只发布 AMBIGUOUS/medium，不执行任何不可逆操作，也不初始化 Memory，
  * 在 M1 第 6 步由 app.boot 替换。Memory 身份常量暂存于此，app.config 建立后迁入。
  * 状态：无模块级可变状态；createGameServices 每次调用创建新的服务对象，由入口在 heap 中缓存。
  */
+import { type EntryStatus, createOps } from '@/app/ops';
 import type { BootDefinition } from '@/contracts/boot';
 import type { ModuleDefinition } from '@/contracts/module';
 import { createErrorMapper } from '@/kernel/errorMapper';
@@ -154,13 +157,15 @@ export const createGameServices = (): GameServices => {
 };
 
 /**
- * @description 用游戏服务装配 kernel：模块清单、临时 boot、Memory 配置、计时器、版本号与持久化平台端口。
+ * @description 用游戏服务装配 kernel（模块清单、临时 boot、Memory 配置、计时器、版本号、持久化平台端口与控制台目标），
+ * 并为它创建 app.ops 的运维命令。
  * @param services 游戏服务。
+ * @param entryStatus 入口状态的读取函数（main.ts 提供），供 ops.status 在 kernel 不可用时使用。
  * @returns 新的 kernel 实例；首个 tick 才加载 Memory。
  */
-export const assemble = (services: GameServices): Kernel => {
+export const assemble = (services: GameServices, entryStatus: () => EntryStatus): Kernel => {
   const memoryLog = services.logRoot.scope('memory');
-  return createKernel({
+  const kernel = createKernel({
     modules: MODULES,
     boot: PROVISIONAL_BOOT,
     memory: { ...MEMORY_IDENTITY, platform: createGamePlatform((message) => memoryLog.warn(message)) },
@@ -170,5 +175,8 @@ export const assemble = (services: GameServices): Kernel => {
     release,
     segments: createGameSegmentsPlatform(),
     interShard: globalThis,
+    console: globalThis,
   });
+  createOps({ kernel, logRoot: services.logRoot, entryStatus });
+  return kernel;
 };

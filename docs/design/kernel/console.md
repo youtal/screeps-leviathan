@@ -45,11 +45,12 @@ interface ModuleContext {
 
 - **时机**：注册即安装。普通模块在 `setup` 中注册，boot 在其 `setup` 中注册，app.ops 在装配时注册。
 - **全局对象**：每个命名空间一个普通对象，安装在装配方注入的全局目标上（游戏中为 `globalThis`，测试中为隔离对象，与 [intershard](./intershard.md) 的注入方式相同）。命令是对象上的方法，设置是访问器属性；每个命名空间自动带一个 `help()`，列出命令、设置与说明。
+- **日志**：命令异常与注册错误记录在命名空间的日志中：模块与 boot 用其上下文日志，宿主命名空间按名称派生作用域。
 - **冲突**：
   - 全局目标上已有同名属性、且不是本模块此前安装的对象时，拒绝安装该命名空间并记录错误，不覆盖游戏或其他代码的全局（如 `Game`、`_`）；
-  - 同一命名空间内重名的命令或设置，后注册的被拒绝并记录错误；
+  - 命令与设置名须为小写字母开头的字母数字串（`^[a-z][A-Za-z0-9]*$`），`help` 由本模块提供；同一命名空间内重名或名称非法的命令与设置被拒绝并记录错误；
   - 模块 id `kernel` 与 `ops` 保留给宿主，清单校验拒绝这两个 id（[内核设计](./README.md#31-静态模块排序)的保留名在 `boot`、`core` 之外增加这两个）。
-- **销毁与重建**：kernel 实例销毁时，把它安装的每个命名空间替换为桩对象：调用任何命令都返回"kernel 未运行（重建或冷却中）"，`help()` 照常可用。下一个实例重新注册时覆盖桩对象。这样软重置、抛错重建与冷却期间，控制台调用不会落到旧实例上，也不会因全局缺失而报 `ReferenceError`。
+- **销毁与重建**：kernel 实例销毁时，把它安装的每个命名空间替换为桩对象：调用任何命令都返回"kernel 未运行（重建或冷却中）"，读取设置也返回这句话、赋值被忽略，`help()` 照常可用并注明 kernel 未运行。销毁后的注册一律忽略。下一个实例重新注册时覆盖桩对象。这样软重置、抛错重建与冷却期间，控制台调用不会落到旧实例上，也不会因全局缺失而报 `ReferenceError`。
 - **离线命令**：宿主侧的注册器（`Kernel.console(namespace)`，供 app 层使用）另有 `offline(name, fn)`，为已注册的命令登记一个离线处理函数。桩对象调用该命令时执行离线处理函数，而不是返回桩结果。离线处理函数不得引用 kernel 实例（实例已销毁），只能读取 kernel 之外、跨实例存在的状态，例如入口的状态（[ops](../app/ops.md#4-宿主接口)）。模块上下文中的 `console` 没有此方法：模块的状态都随实例销毁。
 
 ## 5. 调用
@@ -70,6 +71,34 @@ interface ModuleContext {
 | --- | --- | --- |
 | `CONSOLE_RESULT_LIMIT` | 4000 字符 | 单次命令结果的长度上限 |
 
-## 8. 验证
+## 8. 接口与用法
+
+```ts
+createConsole({ target, logger }): ConsoleHost   // target：全局目标；logger(namespace)：命名空间的日志
+
+interface ConsoleHost {
+  registry(namespace: string): HostConsoleRegistry;   // 同一命名空间共用命令表
+  dispose(): void;                                    // 换为桩对象，之后的注册一律忽略
+}
+
+interface HostConsoleRegistry extends ConsoleRegistry {
+  offline(name: string, fn: (...args) => unknown): void;  // 只在宿主侧提供
+}
+```
+
+- 模块经 `ctx.console` 注册（命名空间为模块 id），例如：
+
+  ```ts
+  setup(ctx) {
+    ctx.console.command('show', 'show(room)：显示该房间的采集站点', (room) => describe(String(room)));
+    return {};
+  }
+  ```
+
+  控制台中输入 `mining.show('W1N1')`。
+- app 层经 `Kernel.console(namespace)` 注册宿主命名空间（例如 `ops`），命名空间不得与模块 id 相同。
+- 处理函数自行校验参数，不合法时抛错；返回值按第 5 节转为文本。命令的耗用计入当 tick，应保持轻量。
+
+## 9. 验证
 
 单元测试以隔离的全局目标驱动：注册即安装；`help()` 的内容；命令与设置的调用；处理函数抛错时返回错误结果且记录日志；结果的文本转换与截断；与已有全局及命名空间内重名的冲突处理；保留 id 被清单校验拒绝；实例销毁后命令返回桩结果、登记了离线处理函数的命令调用离线处理函数，重建后恢复。

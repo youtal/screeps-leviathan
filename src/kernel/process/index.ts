@@ -14,8 +14,11 @@ import type { ModuleDefinition } from '@/contracts/module';
 /** { [层级]: 准入优先顺序 }，数值越小越先，生存层最先。 */
 export const TIER_RANK: Readonly<Record<Tier, number>> = { survival: 0, economy: 1, maintenance: 2, planning: 3 };
 
-/** 保留的模块 id：boot 是启动判定的上下文 owner，core 是实体空间的公共切片 owner。 */
-export const RESERVED_MODULE_IDS: readonly string[] = ['boot', 'core'];
+/**
+ * 保留的模块 id：boot 是启动判定的上下文 owner，core 是实体空间的公共切片 owner，kernel 是 kernel 自身分区
+ * （启停标志）的 owner，ops 是 app.ops 运维命令的控制台命名空间（模块 id 同时是控制台命名空间）。
+ */
+export const RESERVED_MODULE_IDS: readonly string[] = ['boot', 'core', 'kernel', 'ops'];
 
 /** 清单规划的结果。 */
 export interface ModulePlan {

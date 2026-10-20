@@ -43,6 +43,8 @@ test('依赖先于依赖者；optional 只影响顺序，指向的模块被拒�
 test.each([
   ['空 id', [mod('')], '（空 id）', 'id 为空'],
   ['保留 id', [mod('core')], 'core', '保留'],
+  ['保留 id kernel（kernel 自身分区的 owner）', [mod('kernel')], 'kernel', '保留'],
+  ['保留 id ops（运维命令的控制台命名空间）', [mod('ops')], 'ops', '保留'],
   ['重复 id', [mod('x'), mod('x')], 'x', '重复'],
   ['未知依赖', [mod('x', 'economy', 0, { requires: ['ghost'] })], 'x', '不存在'],
   ['requires 层级更低的模块', [mod('x', 'survival', 0, { requires: ['y'] }), mod('y', 'economy')], 'x', '层级更低'],

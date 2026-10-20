@@ -15,7 +15,7 @@ M1 的使用方都在 kernel 内部：
 | store | 页号 | 使用方 | 优先级 |
 | --- | --- | --- | --- |
 | `backup` | 80–89 | bootPort（Memory 备份，见 [bootPort](./bootPort.md)） | 高 |
-| `stats` | 50 | stats（M1 第 5 步） | 低 |
+| `stats` | 50 | kernel.stats（[stats](./stats.md)） | 低 |
 
 本文的接口是 kernel 内部接口，不进入 contracts。`ModuleContext.segments`（`SegmentStore`、`PENDING`，6.8）随第一个使用 segment 的业务模块加入（[contracts](../contracts/README.md#7-待加入的接口)），届时在 M5 的读调度上实现。
 
@@ -56,6 +56,7 @@ interface SegmentsHost {
   beginTick(): void;                                   // 读取上一 tick 激活的页，随后从 RawMemory.segments 删除这些键
   writer(store: 'backup' | 'stats', version: number): PageWriter; // 只能写本 store 的页；version 写入页头 v
   reader(store: 'backup'): PageReader;                 // M1 只有备份校验需要读
+  pending(): number;                                   // 全部 store 尚未写出的页数，供 stats 观测写回积压
   commit(): void;                                      // commit 阶段每 tick 一次：调度写回、提交激活请求
 }
 

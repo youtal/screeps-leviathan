@@ -13,11 +13,15 @@
  * 暂停 tick（paused）不改变 degraded 计数，使开局备份期间保底循环不会抢先孵化；连续暂停超过 PAUSE_LIMIT 后
  * 按 degraded 计数，保证 boot 卡在暂停时保底循环最终仍能接管（内核设计第 6 节）。超限后再登记的软重置按一次失败
  * 与抛错共用计数和冷却，避免 boot 陷入重置循环时每 tick 重新装配并解析 Memory；超限期间失败计数不清零。
- * 状态：kernel 实例、连续失败、degraded 与暂停计数、冷却截止 tick 保存在 createEntry 的闭包中（heap），
- * 跨软重置累计，global reset 后重新计数。
+ * 接管通知（13.4，审计 LC-07）：保底循环在本 tick 运行、而上一 tick 没有运行时视为接管开始，经 Game.notify 发出纯文本通知；
+ * 距上次通知不足 FALLBACK_NOTIFY_GAP 时不再通知。入口状态（审计 LC-04）：经 entryStatus() 交给装配方，
+ * kernel 不可用时 ops.status() 以它说明正常循环为什么没在运行。
+ * 状态：kernel 实例、连续失败、degraded 与暂停计数、冷却截止 tick、最近一次失败、上一 tick 是否运行保底与上次通知的 tick
+ * 保存在 createEntry 的闭包中（heap），跨软重置累计，global reset 后重新计数。
  * 切换逻辑写成 createEntry(deps)，测试以假依赖驱动；loop 由游戏依赖创建，模块加载时不读取 Game。
  */
 import { type GameServices, assemble, createGameServices } from '@/app/assembly';
+import type { EntryStatus } from '@/app/ops';
 import { runFallback } from '@/fallback';
 import type { Kernel } from '@/kernel/lifecycle';
 import { takeoverMemory } from '@/kernel/memory';
@@ -30,6 +34,10 @@ export const KERNEL_CRASH_LIMIT = 3;
 export const KERNEL_COOLDOWN = 100;
 /** 连续暂停 tick 的上限，跨软重置累计；备份一次重写加软重置最多约 7 tick。 */
 export const PAUSE_LIMIT = 10;
+/** 两次"保底循环接管"通知之间的最小间隔（tick）。 */
+export const FALLBACK_NOTIFY_GAP = 1000;
+/** 最近一次失败说明的长度上限（字符）。 */
+const FAILURE_TEXT_LIMIT = 200;
 
 /** 入口的外部依赖，游戏中由 gameEntryDeps 提供。 */
 export interface EntryDeps {
@@ -41,9 +49,10 @@ export interface EntryDeps {
   takeover(): void;
   /**
    * @description 装配一个新的 kernel。
+   * @param entryStatus 入口状态的读取函数，供 app.ops 在 kernel 不可用时使用。
    * @returns kernel 实例。
    */
-  assemble(): Kernel;
+  assemble(entryStatus: () => EntryStatus): Kernel;
   /**
    * @description 运行保底循环。
    * @returns 无返回值。
@@ -54,6 +63,13 @@ export interface EntryDeps {
    * @returns Game.time。
    */
   time(): number;
+  /**
+   * @description 发出游戏通知（Game.notify），用于保底循环接管的告警。
+   * @param message 纯文本正文。
+   * @returns 无返回值。
+   * @throws {*} 平台拒绝时可能抛错，由入口记录。
+   */
+  notify(message: string): void;
   /**
    * @description 报告入口层面的故障。
    * @param message 说明。
@@ -74,6 +90,43 @@ export const createEntry = (deps: EntryDeps): (() => void) => {
   let degraded = 0;
   let paused = 0;
   let cooldownUntil = Number.NEGATIVE_INFINITY;
+  // 最近一次失败：tick 与说明（错误消息的第一行，截短）；供 ops.status 在 kernel 不可用时显示。
+  let lastFailure: EntryStatus['lastFailure'];
+  // 上一 tick 是否运行了保底循环，用于识别接管开始；上次发出接管通知的 tick。
+  let fallbackBefore = false;
+  let notifiedAt = Number.NEGATIVE_INFINITY;
+
+  /**
+   * @description 读取入口状态，语义见 EntryStatus；跨 kernel 实例存在，不引用 kernel。
+   * @returns 入口状态。
+   */
+  const entryStatus = (): EntryStatus => {
+    const time = deps.time();
+    return { time, cooldown: Math.max(0, cooldownUntil - time), crashes, degraded, paused, lastFailure };
+  };
+
+  /**
+   * @description 记录最近一次失败。
+   * @param message 说明。
+   * @param error 可选的抛出值，取其消息的第一行。
+   * @returns 无返回值。
+   */
+  const recordFailure = (message: string, error?: unknown): void => {
+    const detail = error === undefined ? '' : `：${(error instanceof Error ? error.message : String(error)).split('\n')[0]}`;
+    lastFailure = { tick: deps.time(), message: `${message}${detail}`.slice(0, FAILURE_TEXT_LIMIT) };
+  };
+
+  /**
+   * @description 保底接管开始时发出通知；距上次通知不足 FALLBACK_NOTIFY_GAP 时不发。通知失败只报告。
+   * @param reason 接管原因。
+   * @returns 无返回值。
+   */
+  const notifyTakeover = (reason: string): void => {
+    const time = deps.time();
+    if (time - notifiedAt < FALLBACK_NOTIFY_GAP) return;
+    notifiedAt = time;
+    try { deps.notify(`tick ${time}：保底循环接管（${reason}）`); } catch (error) { deps.report('保底接管通知发送失败', error); }
+  };
 
   /**
    * @description 计入一次失败（kernel 抛错，或连续暂停超过上限后 boot 仍登记软重置）；连续达到 KERNEL_CRASH_LIMIT 次时
@@ -92,17 +145,19 @@ export const createEntry = (deps: EntryDeps): (() => void) => {
   return () => {
     try { deps.takeover(); } catch (error) { deps.report('Memory 接管失败，引擎内部写入可能落到真实 Memory', error); }
     let fallback = false;
+    let reason = '停用冷却';
     if (deps.time() < cooldownUntil) {
       fallback = true;
     } else {
       try {
-        kernel ??= deps.assemble();
+        kernel ??= deps.assemble(entryStatus);
         const health = kernel.tick();
         // 未超过上限的暂停 tick 既不计数也不运行保底：备份期间保底孵化会破坏开局证据（11.4）。
         const counted = health !== 'paused' || (paused += 1) > PAUSE_LIMIT;
         if (health !== 'paused') paused = 0;
         if (counted) degraded = health === 'ok' ? 0 : degraded + 1;
         fallback = counted && degraded >= SAFE_MODE_TICKS;
+        reason = health === 'paused' ? '连续暂停超限' : '连续 degraded';
         // 超限的暂停 tick 不是恢复的证据，不清零失败计数；否则软重置与普通暂停交替就能绕过冷却。
         const overLimit = health === 'paused' && paused > PAUSE_LIMIT;
         if (!overLimit) crashes = 0;
@@ -113,18 +168,23 @@ export const createEntry = (deps: EntryDeps): (() => void) => {
           // 正常开局流程最多约 7 个暂停 tick；超限后仍登记软重置说明 boot 陷入重置循环，按失败计数以进入冷却。
           if (overLimit) {
             deps.report(`连续暂停超过 ${PAUSE_LIMIT} tick 后 boot 仍登记软重置，按一次失败计数`);
+            recordFailure('暂停超限后仍登记软重置');
             countCrash();
           }
         }
       } catch (error) {
         deps.report('正常循环抛错，本 tick 改由保底循环运行；下一 tick 重新装配', error);
+        recordFailure('正常循环抛错', error);
         try { kernel?.dispose(); } catch { /* 实例可能已不一致，清理失败不再处理。 */ }
         kernel = undefined;
         degraded = 0;
         fallback = true;
+        reason = '正常循环抛错';
         countCrash();
       }
     }
+    if (fallback && !fallbackBefore) notifyTakeover(reason);
+    fallbackBefore = fallback;
     if (fallback) {
       try { deps.fallback(); } catch (error) { deps.report('保底循环抛错', error); }
     }
@@ -150,16 +210,23 @@ const gameEntryDeps = (): EntryDeps => {
      */
     takeover: () => takeoverMemory(globalThis),
     /**
-     * @description 用游戏服务装配新的 kernel。
+     * @description 用游戏服务装配新的 kernel，并创建其运维命令。
+     * @param entryStatus 入口状态的读取函数。
      * @returns kernel 实例。
      */
-    assemble: () => assemble(get()),
+    assemble: (entryStatus) => assemble(get(), entryStatus),
     fallback: runFallback,
     /**
      * @description 当前 tick。
      * @returns Game.time。
      */
     time: () => Game.time,
+    /**
+     * @description 发出游戏通知。
+     * @param message 纯文本正文。
+     * @returns 无返回值。
+     */
+    notify: (message) => Game.notify(message),
     /**
      * @description 经 main 作用域的日志报告故障；日志不可用时退回 console.log。
      * @param message 说明。

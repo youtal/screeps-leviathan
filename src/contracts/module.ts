@@ -17,6 +17,11 @@ export interface ModuleManifest {
   readonly tier: Tier;
   /** 同层内的顺序，越小越先。 */
   readonly priority: number;
+  /**
+   * 没有运维覆盖时是否暂停，默认 false（架构 5.5、13.3：新领域以暂停状态上线，经 `ops.resume(id)` 启用）。
+   * 暂停只跳过钩子，仍执行 setup；生存层模块不能暂停，此项对其无效（docs/design/app/ops.md 第 3 节）。
+   */
+  readonly startPaused?: boolean;
 }
 
 /** 模块定义。 */

@@ -17,7 +17,7 @@ M1 只采集 kernel 自身能观测到的指标。5.8 中按殖民地记录的�
 | 指标 | 来源 | 窗口内的聚合 |
 | --- | --- | --- |
 | 每 tick 总耗用 | `Game.cpu.getUsed()`，收尾前读取 | 平均、最大 |
-| 各层耗用 | [cpu](./cpu.md) 的本 tick 计量 | 平均 |
+| 各层耗用 | [cpu](./cpu.md) 的本 tick 计量（不含 boot，它不参与准入与计量） | 平均 |
 | 预算 B、收尾预留 | cpu | 最后一个 tick 的值 |
 | 被准入与落选的进程数 | cpu | 合计 |
 | 耗用最高的进程 | cpu 的平滑耗用 | 写出时取前 `STATS_TOP` 个 |
@@ -48,13 +48,13 @@ M1 只采集 kernel 自身能观测到的指标。5.8 中按殖民地记录的�
 ```
 
 - 数值保留两位小数，减小体积。`top` 为 `[进程键, 平滑耗用]` 数组，按耗用从高到低。
-- **体积**：M1 的正文在 2 KB 以内。提交返回 `too-large` 时，依次截短 `top`、`down`、`paused` 后重试一次，仍超限则放弃本窗口并告警（6.8 安全规则 4）。
+- **体积**：M1 的正文在 2 KB 以内。提交返回 `too-large` 时，清空 `top`、把 `down` 与 `paused` 各截为前 10 项后重试一次，仍超限则放弃本窗口并告警（6.8 安全规则 4）。
 
 ## 4. 时机与成本
 
 - 每 tick 在收尾阶段累计：Memory 提交之后、segment 提交之前，读取 cpu 的本 tick 计量与 bucket，更新窗口内的几个数值，不分配对象。
 - 写出的 tick 额外拼装一次正文：排序取前 `STATS_TOP` 个进程，O(进程数 × log)；`JSON.stringify` 一个小对象。
-- 暂停 tick 照常累计。Memory 为 empty 或加载失败时，Memory 体积与模式按缺失写出（字段为 `null`）。
+- 暂停 tick 照常累计。Memory 为 empty 或加载失败时，Memory 体积按缺失写出（字段为 `null`）；模式取 boot 发布的视图，总是存在。
 - heap 状态只有当前窗口，global reset 与软重置后从新窗口开始；未写出的窗口丢失。
 
 ## 5. 参数
@@ -64,6 +64,22 @@ M1 只采集 kernel 自身能观测到的指标。5.8 中按殖民地记录的�
 | `STATS_INTERVAL` | 20 tick | 窗口长度与提交间隔 |
 | `STATS_TOP` | 20 | 写出的高耗用进程数 |
 
-## 6. 验证
+## 6. 接口与用法
+
+kernel 内部接口，只由 kernel.lifecycle 在收尾阶段调用：
+
+```ts
+createStats({ writer, warn }): StatsHost   // writer：segments.writer('stats', STATS_VERSION)
+
+interface StatsHost {
+  record(tick: StatsTick, snapshot: () => StatsSnapshot): void; // 每 tick 一次；窗口满时调用 snapshot 并写出
+  breaker(): void;                                               // 熔断发生时计数
+}
+```
+
+- `StatsTick` 为本 tick 的耗用、预算、各层耗用、准入计数、bucket 与健康状态；`StatsSnapshot` 为写出时的版本号、模式、高耗用进程、熔断与暂停的模块、Memory 体积与待写页数，由 lifecycle 只在写出时生成。
+- 外部采集端读取第 50 页：页头 `o` 为 `stats`、`v` 为 1；正文是一行 JSON，字段见第 3 节。
+
+## 7. 验证
 
 单元测试以严格平台模拟驱动 kernel：窗口聚合（平均、最大、最小、计数）；按间隔提交到第 50 页且页头正确；bucket 低时推迟写回并只保留最新窗口；超限时截短重试与放弃；暂停 tick 与 Memory 不可用时的写出；正文字段与示例结构一致。

@@ -26,7 +26,7 @@ M1 没有业务模块，被准入的只有生存层的 boot；kernel 自身的�
 
 ## 2. 预算
 
-每 tick 在 boot 之后、业务阶段之前计算一次：
+每 tick 在 tick 起点计算一次（boot 之前，boot 的 `ctx.cpu` 也使用它）；准入在 boot 与普通模块 setup 之后、业务阶段之前执行（第 3 节）：
 
 ```text
 B        = Game.cpu.limit + clamp((bucket − BUCKET_TARGET) / BUCKET_DRAIN, −limit × 0.2, tickLimit − limit)
@@ -43,7 +43,7 @@ hardEnd  = tickLimit − R                           生存层的 CPU 读数上�
 
 ### 3.1 准入单位
 
-准入的单位是进程：静态模块与动态实例各自准入，实例只有在所属模块被准入时才可能被准入。
+准入的单位是进程：静态模块与动态实例各自准入。实例与所属模块的关系按依赖处理：所属模块落选时实例同样落选，所属模块空闲（例如维护层周期未到）时实例仍可准入（第 3.2 节）。boot 不参与准入：它在准入之前运行，生存层总是运行，它的耗用体现在准入时的当前读数中。
 
 ### 3.2 准入流程
 
@@ -112,15 +112,16 @@ Memory 维护不归入维护层：维护层的定义是"每 N tick 一次，按�
 
 ## 5. 计量
 
-- **样本**：进程在本 tick 所有阶段钩子耗用之和。阶段循环中，相邻两次钩子调用之间只读一次 `Game.cpu.getUsed()`：前一个钩子的结束读数就是后一个的开始读数。每次钩子调用因此只增加一次读数，与是否开启 profiler 无关。
+- **样本**：进程在本 tick 所有阶段钩子耗用之和。每个阶段开始时读一次 `Game.cpu.getUsed()`，之后相邻两次钩子调用之间只读一次：前一个钩子的结束读数就是后一个的开始读数，差值计入前一个进程的 `spent`。
+- **与 profiler 共用开始读数**：模块钩子仍按标签计时（[profiler](./profiler.md)），但只调用 `end(op, start)`，开始读数复用上一条的读数；profiler 的 `end` 自己再读一次。所以每次模块钩子调用共两次读数，实例钩子在不单独计时（`profileInstances` 为 false，默认）时一次。
 - **平滑**：`cost ← cost + CPU_EMA_ALPHA × (样本 − cost)`，首个样本直接作为初值。`cost` 就是准入时的预计耗用。本 tick 没有运行的进程没有样本；其中因预算落选的，按第 3.2 节衰减 `cost`。
 - **用途**：准入预检的预计值；stats 写出各层耗用与耗用最高的进程（[stats](./stats.md)）；`ops.status()` 显示。
 - profiler 仍按标签聚合计时，用于诊断；cpu 的计量独立于它，关闭 profiler 不影响准入。
 
 ## 6. 状态与成本
 
-- 每个进程的运行记录增加三个字段：平滑耗用、连续落选次数、本 tick 的判定结果（未判定、准入、空闲、落选）。只存于 heap，global reset 与软重置后从预热开始。
-- 每 tick 的固定成本：准入遍历一次可运行进程，为 O(进程数)；维护层每个候选多一次 `hashString`（对进程键长度线性）。阶段执行中每次钩子调用一次 `getUsed()`。
+- 每个进程的运行记录增加以下字段：可运行状态 `runnable`（准入前由 lifecycle 计算）、平滑耗用 `cost` 与是否已有样本 `sampled`、连续落选次数 `starve`、本 tick 的判定结果 `verdict`（未判定、准入、空闲、落选）、本 tick 已计量的耗用 `spent`。只存于 heap，global reset 与软重置后从预热开始。
+- 每 tick 的固定成本：准入遍历一次可运行进程，为 O(进程数)；维护层每个候选多一次 `hashString`（对进程键长度线性）。阶段执行中每个阶段一次、每次钩子调用一次 `getUsed()`（模块钩子另有 profiler 的一次，第 5 节）。准入每 tick 重建一次进程列表，数组跨 tick 复用。
 - 每 tick 一次的预算计算读取 `limit`、`tickLimit` 与 `bucket`。
 
 ## 7. 参数
@@ -140,11 +141,32 @@ Memory 维护不归入维护层：维护层的定义是"每 N tick 一次，按�
 
 | 模块 | 关系 |
 | --- | --- |
-| kernel.lifecycle | 在 boot 与 setup 之后调用准入；阶段循环只调用被准入的进程，并在钩子之间读数计量；读数到达 `hardEnd` 时停止非生存层；收尾后更新平滑耗用。替换[内核设计](./README.md#4-上下文)第 4 节的临时预算 |
+| kernel.lifecycle | 在 boot 与 setup 之后调用准入；阶段循环只调用被准入的进程，并在钩子之间读数计量；读数到达 `hardEnd` 时停止非生存层；收尾后更新平滑耗用；tick 起点调用 `beginTick`（[内核设计](./README.md#2-tick-流水线)第 2 节） |
 | kernel.context | 运行记录（`ModuleRuntime`、`InstanceRecord`）增加计量字段；上下文的 `cpu` 改为本模块提供的视图 |
 | kernel.stats | 读取各层耗用、准入与落选计数、平滑耗用最高的进程 |
 | app.ops | `ops.status()` 显示每个进程的平滑耗用与连续落选次数 |
 
-## 9. 验证
+## 9. 接口与用法
+
+kernel 内部接口，只由 kernel.lifecycle 与 kernel.context 使用，不进入 contracts：
+
+```ts
+createCpu(port: CpuPort): CpuHost          // CpuPort：time、cpuUsed、limit、tickLimit、bucket；GamePort 满足
+
+interface CpuHost {
+  readonly budgets: Record<Tier, CpuBudget>; // 按层级的预算视图，注入到进程上下文
+  beginTick(): void;                         // tick 起点：计算 B、R、poolEnd、hardEnd
+  admit(nodes: readonly CpuNode[]): void;    // 判定全部进程；nodes 为执行顺序，不可运行的进程判为空闲
+  settle(nodes: readonly CpuNode[]): void;   // 以 spent 更新平滑耗用，汇总各层耗用
+  hardEnd(): number;                         // 紧急刹车的读数上限
+  summary(): CpuTickSummary;                 // 预算、预留、各层耗用、准入与落选数
+}
+```
+
+- `CpuNode` 由 `ModuleRuntime` 与 `InstanceRecord` 实现：`key`、`tier`、`owner`、`deps`、`runnable`，以及计量字段 `cost`、`sampled`、`starve`、`verdict`、`spent`。lifecycle 在 admit 前计算 `runnable`，在阶段循环中累加 `spent`。
+- 判定结果为常量 `VERDICT_NONE`、`VERDICT_ADMIT`、`VERDICT_IDLE`、`VERDICT_REJECT`。本 tick 新增的实例为 `VERDICT_NONE`，lifecycle 按预热规则让它运行。
+- 业务模块只经 `ctx.cpu`（`CpuBudget`）使用本模块：长计算每处理一批调用一次 `shouldYield()`，为 true 时保存游标并返回。
+
+## 10. 验证
 
 单元测试以假 `GamePort` 驱动：B 与透支额的边界（bucket 高、低、等于目标）；收尾预留的下限；四层的层条件（维护层错峰、规划层 bucket 阈值）；预计耗用预检与"下一 tick 优先"；落选者排在所属模块或同层依赖之前时，依赖先被判定，依赖准入时落选者可以准入（防止永久落选）；依赖空闲不阻挡、落选则阻挡；每个进程每 tick 只判定一次；因预算落选时衰减预计值、因依赖落选时不衰减，预算收缩后自适应长计算能重新准入；预热；紧急刹车只跳过非生存层；计量在钩子之间只读一次 `getUsed()`（以调用次数确认）；`remaining()` 与 `shouldYield()` 按层计算。kernel 的集成测试确认 Memory 维护每 tick 作为收尾任务运行，不受准入影响。
