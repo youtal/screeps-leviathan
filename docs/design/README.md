@@ -20,10 +20,14 @@
 | — | [architecture.md](./architecture.md) | 总体架构 |
 | — | [fallback.md](./fallback.md) | 独立保底循环（`src/fallback.ts`） |
 | app | [app/config.md](./app/config.md) | 劳动力配置、身体模板、孵化优先级与运营参数 |
+| app | [app/ops.md](./app/ops.md) | 运维命令与模块启停标志 |
 | contracts | [contracts/README.md](./contracts/README.md) | 注入接口与跨模块协议 |
 | kernel | [kernel/README.md](./kernel/README.md) | 内核骨架：宿主接口、tick 流水线、进程表、上下文、日志、入口切换 |
 | kernel | [kernel/errorMapper.md](./kernel/errorMapper.md) | 错误规范化与源码映射 |
 | kernel | [kernel/profiler.md](./kernel/profiler.md) | 计时聚合（只放 heap） |
+| kernel | [kernel/cpu.md](./kernel/cpu.md) | CPU 分层准入、每 tick 预算与平滑计量 |
+| kernel | [kernel/stats.md](./kernel/stats.md) | kernel 运行指标与统计 segment（第 50 页） |
+| kernel | [kernel/console.md](./kernel/console.md) | 控制台命令注册、全局命名空间与调用隔离 |
 | kernel | [kernel/memory.md](./kernel/memory.md) | Memory v1 与候选块级优化 |
 | kernel | [kernel/segments.md](./kernel/segments.md) | Segment 整页覆盖写入（备份区与统计） |
 | kernel | [kernel/bootPort.md](./kernel/bootPort.md) | boot 特权端口：概要、备份、初始化、清空、软重置 |

@@ -78,7 +78,7 @@ tick()
 - **boot 失败**：boot 钩子抛错时记录错误，本 tick 跳过 setup 与全部业务钩子，ready 时仍执行 commit。boot 是启动判定的唯一来源，判定失败时不能让业务模块按过期模式运行。boot 失败的 tick 计为 degraded（第 6 节）；本 tick 登记的软重置作废，kernel 实例保留，下一 tick 重新判定（[bootPort](./bootPort.md#3-操作)）。
 - **setup 失败**：模块进入"初始化失败"状态，本 global 内不再重试。重新 setup 会再次创建分区与切片的 spec 对象，而 Memory 对同一身份只接受同一 spec（[memory](./memory.md)）。初始化失败的模块按熔断处理依赖暂停（3.3），只能经软重置或新的 global 恢复。
 - **commit 失败**：记录错误；Memory 自身保留脏状态，下一 tick 重试（[memory](./memory.md)）。
-- **维护准入**：cpu 模块交付前，每 tick 以默认上限调用一次 `maintain`；交付后改由维护层准入控制。
+- **Memory 维护**：每 tick 以默认记录上限调用一次 `maintain`，属于收尾工作，不参与分层准入（[cpu](./cpu.md#33-kernel-自身的任务)）。
 
 ## 3. 进程表
 
@@ -168,12 +168,18 @@ kernel.context 为每个模块派生一个 `ModuleContext`，在整个 global �
 | `PAUSE_LIMIT` | 连续暂停的 tick 数上限，跨软重置累计；超过后暂停 tick 计为 degraded，保底循环得以接管。备份一次重写加软重置最多约 7 tick | 10 |
 | `KERNEL_CRASH_LIMIT` | 连续失败的次数上限；失败指 kernel 抛出可捕获异常，或连续暂停超过 `PAUSE_LIMIT` 后 boot 仍登记软重置。达到后停用正常循环 | 3 |
 | `KERNEL_COOLDOWN` | 停用冷却期：触发停用的那个 tick 之后的这么多个 tick 只运行保底循环，之后重新装配 | 100 tick |
+| `FALLBACK_NOTIFY_GAP` | 两次"保底循环接管"通知之间的最小间隔（第 5 步交付） | 1000 tick |
 
 - **先接管 Memory**：引擎的 `spawnCreep` 即使不传 `memory` 选项也会访问 `Memory.creeps`，保底循环也会孵化。装配可能失败，冷却期也不装配 kernel，所以入口在任何其他工作之前先完成接管，使这类引擎内部写入只落在临时对象上，不触发真实 Memory 的解析与写回。takeover 由 kernel.memory 提供，入口不直接操作全局 Memory（架构 4.2 的持久化边界）；Memory 实例的 `beginTick` 识别同 tick 已完成的接管，不视为接管过晚。这需要对已合并的 Memory 模块做一处配套修改，随内核实现一并交付。
 - **抛错后重建**：异常可能使 kernel 内部状态不一致，所以抛错后丢弃实例，下一 tick 重新装配；Memory 从 RawMemory 重新加载，未提交的 heap 修改随之丢弃。
 - **软重置**：boot 经 `port.softReset()` 登记后，本 tick 为暂停 tick，跳过业务阶段但照常提交；入口销毁实例，下一 tick 重新装配。全部进程实例与模块级 heap 缓存随旧实例丢弃，Memory 从已提交的文本重新加载，效果等同于一次 global reset（5.5）。
 - **冷却期**：持续抛错时每 tick 重新装配会反复解析 Memory。冷却期把这项成本限制在每 100 tick 一次。
 - **重置循环**：boot 的缺陷可能使每个新实例都再次登记软重置，效果与持续抛错相同。正常开局流程的暂停不超过 `PAUSE_LIMIT`，所以超限后的软重置按失败计数，与抛错共用冷却。超限期间暂停 tick 不清零失败计数，软重置与普通暂停交替时同样受限。boot 抛错的 tick 计为 degraded 而不是 paused，不受上述计数约束，所以这样的 tick 登记的软重置由 kernel 作废（第 2 节"boot 失败"），不触发重建。
+- **接管通知**（13.4，第 5 步交付）：保底循环在本 tick 运行、而上一 tick 没有运行时，视为一次接管开始。入口经 `Game.notify` 发出一条纯文本通知，写明 tick 与原因：正常循环抛错、停用冷却、连续 degraded，或暂停超限。
+  - 距上一次通知不足 `FALLBACK_NOTIFY_GAP` 时不再通知，避免反复抛错或健康状态来回切换时连续发信。
+  - 间隔只记在入口的 heap 中，global reset 后可能提前再通知一次，这是可以接受的。
+  - 通知失败（例如平台拒绝）只记录日志，不影响保底循环。
+- **入口状态**（第 5 步交付，供 [app.ops](../app/ops.md#4-宿主接口)）：入口保存最近一次失败的 tick 与说明（错误消息的第一行，截短），并经只读函数 `entryStatus()` 交给装配方。返回冷却剩余 tick、连续失败次数、连续 degraded 与暂停计数，以及最近一次失败。kernel 不可用时，`ops.status()` 以它回答"正常循环为什么没在运行"。
 - **重复提交**：正常循环部分执行后才转入保底时，同一 tick 可能已经提交过 intent。保底按 5.7 的约束不重复提交同一动作，但不保证避免与正常循环的动作冲突。
 - **CPU 硬终止**无法被 catch 接管（5.7）。计数只统计可捕获的异常。
 

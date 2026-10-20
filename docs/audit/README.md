@@ -14,6 +14,7 @@
 
 | 日期 | 报告 | 类型 |
 | --- | --- | --- |
+| 2026-10-20 | [lib 核心与第 5 步设计的工作区交付审计](./2026-10-20-lib-core-delivery.md) | 审计 |
 | 2026-10-20 | [M1 第 4 步工作区第二轮审计（segments、bootPort、intershard）](./2026-10-20-segments-bootport-recheck.md) | 审计 |
 | 2026-10-20 | [M1 第 4 步工作区交付审计（segments、bootPort、intershard）](./2026-10-20-segments-bootport-delivery.md) | 审计 |
 | 2026-10-19 | [M1 第 2 步工作区交付审计（外部评审核实）](./2026-10-19-kernel-skeleton.md) | 审计 |
