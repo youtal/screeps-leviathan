@@ -15,6 +15,8 @@
  * - domain：领域之间不互相导入，领域以 domains/<分组>/<领域>/ 为单位；
  * - storage：全局 Memory、RawMemory、InterShardMemory，游戏对象的原生 memory 属性，以及
  *   spawnCreep 的 memory 选项，只能在 kernel 的 memory、segments、intershard 模块中使用；
+ *   唯一的例外是 `typeof InterShardMemory`：它只做特性检测，不读写内容，用于判定身份用的 shard 名（架构 11.3 的 here）。
+ *   `typeof Memory` 不在例外之列，因为读取全局 Memory 会触发引擎解析；
  * - libState：lib 中不得有模块级可变状态（顶层 let/var，或以 new 创建的顶层对象）。
  * 静态检查的局限：不区分 world 等层导出的是纯函数还是有状态能力；lib 中顶层的对象与数组字面量按常量表处理；
  * "测试不在生产代码中保留隐藏的缺省依赖"无法静态检查，由代码审查保证。
@@ -280,7 +282,8 @@ export const checkBoundaries = (options: CheckOptions): Violation[] => {
       }
 
       if (!storageOwner) {
-        if (ts.isIdentifier(node) && STORAGE_GLOBALS.has(node.text)) {
+        if (ts.isIdentifier(node) && STORAGE_GLOBALS.has(node.text)
+          && !(node.text === 'InterShardMemory' && ts.isTypeOfExpression(node.parent))) {
           const symbol = checker.getSymbolAtLocation(node);
           if (symbol && symbol.flags & ts.SymbolFlags.Variable && fromScreepsTypes(symbol)) {
             report(node, 'storage', `只有 kernel 的 memory、segments、intershard 模块可以访问 ${node.text}`);

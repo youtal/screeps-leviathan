@@ -289,6 +289,11 @@ export interface WorldSpec {
   rooms: RoomSpec[];
   time?: number;
   shard?: string;
+  /**
+   * 是否提供 InterShardMemory，默认 true（官服）。提供时它是守卫对象：读取任何属性都记录到 storageTouched，
+   * typeof 检测不触碰属性；为 false 时删除该全局，模拟私服。
+   */
+  interShard?: boolean;
   /** 每次读取 Game.cpu.getUsed() 返回的值序列；用尽后保持最后一个值。 */
   cpu?: number[];
   tickLimit?: number;
@@ -306,6 +311,7 @@ export interface WorldSpec {
  * @param spec.rooms 房间列表。
  * @param spec.time Game.time，默认 1000。
  * @param spec.shard shard 名，默认 shard0。
+ * @param spec.interShard 是否提供 InterShardMemory 守卫对象，默认 true。
  * @param spec.cpu Game.cpu.getUsed() 的读数序列，默认 [0]。
  * @param spec.tickLimit Game.cpu.tickLimit，默认 500。
  * @param spec.memory 入口已接管时的临时 Memory 对象；省略时 Memory 处于守卫状态。
@@ -396,6 +402,22 @@ export const installWorld = (spec: WorldSpec): World => {
       return { path: [goal.pos], incomplete: false };
     },
   };
+  if (spec.interShard ?? true) {
+    // 值而不是 getter：对全局做 typeof 会执行 getter，守卫只拦截对其属性的读取。只记录不抛错：
+    // Jest 清理环境时会读取全局对象的属性，抛错会使整个测试文件失败；用例以 storageTouched 断言。
+    const guard = new Proxy({}, {
+      /**
+       * @description 记录对 InterShardMemory 字符串属性的读取（如 getLocal、setLocal）；符号属性来自运行环境的内省，不计。
+       * @param _target 被代理的空对象。
+       * @param key 属性键。
+       * @returns undefined。
+       */
+      get: (_target, key) => { if (typeof key === 'string') current.storageTouched = true; return undefined; },
+    });
+    Object.defineProperty(g, 'InterShardMemory', { configurable: true, writable: true, value: guard });
+  } else {
+    delete g.InterShardMemory;
+  }
   if (spec.memory) {
     Object.defineProperty(g, 'Memory', { configurable: true, writable: true, value: spec.memory });
   }

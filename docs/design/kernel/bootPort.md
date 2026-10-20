@@ -58,7 +58,7 @@ initialize(): void;
 | 字段 | 初值 | 来源 |
 | --- | --- | --- |
 | `sig`、`schema` | 装配配置的身份 | kernel.memory 的选项 |
-| `shard` | `Game.shard.name`，私服为 `x` | `GamePort.shard()` |
+| `shard` | 身份用的 shard 名：有 InterShardMemory 时为 `Game.shard.name`，否则（私服）为 `x`（11.3 的 `here`） | `GamePort.shard()` |
 | `epoch` | 见第 3 节 | kernel |
 | `lastRun` | 当前 tick | GamePort |
 | `release` | 构建时注入的版本号 | 装配选项（第 6 节） |

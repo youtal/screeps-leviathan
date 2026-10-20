@@ -46,8 +46,9 @@ export interface GamePort {
    */
   bucket(): number;
   /**
-   * @description 当前 shard 名，用于新建的项目标记；私服没有 Game.shard（附录 A F7）。
-   * @returns Game.shard.name；私服为 'x'。
+   * @description 身份用的 shard 名（架构 11.3 的 here），用于新建的项目标记：运行环境提供 InterShardMemory 时为
+   * Game.shard.name，否则为 'x'。私服的 Game.shard 是服务器主机名（附录 A F7），不作为身份。
+   * @returns shard 名；私服为 'x'。
    */
   shard(): string;
   /**

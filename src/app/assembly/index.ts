@@ -12,6 +12,7 @@
 import type { BootDefinition } from '@/contracts/boot';
 import type { ModuleDefinition } from '@/contracts/module';
 import { createErrorMapper } from '@/kernel/errorMapper';
+import { createInterShard } from '@/kernel/intershard';
 import { type GamePort, type Kernel, createKernel } from '@/kernel/lifecycle';
 import { type LogRoot, type LogSink, createLogRoot } from '@/kernel/logger';
 import { createGamePlatform } from '@/kernel/memory';
@@ -90,6 +91,8 @@ export const consoleSink = (): { readonly sink: LogSink; readonly html: boolean 
  * @returns 游戏服务。
  */
 export const createGameServices = (): GameServices => {
+  // 只用于特性检测（available），不读写 InterShardMemory 的内容；无状态，每次调用读取全局。
+  const interShard = createInterShard(globalThis);
   const game: GamePort = {
     /**
      * @description 当前 tick。
@@ -117,10 +120,12 @@ export const createGameServices = (): GameServices => {
      */
     bucket: () => Game.cpu.bucket,
     /**
-     * @description 当前 shard 名；私服没有 Game.shard（附录 A F7）。
-     * @returns Game.shard.name；私服为 'x'。
+     * @description 身份用的 shard 名（架构 11.3 的 here）：运行环境提供 InterShardMemory 时取 Game.shard.name，否则为 'x'。
+     * 私服的 driver 会注入 Game.shard，名称是服务器主机名（附录 A F7），可能含 "-" 且随容器重建变化，不能作为身份。
+     * 特性检测复用 kernel.intershard，每次调用时读取，不缓存。
+     * @returns shard 名；私服为 'x'。
      */
-    shard: () => (Game as { shard?: { name?: string } }).shard?.name ?? 'x',
+    shard: () => (interShard.available() ? (Game as { shard?: { name?: string } }).shard?.name ?? 'x' : 'x'),
     /**
      * @description 本 tick 存在的 creep 名称，含孵化中的 creep。
      * @returns 新建的名称集合。

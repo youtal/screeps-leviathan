@@ -62,6 +62,22 @@ describe('应急孵化', () => {
     expect(calls).toEqual([[['work', 'carry', 'move'], `fb-shard0-${(1000).toString(36)}-0`]]);
   });
 
+  test('LC-01：私服没有 InterShardMemory 时来源 shard 为 x，不使用 driver 注入的主机名', () => {
+    const { spawn, calls } = recordingSpawn();
+    const w = installWorld({ rooms: [{ structures: [spawn] }], time: 1000, memory: {}, shard: 'screeps-server-1', interShard: false });
+    runFallback();
+    expect(calls).toEqual([[['work', 'carry', 'move'], `fb-x-${(1000).toString(36)}-0`]]);
+    expect(w.storageTouched).toBe(false);
+  });
+
+  test('LC-01：官服的特性检测不读取 InterShardMemory 的内容', () => {
+    const { spawn, calls } = recordingSpawn();
+    const w = installWorld({ rooms: [{ structures: [spawn] }], time: 1000, memory: {}, shard: 'shard2' });
+    runFallback();
+    expect(calls[0][1]).toBe(`fb-shard2-${(1000).toString(36)}-0`);
+    expect(w.storageTouched).toBe(false);
+  });
+
   test('名称已被占用时序号递增', () => {
     const { spawn, calls } = recordingSpawn();
     const taken = creep({ name: `fb-shard0-${(1000).toString(36)}-0`, at: pos(1, 1, 'W9N9'), body: C });

@@ -188,6 +188,22 @@ describe('边界检查规则', () => {
     ]);
   });
 
+  test('storage：typeof InterShardMemory 只做特性检测，允许；读写与 typeof Memory 仍报违规', () => {
+    const fallback = [
+      'export const run = (): string => {',
+      "  const here = typeof InterShardMemory !== 'undefined' ? 'shard' : 'x';",
+      '  void typeof Memory;',
+      "  InterShardMemory.getLocal();",
+      '  return here;',
+      '};',
+    ].join('\n');
+    const result = checkBoundaries({
+      root, srcRoot,
+      files: Object.fromEntries(Object.entries({ ...files, 'fallback.ts': fallback }).map(([path, text]) => [join(srcRoot, path), text])),
+    });
+    expect(result.filter((v) => v.file === 'fallback.ts').map((v) => `${v.rule}:${v.line}`)).toEqual(['storage:3', 'storage:4']);
+  });
+
   test('domain：领域之间不得互相导入，同一领域内部可以', () => {
     expect(of('domains/economy/upgrade/index.ts')).toEqual(['domain:1']);
   });

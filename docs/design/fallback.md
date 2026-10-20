@@ -56,7 +56,7 @@
 
 ## 命名
 
-应急 creep 名为 `fb-<来源 shard>-<完整 tick 的 base36>-<同 tick 序号>`，shard 未知时写 `x`。生成前检查 `Game.creeps`（含孵化中的 creep）和本 tick 已分配的名称。正常循环恢复后，这些 creep 按事实进入遗留池再被认领；应急前缀不作为清空 Memory 的签名证据。
+应急 creep 名为 `fb-<来源 shard>-<完整 tick 的 base36>-<同 tick 序号>`。来源 shard 取身份用的 shard 名（11.3 的 `here`）：有 `InterShardMemory` 时为 `Game.shard.name`，否则为 `x`。私服的 `Game.shard` 是 driver 注入的主机名（F7），不使用；`typeof InterShardMemory` 只做特性检测，不读写其内容。生成前检查 `Game.creeps`（含孵化中的 creep）和本 tick 已分配的名称。正常循环恢复后，这些 creep 按事实进入遗留池再被认领；应急前缀不作为清空 Memory 的签名证据。
 
 ## 参数
 
