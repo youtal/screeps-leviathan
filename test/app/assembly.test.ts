@@ -2,10 +2,13 @@
  * 文件摘要：真实入口与装配的冒烟测试：以最小全局 Game 与 Memory 平台替身运行 src/main.ts 的 loop。
  * 验证 Memory 接管、createGamePlatform、kernel 与临时 boot 的整条链路连续多个 tick 不报错：
  * 空存储保持不变（临时 boot 不初始化），已初始化的存储内容不变，控制台没有错误输出。
- * 另测日志输出端的选择：存在 console.logUnsafe 时经它输出彩色前缀，否则经 console.log 输出纯文本。
+ * 另测日志输出端的选择：存在 console.logUnsafe 时经它输出彩色前缀，否则经 console.log 输出纯文本；
+ * 以及 Memory 抽查数与实例计时取自使用者设置（审计 PA-04）。
  */
-import { createGameServices } from '@/app/assembly';
+import { assemble, createGameServices } from '@/app/assembly';
+import * as lifecycle from '@/kernel/lifecycle';
 import { loop } from '@/main';
+import { memorySettings, profilerSettings } from '@/settings';
 import { createMemoryPlatform } from '../platform/memory';
 
 const marker = {
@@ -72,4 +75,27 @@ test('日志输出端：存在 console.logUnsafe 时经它输出并上色，否�
   expect(unsafe).toEqual(['<span style="color:#95a5a6">[7] INFO</span> m: a&lt;b']);
   expect(plain).toEqual(['[7] INFO m: a<b']);
   jest.restoreAllMocks();
+});
+
+test('PA-04：装配把使用者设置中的 Memory 抽查数与实例计时注入 kernel', () => {
+  installGame(9);
+  const create = jest.spyOn(lifecycle, 'createKernel');
+  const memory = memorySettings as { auditUnits: number };
+  const profiler = profilerSettings as { instances: boolean };
+  const saved = { auditUnits: memory.auditUnits, instances: profiler.instances };
+  try {
+    memory.auditUnits = 4;
+    profiler.instances = true;
+    const entry = { time: 9, cooldown: 0, crashes: 0, degraded: 0, paused: 0, lastFailure: undefined };
+    assemble(createGameServices(), () => entry).dispose();
+    const options = create.mock.calls[0][0];
+    expect(options.memory.auditUnits).toBe(4);
+    expect(options.profileInstances).toBe(true);
+  } finally {
+    memory.auditUnits = saved.auditUnits;
+    profiler.instances = saved.instances;
+    jest.restoreAllMocks();
+  }
+  // 默认关闭：发布构建不承担抽查与实例计时的成本。
+  expect(saved).toEqual({ auditUnits: 0, instances: false });
 });

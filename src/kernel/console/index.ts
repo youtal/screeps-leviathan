@@ -60,12 +60,12 @@ export interface ConsoleOptions {
   logger(namespace: string): Logger;
 }
 
-/** 命令表中的一项。 */
+/**
+ * 命令表中的一项：有 fn 的是命令，没有的是设置。设置的读写函数只在安装访问器时使用（闭包捕获），不存入表项。
+ */
 interface Entry {
   readonly help: string;
   readonly fn?: (...args: readonly unknown[]) => unknown;
-  readonly get?: () => unknown;
-  readonly set?: (value: unknown) => void;
   offline?: (...args: readonly unknown[]) => unknown;
 }
 
@@ -229,7 +229,7 @@ export const createConsole = (options: ConsoleOptions): ConsoleHost => {
          * @returns 无返回值。
          */
         setting(name, help, get, set) {
-          const space = add(namespace, name, { help, get, set });
+          const space = add(namespace, name, { help });
           if (space?.object) {
             Object.defineProperty(space.object, name, {
               enumerable: true,

@@ -1,7 +1,8 @@
 /**
  * 文件摘要：kernel.process 清单规划（src/kernel/process/index.ts）的单元测试。
  * 覆盖稳定拓扑排序（依赖、层级、priority、id）、optional 只影响顺序，以及各类拒绝条件与依赖传播：
- * 空 id、保留 id、重复 id、未知依赖、requires 层级更低的模块、依赖环，且其余模块照常启动。
+ * 空 id、保留 id、重复 id、未知依赖、requires 层级更低的模块、requires 依赖环，且其余模块照常启动；
+ * optional 不参与环检测，只由 optional 构成的环按顺序打破（审计 PA-06）。
  */
 import type { Tier } from '@/contracts/cpu';
 import type { ModuleDefinition } from '@/contracts/module';
@@ -67,4 +68,28 @@ test('只隔离问题模块及其依赖者，其余照常启动；依赖环上�
   expect([...plan.rejected.keys()].sort()).toEqual(['a', 'b', 'bad', 'child', 'grandchild', 'onCycle']);
   expect(plan.rejected.get('child')).toContain('bad');
   expect(plan.rejected.get('a')).toContain('依赖环');
+});
+
+test('PA-06：依赖环只按 requires 检测，只经 optional 指向环成员的模块照常启动', () => {
+  const plan = planModules([
+    mod('a', 'economy', 0, { requires: ['b'] }),
+    mod('b', 'economy', 0, { requires: ['a'] }),
+    mod('c', 'economy', 0, { optional: ['a'] }),
+  ]);
+  expect(ids(plan)).toEqual(['c']);
+  expect([...plan.rejected.keys()].sort()).toEqual(['a', 'b']);
+});
+
+test('PA-06：只由 optional 构成的环不拒绝，按层级、priority、id 打破，其余 optional 照常约束顺序', () => {
+  const pair = planModules([mod('e', 'economy', 0, { optional: ['d'] }), mod('d', 'economy', 0, { optional: ['e'] })]);
+  expect(ids(pair)).toEqual(['d', 'e']);
+  expect(pair.rejected.size).toBe(0);
+  // x 与 y 互为 optional，z optional 指向 y：环按 priority 由 y 先打破，z 仍排在 y 之后。
+  const mixed = planModules([
+    mod('z', 'economy', 0, { optional: ['y'] }),
+    mod('x', 'economy', 2, { optional: ['y'] }),
+    mod('y', 'economy', 1, { optional: ['x'] }),
+  ]);
+  expect(ids(mixed)).toEqual(['y', 'z', 'x']);
+  expect(mixed.rejected.size).toBe(0);
 });

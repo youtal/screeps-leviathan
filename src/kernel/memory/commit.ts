@@ -10,11 +10,21 @@
 import type { ProjectMarker } from '@/contracts/boot';
 import { validateJson } from './json';
 import { checkMarker } from './marker';
-import { type Runtime, type SizeSnapshot, unitId, warn } from './runtime';
+import { type Runtime, type SizeSnapshot, warn } from './runtime';
 import type { Space, Unit } from './unit';
 
+/** 主 Memory 的平台上限（字符数，按 JS 字符串 length 计）。 */
+export const MEMORY_LIMIT = 2 * 1024 * 1024;
+/** 体积告警线（架构附录 B 的 1.8 MB）。 */
+export const MEMORY_WARN = 1.8 * 1024 * 1024;
 /**
- * @description 拼装对象文本，仅对键做 JSON 转义；值必须已经编码。
+ * 告警的滞回线：越过告警线告警一次后，体积回落到此线以下才允许再次告警（审计 PA-17）。
+ * 留出 0.1 Mi 字符的间隔，避免体积在告警线附近波动时反复告警。
+ */
+export const MEMORY_WARN_REARM = 1.7 * 1024 * 1024;
+
+/**
+ * @description 拼装对象文本，仅对键做 JSON 转义；值必须已经编码。只用于根与命名空间这类键数固定的少数对象。
  * @param pairs 按 Object.keys 顺序排列的键与已编码值的二元组。
  * @returns 与对应对象全量编码顺序一致的 JSON 文本。
  */
@@ -22,15 +32,18 @@ const objectText = (pairs: readonly (readonly [string, string])[]): string =>
   `{${pairs.map(([key, text]) => `${JSON.stringify(key)}:${text}`).join(',')}}`;
 
 /**
- * @description 创建实例专属提交器，复用单元编码及其他根字段的缓存。
- * 缓存节省的是干净单元的数据遍历与编码；脏提交仍扫描单元索引并拼接整个根文本。
- * 所以脏提交并非 O(脏单元数)，也不意味着 RawMemory.set 的整串成本被消除。
+ * @description 创建实例专属提交器，复用单元编码、单元键片段及其他根字段的缓存。
+ * 缓存节省的是干净单元的数据遍历与编码，以及每个单元的键转义（键片段在单元登记时转义一次，审计 PA-02）；
+ * 脏提交仍按根表结构遍历全部单元并拼接整个根文本，这是 RawMemory.set 只接受整串所决定的，
+ * 所以脏提交并非 O(脏单元数)，但 JSON.stringify 的调用次数为"本次编码的单元数 + 常数"。
  * @param state 当前 Memory 实例的运行状态。
  * @returns 无参数提交函数；写入口成功时返回 true，无变化时返回 false，失败时抛错。
  */
 export const createCommitter = (state: Runtime): (() => boolean) => {
   // { [根字段名]: 非本命名空间字段的编码 }；这些数据没有可变能力，实例内只编码一次。
   const peers = new Map<string, string>();
+  // 本实例是否已就"接近上限"告警且尚未回落到滞回线以下；只存于 heap，global reset 后重新告警一次。
+  let nearLimit = false;
   // 抽查游标跨 commit 轮转，避免总是检查前几个单元；未启用抽查时不额外编码。
   let audit = state.units.values();
   /**
@@ -102,15 +115,26 @@ export const createCommitter = (state: Runtime): (() => boolean) => {
     const texts = new Map<string, string>([['sys', sys]]);
     for (const space of ['part', 'rooms', 'creeps', 'flags'] as const satisfies readonly Space[]) {
       const groups = state.data![space];
-      const text = objectText(Object.keys(groups).map((parent) => [parent,
-        objectText(Object.keys(groups[parent]).map((key) => {
-          const unit = state.units.get(unitId(space, parent, key))!;
-          // 优先本次编码，其余（含被隔离单元）沿用已有编码；加载/注册确保每个根记录在 units 中存在。
+      // 按根表的键顺序直接累加字符串，与全量 JSON.stringify 的结果一致；不为每个单元分配元组或中间数组。
+      let text = '{';
+      for (const parent of Object.keys(groups)) {
+        const table = groups[parent];
+        let body = '';
+        // 表的键片段取自其中任一单元；空表没有单元，才现场转义。
+        let parentHead: string | undefined;
+        for (const key of Object.keys(table)) {
+          // 加载与注册确保每个根记录都有单元，且 byRecord 与 units 同步增删。
+          const unit = state.byRecord.get(table[key])!;
+          // 优先本次编码，其余（含被隔离单元）沿用已有编码。
           const encoded = staged.get(unit) ?? unit.encoded!;
           owners[unit.owner] = (owners[unit.owner] ?? 0) + encoded.length;
-          return [key, encoded];
-        })),
-      ]));
+          body += body === '' ? unit.head + encoded : `,${unit.head}${encoded}`;
+          parentHead ??= unit.parentHead;
+        }
+        if (text.length > 1) text += ',';
+        text += `${parentHead ?? `${JSON.stringify(parent)}:`}{${body}}`;
+      }
+      text += '}';
       texts.set(space, text); spaces[space] = text.length;
     }
     // 按原根字段顺序保留其他命名空间；单元删除通过根表遍历自然排除，不复用旧结构串。
@@ -125,8 +149,15 @@ export const createCommitter = (state: Runtime): (() => boolean) => {
     try {
       for (const unit of isolatedNow) warn(state, `Memory 单元校验失败，沿用上一版编码：${unit.id}`);
       // 与平台一致按 JS 字符串 length 计量，不是 UTF-8 字节数；超限时不调用 write。
-      if (candidate.length >= 1.8 * 1024 * 1024) warn(state, 'Memory 接近 2 Mi 字符上限');
-      if (candidate.length > 2 * 1024 * 1024) throw new Error('Memory 超过 2 Mi 字符上限');
+      // 告警只在越过告警线时发一次，回落到滞回线以下才重新允许（审计 PA-17）；持续超限的提交失败
+      // 由 kernel.lifecycle 按连续失败只记录一次。
+      if (candidate.length >= MEMORY_WARN) {
+        if (!nearLimit) warn(state, 'Memory 接近 2 Mi 字符上限');
+        nearLimit = true;
+      } else if (candidate.length < MEMORY_WARN_REARM) {
+        nearLimit = false;
+      }
+      if (candidate.length > MEMORY_LIMIT) throw new Error('Memory 超过 2 Mi 字符上限');
       const sizes: SizeSnapshot = Object.freeze({ total: candidate.length,
         spaces: Object.freeze(spaces), owners: Object.freeze(owners) });
       // 必须早于 write 保存确认依据：write 返回后驱动仍可能在 tick 收尾拒绝保存。

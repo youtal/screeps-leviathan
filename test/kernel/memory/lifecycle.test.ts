@@ -1,4 +1,4 @@
-/** 跨 tick、平台拒绝、reset、序列化计数与实体维护集成验证；不替代真实私服。 */
+/** 跨 tick、平台拒绝、reset、序列化计数、体积告警（审计 PA-17）与实体维护集成验证；不替代真实私服。 */
 import type { Accessor } from '@/contracts/memory';
 import { MEMORY_LIMIT, PlatformError } from '../../platform/memory';
 import { harness, marker, spec, type Data } from './harness';
@@ -110,8 +110,27 @@ test('尺寸硬限制与告警异常不丢失脏数据', () => {
   })).toThrow('超过');
   expect(h.write).not.toHaveBeenCalled();
   h.tick(2, () => { a.set(['nested', 'value'], 'x'.repeat(Math.ceil(1.8 * 1024 * 1024))); h.memory.commit(); });
-  expect(h.warn).toHaveBeenCalledTimes(2);
+  // 第 1 tick 越过告警线时已告警；第 2 tick 仍在告警线以上，不重复告警（审计 PA-17）。
+  expect(h.warn).toHaveBeenCalledTimes(1);
   expect(h.platform.memory.length).toBe(h.memory.sizes().total);
+});
+
+test('PA-17：越过告警线只告警一次，回落到滞回线以下后再次越线才重新告警', () => {
+  const h = harness();
+  let a: Accessor<Data>;
+  const near = 'x'.repeat(Math.ceil(1.85 * 1024 * 1024));
+  h.tick(1, () => { h.memory.initialize(marker); a = h.memory.partitions('o').partition('a', spec); a.set(['nested', 'value'], near); h.memory.commit(); });
+  for (let t = 2; t <= 20; t += 1) h.tick(t, () => { a.set(['n'], t); h.memory.commit(); });
+  const nearWarnings = () => h.warn.mock.calls.filter(([m]) => String(m).includes('接近')).length;
+  expect(nearWarnings()).toBe(1);
+  // 回落到告警线与滞回线之间：不重新武装。
+  h.tick(21, () => { a.set(['nested', 'value'], 'x'.repeat(Math.ceil(1.75 * 1024 * 1024))); h.memory.commit(); });
+  h.tick(22, () => { a.set(['nested', 'value'], near); h.memory.commit(); });
+  expect(nearWarnings()).toBe(1);
+  // 回落到滞回线以下后再次越线：重新告警一次。
+  h.tick(23, () => { a.set(['nested', 'value'], 'x'); h.memory.commit(); });
+  h.tick(24, () => { a.set(['nested', 'value'], near); h.memory.commit(); });
+  expect(nearWarnings()).toBe(2);
 });
 
 test('creep 连续缺席回收及旧访问器失效；跳 tick 重新积累证据', () => {

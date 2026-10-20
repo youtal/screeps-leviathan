@@ -1,8 +1,9 @@
-/** MS-01～04：用行为与操作计数验证简化，不以 Node 耗时推断 Screeps CPU 收益。 */
+/** MS-01～04 与审计 PA-02：用行为与操作计数验证简化，不以 Node 耗时推断 Screeps CPU 收益。 */
+import type { Accessor } from '@/contracts/memory';
 import { copyJson, isObject, validateJson } from '@/kernel/memory/json';
 import { deleteAt, getAt, hasAt, setAt } from '@/kernel/memory/path';
 import { touch, type Unit } from '@/kernel/memory/unit';
-import { harness, marker, spec } from './harness';
+import { harness, marker, spec, type Data } from './harness';
 
 test('MS-01：has 区分缺失字段和 update 暂存非法值，删除非法字段后可提交', () => {
   const h = harness();
@@ -27,7 +28,7 @@ test('MS-01：has 区分缺失字段和 update 暂存非法值，删除非法字
 });
 
 test('MS-02：重复标脏无需修改单元字段，脏队列仍去重', () => {
-  const unit: Unit = { id: 'test', space: 'part', owner: 'o', record: { version: 1, data: {} },
+  const unit: Unit = { id: 'test', owner: 'o', record: { version: 1, data: {} }, head: '"test":', parentHead: '"o":',
     dirty: new Set(), check() {}, active: true, needsValidation: false, isolated: false };
   let writes = 0;
   const observed = new Proxy(unit, { set(target, key, value) { writes += 1; return Reflect.set(target, key, value); } });
@@ -94,4 +95,39 @@ test('MS-04：isObject 对无原型字典只读取一次原型', () => {
   expect(isObject([])).toBe(false);
   expect(isObject(null)).toBe(false);
   expect(isObject(new Date())).toBe(false);
+});
+
+test('PA-02：有写入的提交只编码脏单元，键片段复用登记时的转义，JSON.stringify 次数与单元总数无关', () => {
+  /**
+   * @description 建立 n 个 creep 切片与一个分区并提交，然后只修改一个切片，统计这次提交调用 JSON.stringify 的次数。
+   * @param n creep 切片数。
+   * @returns 第二次提交的调用次数与提交后的持久文本。
+   */
+  const count = (n: number): { calls: number; text: string } => {
+    const h = harness();
+    const names = Array.from({ length: n }, (_, i) => `c${i}`);
+    let first: Accessor<Data>;
+    h.tick(1, () => {
+      h.memory.initialize(marker);
+      h.memory.partitions('o').partition('p', spec);
+      const slices = h.memory.entities('o').creeps.slice(spec);
+      for (const name of names) slices.of(name);
+      first = slices.of('c0');
+      h.memory.commit();
+    }, { creeps: new Set(names) });
+    const stringify = jest.spyOn(JSON, 'stringify');
+    let calls = 0;
+    try {
+      h.tick(2, () => { first.set(['n'], 1); h.memory.commit(); calls = stringify.mock.calls.length; }, { creeps: new Set(names) });
+    } finally { stringify.mockRestore(); }
+    return { calls, text: h.platform.memory };
+  };
+  const small = count(100);
+  const large = count(1000);
+  // 1 次编码脏单元，其余为命名空间与根的少数键；修复前为 3n + 7 次。
+  expect(small.calls).toBe(large.calls);
+  expect(small.calls).toBeLessThanOrEqual(8);
+  // 拼接结果与全量编码一致。
+  expect(large.text).toBe(JSON.stringify(JSON.parse(large.text)));
+  expect(JSON.parse(large.text).leviathan.creeps.c0.o.data.n).toBe(1);
 });

@@ -158,7 +158,14 @@ const collect = (room: Room): RoomInfo => {
     obstacles: [...room.find(FIND_SOURCES), ...room.find(FIND_MINERALS), controller, ...blocking].map((o) => o.pos),
     fill: hostiles.length > 0 ? [needy, spawns, extensions] : [spawns, extensions, needy],
     supply: [
-      ...room.find(FIND_DROPPED_RESOURCES, { filter: (r) => r.resourceType === RESOURCE_ENERGY }),
+      ...room.find(FIND_DROPPED_RESOURCES, {
+        /**
+         * @description 只取掉落的能量。
+         * @param r 掉落的资源。
+         * @returns 是能量时为 true。
+         */
+        filter: (r) => r.resourceType === RESOURCE_ENERGY,
+      }),
       ...room.find(FIND_TOMBSTONES), ...room.find(FIND_RUINS), ...stores,
     ],
     sources: room.find(FIND_SOURCES_ACTIVE),
@@ -454,6 +461,11 @@ const step = (creep: Creep, target: RoomPosition, range: number, info: RoomInfo,
   state.paths += 1;
   const result = PathFinder.search(creep.pos, { pos: target, range }, {
     maxRooms: 1, maxOps: FB_PATH_OPS, plainCost: 2, swampCost: 10,
+    /**
+     * @description 寻路只在本房进行：本房返回本 tick 缓存的成本矩阵，其他房间返回 false 表示不可通行。
+     * @param name 房间名。
+     * @returns 成本矩阵，或 false。
+     */
     roomCallback: (name) => (name === info.room.name ? matrixFor(info, state) : false),
   });
   const next = result.path[0];

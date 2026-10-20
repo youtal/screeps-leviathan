@@ -2,11 +2,16 @@
  * 文件摘要：kernel.lifecycle（src/kernel/lifecycle/index.ts）的单元测试，以 Memory 平台替身与假 GamePort 驱动。
  * 覆盖：空存储只运行 boot、就绪后 setup 一次、阶段顺序与模块顺序、熔断与依赖暂停、setup 失败不重试、
  * 新增实例从下一阶段参与调度、boot 失败跳过业务钩子并计为 degraded、清单拒绝的隔离、Memory 加载失败、
- * 生存层模块不可用时 degraded、dispose 的清理与错误隔离、上下文的日志与 Memory 能力。
+ * 生存层模块不可用时 degraded、dispose 的清理与错误隔离、上下文的日志与 Memory 能力；
+ * 维护层实例按自身相位运行（审计 PA-01）、进程表的 remove/has 与 instance（PA-09）、tick 倒退时跳过并计为 degraded（PA-16）、
+ * 提交持续失败只记录一次（PA-17）、实例计时开关（PA-04）、boot 上下文的收窄与清理（PA-05）。
  */
 import type { PhaseHooks } from '@/contracts/context';
 import type { Tier } from '@/contracts/cpu';
 import type { ModuleDefinition } from '@/contracts/module';
+import { ModuleRuntime } from '@/kernel/context';
+import { MAINTENANCE_PERIOD } from '@/kernel/cpu';
+import { hashString } from '@/lib/hash';
 import { kernelHarness } from './harness';
 
 /**
@@ -167,4 +172,135 @@ test('dispose 调用实例与模块的清理函数，单个清理抛错不影响
   h.kernel.dispose();
   expect(calls).toEqual(['instance', 'module']);
   expect(() => h.kernel.tick()).toThrow('已销毁');
+});
+
+test('PA-01：维护层的模块与实例按各自的进程键错峰运行，模块空闲的 tick 实例照常运行；模块暂停时实例一同跳过', () => {
+  // 选一个与模块相位不同的实例键，保证两者错峰。
+  const key = ['b', 'c', 'd', 'e'].find((k) => hashString(`m:${k}`) % MAINTENANCE_PERIOD !== hashString('m') % MAINTENANCE_PERIOD)!;
+  const calls: string[] = [];
+  /**
+   * @description 构造带一个动态实例的维护层模块。
+   * @param startPaused 是否默认暂停。
+   * @returns 模块定义。
+   */
+  const maintenance = (startPaused: boolean): ModuleDefinition => ({
+    id: 'm', tier: 'maintenance', priority: 0, startPaused,
+    setup: (ctx) => {
+      ctx.processes.add(key, () => ({ plan: () => { calls.push('instance'); } }));
+      return { plan: () => { calls.push('module'); } };
+    },
+  });
+  const h = kernelHarness({ modules: [maintenance(false)] });
+  for (let i = 0; i < 4 * MAINTENANCE_PERIOD; i += 1) h.tick();
+  expect(calls.filter((c) => c === 'module')).toHaveLength(4);
+  expect(calls.filter((c) => c === 'instance')).toHaveLength(4);
+  calls.length = 0;
+  const paused = kernelHarness({ modules: [maintenance(true)] });
+  for (let i = 0; i < 2 * MAINTENANCE_PERIOD; i += 1) paused.tick();
+  expect(calls).toEqual([]);
+});
+
+test('PA-09：阶段中移除实例立即调用 dispose 并停止调度，has 随之变化；instance(key) 缓存同一上下文，键为完整进程键', () => {
+  const calls: string[] = [];
+  const seen: { hasA?: boolean; same?: boolean; key?: string } = {};
+  const mod: ModuleDefinition = {
+    id: 'm', tier: 'economy', priority: 0,
+    setup: (ctx) => {
+      ctx.processes.add('a', () => ({
+        plan: () => { calls.push('a.plan'); }, act: () => { calls.push('a.act'); }, dispose: () => { calls.push('a.dispose'); },
+      }));
+      ctx.processes.add('b', () => ({
+        plan: () => { calls.push('b.plan'); ctx.processes.remove('a'); seen.hasA = ctx.processes.has('a'); },
+        act: () => { calls.push('b.act'); },
+      }));
+      seen.same = ctx.instance('b') === ctx.instance('b');
+      seen.key = ctx.instance('b').key;
+      return {};
+    },
+  };
+  const h = kernelHarness({ modules: [mod] });
+  h.tick();
+  expect(calls).toEqual(['a.plan', 'b.plan', 'a.dispose', 'b.act']);
+  expect(seen).toEqual({ hasA: false, same: true, key: 'm:b' });
+});
+
+test('PA-17：Memory 提交持续失败（超过体积上限）时只在开始时记录一次，恢复时记录一次', () => {
+  let size = 2 * 1024 * 1024 + 1;
+  const mod: ModuleDefinition = { id: 'big', tier: 'economy', priority: 0,
+    setup: (ctx) => {
+      const data = ctx.memory.partition('p', { version: 1, initialize: () => ({ s: '' }), migrate: () => ({ s: '' }) });
+      return { act: () => { data.set(['s'], 'x'.repeat(size)); } };
+    } };
+  const h = kernelHarness({ modules: [mod] });
+  for (let i = 0; i < 5; i += 1) h.tick();
+  size = 10;
+  h.tick();
+  expect(h.lines.filter((l) => l.includes('Memory 提交失败'))).toHaveLength(1);
+  expect(h.lines.filter((l) => l.includes('Memory 提交恢复（此前连续失败 5 次）'))).toHaveLength(1);
+  expect(JSON.parse(h.platform.memory).leviathan.part.big.p.data.s).toBe('x'.repeat(10));
+});
+
+test('PA-16：同一 global 内 tick 倒退时跳过业务钩子、维护与提交并计为 degraded，时间追上后恢复', () => {
+  let t = 0;
+  const acts: number[] = [];
+  const mod: ModuleDefinition = { id: 'w', tier: 'survival', priority: 0,
+    setup: (ctx) => {
+      const data = ctx.memory.partition('p', { version: 1, initialize: () => ({ n: 0 }), migrate: () => ({ n: 0 }) });
+      return { act: () => { data.set(['n'], t); acts.push(t); } };
+    } };
+  const h = kernelHarness({ modules: [mod], game: { time: () => t } });
+  const health: (string | undefined)[] = [];
+  for (const time of [100, 101, 102, 50, 51, 103]) {
+    t = time;
+    health.push(h.tick());
+  }
+  expect(health).toEqual(['ok', 'ok', 'ok', 'degraded', 'degraded', 'ok']);
+  expect(acts).toEqual([100, 101, 102, 103]);
+  expect(JSON.parse(h.platform.memory).leviathan.part.w.p.data.n).toBe(103);
+  expect(h.lines.filter((l) => l.includes('Memory 本 tick 无法开始'))).toHaveLength(1);
+  expect(h.lines.filter((l) => l.includes('Memory 恢复可用'))).toHaveLength(1);
+  expect(h.lines.some((l) => l.includes('Memory 提交失败'))).toBe(false);
+});
+
+test('PA-04：开启实例计时时实例钩子按进程键计时，默认只按模块计时', () => {
+  /**
+   * @description 运行带一个实例的模块两个 tick，返回计时器中的标签。
+   * @param profileInstances 是否开启实例计时。
+   * @returns 计时标签。
+   */
+  const labels = (profileInstances: boolean): string[] => {
+    const mod: ModuleDefinition = { id: 'm', tier: 'economy', priority: 0,
+      setup: (ctx) => { ctx.processes.add('i', () => ({ plan: () => undefined })); return { plan: () => undefined }; } };
+    const h = kernelHarness({ modules: [mod], profileInstances });
+    h.tick(); h.tick();
+    return h.profiler.snapshot().map((e) => e.label);
+  };
+  expect(labels(true)).toEqual(expect.arrayContaining(['m.plan', 'm:i.plan']));
+  expect(labels(false)).not.toContain('m:i.plan');
+  // 实例记录直接持有计时器：执行钩子时不再按进程键查找实例上下文。
+  const mod: ModuleDefinition = { id: 'm', tier: 'economy', priority: 0,
+    setup: (ctx) => { ctx.processes.add('i', () => ({ plan: () => undefined, act: () => undefined })); return {}; } };
+  const h = kernelHarness({ modules: [mod], profileInstances: true });
+  h.tick();
+  const lookups = jest.spyOn(ModuleRuntime.prototype, 'instance');
+  try {
+    for (let i = 0; i < 5; i += 1) h.tick();
+    expect(lookups).not.toHaveBeenCalled();
+  } finally { lookups.mockRestore(); }
+});
+
+test('PA-05：dispose 调用 boot 经 onDispose 登记的清理函数；boot 上下文不提供进程表与实例上下文', () => {
+  const disposed: string[] = [];
+  const seen: { processes?: unknown; instance?: unknown } = {};
+  const h = kernelHarness({ modules: [], boot: { setup: (ctx) => {
+    ctx.onDispose(() => { disposed.push('boot'); });
+    const raw = ctx as unknown as { processes?: unknown; instance?: unknown };
+    seen.processes = raw.processes;
+    seen.instance = raw.instance;
+    return { boot: () => undefined };
+  } } });
+  h.tick();
+  h.kernel.dispose();
+  expect(disposed).toEqual(['boot']);
+  expect(seen).toEqual({ processes: undefined, instance: undefined });
 });

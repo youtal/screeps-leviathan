@@ -14,3 +14,18 @@ export interface LoggerSettings {
   /** 是否给日志前缀按级别上色；只在输出端能渲染 HTML（游戏中存在 console.logUnsafe）时生效。 */
   readonly color: boolean;
 }
+
+/** kernel.memory 的使用者设置。 */
+export interface MemorySettings {
+  /**
+   * 每次提交轮转抽查的未标脏单元数，用于发现绕过访问器、直接修改只读引用的写入（架构 6.3、15.1）；0 关闭。
+   * 每个被抽查的单元要完整编码一次，所以默认关闭，私服调试与场景测试时手动开启。
+   */
+  readonly auditUnits: number;
+}
+
+/** kernel.profiler 的使用者设置。 */
+export interface ProfilerSettings {
+  /** 是否对动态实例的钩子单独计时；默认关闭，只按模块计时。开启后每次实例钩子调用多一次计时记录。 */
+  readonly instances: boolean;
+}

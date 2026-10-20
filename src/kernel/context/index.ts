@@ -116,6 +116,11 @@ export class InstanceRecord implements Breakable, CpuNode {
   starve: number;
   verdict: Verdict;
   spent: number;
+  /**
+   * 实例计时器：开启实例计时（ContextServices.profileInstances）时为实例上下文的 measure，否则为 undefined。
+   * 由记录直接持有，执行钩子时不再按进程键查找上下文（审计 PA-04）。
+   */
+  measure: Measure | undefined;
 
   /**
    * @description 创建实例记录；层级继承所属模块，准入时要求所属模块未落选。
@@ -139,6 +144,7 @@ export class InstanceRecord implements Breakable, CpuNode {
     this.starve = 0;
     this.verdict = VERDICT_NONE;
     this.spent = 0;
+    this.measure = undefined;
   }
 }
 
@@ -285,7 +291,11 @@ export class ModuleRuntime implements Breakable, CpuNode {
           if (runtime.instances.has(key)) return;
           const full = `${id}:${key}`;
           try {
-            runtime.instances.set(key, new InstanceRecord(full, create(runtime.instance(key)), phase(), runtime));
+            const context = runtime.instance(key);
+            const record = new InstanceRecord(full, create(context), phase(), runtime);
+            // 计时器在添加时取得一次，惰性创建的计时只在开启实例计时时发生。
+            if (services.profileInstances) record.measure = context.measure;
+            runtime.instances.set(key, record);
           } catch (error) {
             log.error(`实例 ${full} 创建失败`, error);
           }

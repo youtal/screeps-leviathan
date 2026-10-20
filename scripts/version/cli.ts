@@ -6,6 +6,8 @@
  * - `node scripts/version/cli.ts bump [task|milestone|hotfix]`：按规则写入下一个版本号；
  *   通过 `npm version --no-git-tag-version` 同步更新 package.json 与 package-lock.json，不提交、不打标签。
  * - `node scripts/version/cli.ts check`：校验工作区中的版本号；不符合规则时以非零状态退出。
+ *   合并时按当前分支与 MERGE_HEAD 判断方向（发布、集成、同步，见 lib.ts 的 classifyMerge）；
+ *   改动文件以 `git diff --name-only --no-renames HEAD` 列出，文件移出 src/ 时删除一侧同样计入。
  * 副作用：读取 Git 状态；bump 会改写 package.json 与 package-lock.json。
  */
 import { execFileSync } from 'node:child_process';
@@ -14,8 +16,10 @@ import { readFileSync } from 'node:fs';
 import {
   type BumpKind,
   type DependencyFields,
+  type MergeKind,
   type Version,
   checkVersion,
+  classifyMerge,
   dependencyChanged,
   formatVersion,
   nextVersion,
@@ -103,12 +107,25 @@ const check = (): void => {
     return;
   }
   const current = workingPackage();
-  const changedFiles = git('diff', '--name-only', 'HEAD').split('\n').filter(Boolean);
+  // 关闭重命名检测：否则文件从 src/ 移出时只列出新路径，构建产物的变化被漏判（审计 PA-18）。
+  const changedFiles = git('diff', '--name-only', '--no-renames', 'HEAD').split('\n').filter(Boolean);
+  const merging = isMerging();
+  let kind: MergeKind = 'integrate';
+  let incoming: Version | undefined;
+  if (merging) {
+    let devHead: string | null = null;
+    try { devHead = git('rev-parse', '--verify', '-q', 'dev'); } catch { devHead = null; }
+    kind = classifyMerge({ branch: git('rev-parse', '--abbrev-ref', 'HEAD'), mergeHead: git('rev-parse', 'MERGE_HEAD'), devHead });
+    const pkg = packageAt('MERGE_HEAD');
+    incoming = pkg ? parseVersion(pkg.version) : undefined;
+  }
   const result = checkVersion({
-    merging: isMerging(),
+    merging,
     base: parseVersion(head.version),
     current: parseVersion(current.version),
     buildChanged: touchesBuildPaths(changedFiles) || dependencyChanged(head, current),
+    kind,
+    incoming,
   });
   console.log(result.message);
   if (!result.ok) {

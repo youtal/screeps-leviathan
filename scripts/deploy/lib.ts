@@ -3,13 +3,14 @@
  *
  * 所属位置：scripts/deploy/，开发工具，不进入游戏构建产物。
  * 主要能力：解析命令行参数；从 .secret.json 的内容中取出并校验指定账户；校验代码分支名；
- * 判定版本分支的上传条件；把构建产物整理成 Screeps 模块表；规划上传动作；选出回滚目标。
+ * 判定版本分支的上传条件；把构建产物整理成 Screeps 模块表；规划上传动作；维护本机的生效切换历史，
+ * 并据此选出回滚目标（审计 PA-13）；判定分支能否删除（PA-20）。
  * 本文件不读写文件、不调用 Git、不发起网络请求，所有输入由调用方提供。
  * 账户令牌只在 Account.token 中传递，本文件生成的任何消息都不包含令牌。
  */
 import { parseArgs } from 'node:util';
 
-import { compareVersion, parseVersion, type Version } from '../version/lib.ts';
+import { parseVersion, type Version } from '../version/lib.ts';
 
 /** 一个部署账户：.secret.json 中以账户名为键的一项。 */
 export interface Account {
@@ -22,7 +23,7 @@ export interface Account {
 }
 
 /** 部署命令。 */
-export type Command = 'accounts' | 'branches' | 'upload' | 'activate' | 'rollback';
+export type Command = 'accounts' | 'branches' | 'upload' | 'activate' | 'rollback' | 'delete';
 
 /** 解析后的命令行参数。 */
 export interface DeployArgs {
@@ -49,10 +50,11 @@ export const USAGE = [
   '  upload   --account <名称> [--branch <分支>] [--activate]',
   '                                                   构建并上传；默认分支为 v<版本号>，--activate 上传后切换生效分支',
   '  activate --account <名称> --branch <分支>        把生效分支切换到指定分支',
-  '  rollback --account <名称>                        把生效分支切回上一个版本分支',
+  '  rollback --account <名称>                        把生效分支切回上一个生效分支（按本机记录的切换历史）',
+  '  delete   --account <名称> --branch <分支>        删除分支；不能删除生效分支与当前的回滚目标',
 ].join('\n');
 
-const COMMANDS: readonly Command[] = ['accounts', 'branches', 'upload', 'activate', 'rollback'];
+const COMMANDS: readonly Command[] = ['accounts', 'branches', 'upload', 'activate', 'rollback', 'delete'];
 
 /**
  * @description 解析命令行参数并检查各命令的必需项。
@@ -86,8 +88,8 @@ export const parseDeployArgs = (argv: readonly string[]): DeployArgs => {
   if (args.command !== 'accounts' && args.account === undefined) {
     throw new Error(`${args.command} 必须用 --account 指定账户`);
   }
-  if (args.command === 'activate' && args.branch === undefined) {
-    throw new Error('activate 必须用 --branch 指定分支');
+  if ((args.command === 'activate' || args.command === 'delete') && args.branch === undefined) {
+    throw new Error(`${args.command} 必须用 --branch 指定分支`);
   }
   if ((args.command === 'accounts' || args.command === 'branches' || args.command === 'rollback') && args.branch !== undefined) {
     throw new Error(`${args.command} 不接受 --branch`);
@@ -324,29 +326,133 @@ export const planUpload = (
   return { create: !branches.some((branch) => branch.branch === target) };
 };
 
+/** 一次生效分支切换的本机记录（.deploy-history.json 中按账户保存的数组元素）。 */
+export interface Activation {
+  /** 切换完成的时间，ISO 8601。 */
+  readonly time: string;
+  /** 切换前的生效分支，切换时从服务器的分支列表读取；服务器未标记生效分支时为 null。 */
+  readonly from: string | null;
+  /** 切换后的生效分支。 */
+  readonly to: string;
+  /** 是否为 rollback 命令执行的切换。 */
+  readonly rollback: boolean;
+}
+
+/** 每个账户保留的切换记录数；更早的记录丢弃，生效栈只回放保留的部分。 */
+export const HISTORY_LIMIT = 100;
+
 /**
- * @description 选出回滚目标：版本号低于当前生效版本分支的版本分支中，版本号最高的一个（按版本号而不是字符串排序）。
+ * @description 生效切换历史的账户键：账户名加服务器地址，同名账户改指其他服务器时不会沿用旧历史。
+ * @param account 已校验的账户。
+ * @returns 形如 `main@https://screeps.com:443` 的键，不包含令牌。
+ */
+export const historyKey = (account: Account): string => `${account.name}@${serverOrigin(account)}`;
+
+/**
+ * @description 校验并取出某个账户的切换历史；文件中没有该账户时为空数组。
+ * @param file 解析后的历史文件内容；文件不存在时调用方传入空对象。
+ * @param key historyKey 生成的账户键。
+ * @returns 该账户的切换记录，按时间先后排列。
+ * @throws {Error} 文件内容或该账户的记录形状不合法。
+ */
+export const accountHistory = (file: unknown, key: string): Activation[] => {
+  if (!isRecord(file)) {
+    throw new Error('部署历史文件的顶层应为以账户为键的对象');
+  }
+  const list = file[key];
+  if (list === undefined) {
+    return [];
+  }
+  const valid = Array.isArray(list) && list.every((item) => isRecord(item) && typeof item.time === 'string'
+    && (item.from === null || typeof item.from === 'string') && typeof item.to === 'string' && typeof item.rollback === 'boolean');
+  if (!valid) {
+    throw new Error(`部署历史中账户 ${key} 的记录形状不合法`);
+  }
+  return list as Activation[];
+};
+
+/**
+ * @description 追加一条切换记录，只保留最近 HISTORY_LIMIT 条。
+ * @param history 已有记录。
+ * @param record 新记录。
+ * @returns 新数组；不修改输入。
+ */
+export const appendActivation = (history: readonly Activation[], record: Activation): Activation[] =>
+  [...history, record].slice(-HISTORY_LIMIT);
+
+/**
+ * @description 回放切换历史，得到"生效栈"：普通切换把新分支压栈，回滚出栈。某次普通切换的起点与栈顶不同，
+ * 说明期间在工具之外切换过，此时栈从这次切换重新开始。
+ * @param history 切换记录，按时间先后排列。
+ * @returns 生效栈，最后一项是工具记录的当前生效分支；没有记录时为空数组。
+ * @example activeStack([{from:'default',to:'v0.2.0'}, {from:'v0.2.0',to:'v0.2.1'}]) → ['default','v0.2.0','v0.2.1']
+ */
+export const activeStack = (history: readonly Activation[]): string[] => {
+  const stack: string[] = [];
+  for (const { from, to, rollback } of history) {
+    if (rollback && stack.length >= 2 && stack[stack.length - 1] === from && stack[stack.length - 2] === to) {
+      stack.pop();
+      continue;
+    }
+    if (stack[stack.length - 1] !== from) {
+      stack.length = 0;
+      if (from !== null) stack.push(from);
+    }
+    stack.push(to);
+  }
+  return stack;
+};
+
+/**
+ * @description 选出回滚目标：上一个生效分支，即生效栈中当前分支之下的那一项（架构 13.3"切回上一版本"）。
+ * 它可以是非版本分支，例如首次切换前账户原有的 default。服务器的分支列表不记录生效历史，所以依据本机记录；
+ * 记录与服务器状态对不上时拒绝，而不是猜测。
+ * @param history 本账户的切换记录。
  * @param branches 服务器返回的分支列表。
  * @returns 当前生效分支 from 与回滚目标 to。
- * @throws {Error} 当前生效分支不是版本分支，或没有更早的版本分支；此时应用 activate 显式指定分支。
+ * @throws {Error} 没有记录、记录的当前分支与服务器的生效分支不一致（期间在工具之外切换过）、
+ * 记录中没有更早的生效分支，或目标分支已不在服务器上；此时应用 activate 显式指定分支。
  */
-export const rollbackTarget = (branches: readonly Branch[]): { readonly from: string; readonly to: string } => {
+export const rollbackTarget = (history: readonly Activation[], branches: readonly Branch[]): { readonly from: string; readonly to: string } => {
   const active = activeWorldBranch(branches);
-  const activeVersion = active === null ? null : branchVersion(active);
-  if (active === null || activeVersion === null) {
-    throw new Error(`当前生效分支 ${active ?? '（无）'} 不是版本分支，无法自动选择回滚目标；请用 activate 指定分支`);
+  const stack = activeStack(history);
+  if (stack.length === 0) {
+    throw new Error('本机没有该账户的生效切换记录，无法自动选择回滚目标；请用 activate 指定分支');
   }
-  let best: { branch: string; version: Version } | null = null;
-  for (const { branch } of branches) {
-    const version = branchVersion(branch);
-    if (version && compareVersion(version, activeVersion) < 0 && (!best || compareVersion(version, best.version) > 0)) {
-      best = { branch, version };
-    }
+  if (active === null || stack[stack.length - 1] !== active) {
+    throw new Error(`本机记录的生效分支 ${stack[stack.length - 1]} 与服务器的 ${active ?? '（无）'} 不一致，可能在工具之外切换过；请用 activate 指定分支`);
   }
-  if (!best) {
-    throw new Error(`没有早于 ${active} 的版本分支可供回滚`);
+  const target = stack[stack.length - 2];
+  if (target === undefined) {
+    throw new Error(`本机记录中没有早于 ${active} 的生效分支；请用 activate 指定分支`);
   }
-  return { from: active, to: best.branch };
+  if (!branches.some((branch) => branch.branch === target)) {
+    throw new Error(`回滚目标 ${target} 已不在服务器上；请用 activate 指定分支`);
+  }
+  return { from: active, to: target };
+};
+
+/**
+ * @description 判定能否删除分支（审计 PA-20）。服务器删除生效分支时静默忽略并照样返回成功，所以由工具先行拒绝；
+ * 当前的回滚目标被删除后，一步回滚就不再可用，同样拒绝。
+ * @param branches 服务器返回的分支列表。
+ * @param history 本账户的切换记录。
+ * @param branch 待删除的分支名。
+ * @returns 不能删除的原因；可以删除时为 null。
+ */
+export const deleteBranchProblem = (branches: readonly Branch[], history: readonly Activation[], branch: string): string | null => {
+  const target = branches.find((item) => item.branch === branch);
+  if (!target) {
+    return `服务器上没有分支 ${branch}`;
+  }
+  if (target.activeWorld === true || target.activeSim === true) {
+    return `${branch} 是生效分支或模拟分支，不能删除`;
+  }
+  const stack = activeStack(history);
+  if (stack.length >= 2 && stack[stack.length - 1] === activeWorldBranch(branches) && stack[stack.length - 2] === branch) {
+    return `${branch} 是当前的回滚目标，删除后无法一步回滚`;
+  }
+  return null;
 };
 
 /**

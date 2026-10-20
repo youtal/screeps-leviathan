@@ -6,10 +6,20 @@
  * 组织方式：每个模块一个具名常量，命名为 `<模块名>Settings`，类型为 src/contracts/settings.ts 中的同名接口。
  * 本文件只含常量，没有运行时副作用。
  */
-import type { LoggerSettings } from '@/contracts/settings';
+import type { LoggerSettings, MemorySettings, ProfilerSettings } from '@/contracts/settings';
 
 /** kernel.logger：各级别默认开关（debug 关闭，其余打开）与前缀上色。 */
 export const loggerSettings: LoggerSettings = {
   levels: { debug: false, info: true, success: true, warn: true, error: true },
   color: true,
+};
+
+/** kernel.memory：每次提交抽查的未标脏单元数，0 关闭；私服调试与场景测试时可改为例如 4。 */
+export const memorySettings: MemorySettings = {
+  auditUnits: 0,
+};
+
+/** kernel.profiler：是否对动态实例单独计时，默认关闭。 */
+export const profilerSettings: ProfilerSettings = {
+  instances: false,
 };

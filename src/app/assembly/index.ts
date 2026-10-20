@@ -1,5 +1,5 @@
 /**
- * 文件摘要：app.assembly，把 kernel 及其服务与游戏环境装配起来（设计见 docs/design/kernel/README.md 第 7 节）。
+ * 文件摘要：app.assembly，把 kernel 及其服务与游戏环境装配起来（设计见 docs/design/app/assembly.md）。
  *
  * 所属位置：src/app/assembly/，只被 main.ts 使用。读取 Game、使用者设置（src/settings.ts）与全局 require，
  * 以参数注入 kernel；RawMemory 经 kernel.memory 的 createGamePlatform 与 kernel.segments 的 createGameSegmentsPlatform 绑定，
@@ -14,6 +14,7 @@
 import { type EntryStatus, createOps } from '@/app/ops';
 import type { BootDefinition } from '@/contracts/boot';
 import type { ModuleDefinition } from '@/contracts/module';
+import { RESERVE_MIN, RESERVE_RATIO } from '@/kernel/cpu';
 import { createErrorMapper } from '@/kernel/errorMapper';
 import { createInterShard } from '@/kernel/intershard';
 import { type GamePort, type Kernel, createKernel } from '@/kernel/lifecycle';
@@ -21,7 +22,7 @@ import { type LogRoot, type LogSink, createLogRoot } from '@/kernel/logger';
 import { createGamePlatform } from '@/kernel/memory';
 import { createProfiler } from '@/kernel/profiler';
 import { createGameSegmentsPlatform } from '@/kernel/segments';
-import { loggerSettings } from '@/settings';
+import { loggerSettings, memorySettings, profilerSettings } from '@/settings';
 import { release } from 'virtual:release';
 
 /** 本项目在 Memory 中的命名空间、签名与根 schema。 */
@@ -141,14 +142,29 @@ export const createGameServices = (): GameServices => {
     flagNames: () => new Set(Object.keys(Game.flags)),
   };
   const errors = createErrorMapper({
+    /**
+     * @description 加载随代码上传的 source map 模块（main.js.map）；游戏外没有全局 require 时返回 undefined。
+     * @returns source map 模块的导出，不可用时为 undefined。
+     */
     loadMap: () => (globalThis as { require?: (name: string) => unknown }).require?.('main.js.map'),
     bucket: game.bucket,
-    remaining: () => game.tickLimit() - game.cpuUsed() - Math.max(2, game.limit() * 0.1),
+    // 收尾预留沿用 kernel.cpu 的常量；errorMapper 也在 kernel 之外（入口、保底）使用，取不到本 tick 的预算 B，
+    // 所以以额度 limit 为基数（errorMapper 设计"源码映射"一节）。
+    /**
+     * @description 本 tick 剩余 CPU 减去收尾预留后的余量；不大于 0 时 errorMapper 不做映射。
+     * @returns 余量。
+     */
+    remaining: () => game.tickLimit() - game.cpuUsed() - Math.max(RESERVE_MIN, game.limit() * RESERVE_RATIO),
   });
   const output = consoleSink();
   const logRoot = createLogRoot({
     sink: output.sink,
     time: game.time,
+    /**
+     * @description 用 errorMapper 把日志中的异常格式化为文本（堆栈按 source map 映射）。
+     * @param error 任意异常值。
+     * @returns 格式化后的文本。
+     */
     format: (error) => errors.format(error),
     levels: loggerSettings.levels,
     color: output.html && loggerSettings.color,
@@ -157,7 +173,8 @@ export const createGameServices = (): GameServices => {
 };
 
 /**
- * @description 用游戏服务装配 kernel（模块清单、临时 boot、Memory 配置、计时器、版本号、持久化平台端口与控制台目标），
+ * @description 用游戏服务装配 kernel（模块清单、临时 boot、Memory 配置、计时器、版本号、持久化平台端口与控制台目标；
+ * Memory 抽查数与实例计时取自使用者设置），
  * 并为它创建 app.ops 的运维命令。
  * @param services 游戏服务。
  * @param entryStatus 入口状态的读取函数（main.ts 提供），供 ops.status 在 kernel 不可用时使用。
@@ -168,10 +185,12 @@ export const assemble = (services: GameServices, entryStatus: () => EntryStatus)
   const kernel = createKernel({
     modules: MODULES,
     boot: PROVISIONAL_BOOT,
-    memory: { ...MEMORY_IDENTITY, platform: createGamePlatform((message) => memoryLog.warn(message)) },
+    memory: { ...MEMORY_IDENTITY, auditUnits: memorySettings.auditUnits,
+      platform: createGamePlatform((message) => memoryLog.warn(message)) },
     game: services.game,
     logRoot: services.logRoot,
     profiler: createProfiler({ cpuUsed: services.game.cpuUsed }),
+    profileInstances: profilerSettings.instances,
     release,
     segments: createGameSegmentsPlatform(),
     interShard: globalThis,

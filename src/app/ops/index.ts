@@ -10,7 +10,8 @@
  */
 import type { LogLevel } from '@/contracts/log';
 import type { Kernel, KernelStatus, ModuleStatus } from '@/kernel/lifecycle';
-import type { LogRoot } from '@/kernel/logger';
+import { LOG_LEVELS, type LogRoot } from '@/kernel/logger';
+import { OPS_NAMESPACE } from '@/kernel/process';
 
 /** 入口的状态，由 main.ts 的入口闭包提供（内核设计第 6 节"入口状态"）。 */
 export interface EntryStatus {
@@ -38,9 +39,6 @@ export interface OpsDeps {
    */
   entryStatus(): EntryStatus;
 }
-
-/** 合法的日志级别。 */
-const LEVELS: readonly LogLevel[] = ['debug', 'info', 'success', 'warn', 'error'];
 
 /** 模块状态的中文名。 */
 const STATE_TEXT: Readonly<Record<ModuleStatus['state'], string>> = Object.freeze({
@@ -97,7 +95,7 @@ const text = (value: unknown, name: string): string => {
  */
 export const createOps = (deps: OpsDeps): void => {
   const { kernel } = deps;
-  const ops = kernel.console('ops');
+  const ops = kernel.console(OPS_NAMESPACE);
 
   ops.command('status', 'ops.status([模块 id])：kernel 与各模块的状态；kernel 不可用时显示入口状态', (id?: unknown) => {
     const status = kernel.ops.status();
@@ -126,7 +124,7 @@ export const createOps = (deps: OpsDeps): void => {
   });
   ops.command('log', 'ops.log(level, on[, scope])：修改日志默认开关，或一个模块/实例的覆盖（on 为 null 时恢复默认）；只存于 heap',
     (level: unknown, on: unknown, scope?: unknown) => {
-      if (!LEVELS.includes(level as LogLevel)) throw new TypeError(`level 须为 ${LEVELS.join('、')} 之一`);
+      if (!LOG_LEVELS.includes(level as LogLevel)) throw new TypeError(`level 须为 ${LOG_LEVELS.join('、')} 之一`);
       if (scope === undefined) {
         if (typeof on !== 'boolean') throw new TypeError('修改默认开关时 on 须为 true 或 false');
         deps.logRoot.setDefault(level as LogLevel, on);

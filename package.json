@@ -1,6 +1,6 @@
 {
   "name": "screeps-leviathan",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "private": true,
   "description": "能长期无人值守运营的 Screeps AI",
   "license": "UNLICENSED",
