@@ -4,11 +4,13 @@
  * 每个实例只解析一次，索引和脏集合跨 tick 持有；dispose/global reset 后不可复用旧能力。
  * 待确认文本用于发现驱动收尾丢弃写入，下一 tick 只比较文本、不再次解析；不访问私有 _parsed。
  * 损坏文本、同名命名空间结构不符或 schema 不匹配时拒绝写入；命名空间缺失时其他根键只读保留，
- * 初始化仅在宿主显式授权后加入命名空间，不承担 boot 判定或清空。
+ * 初始化仅在宿主显式授权后加入命名空间。清空同样只在宿主授权后执行（boot 特权端口，docs/design/kernel/bootPort.md），
+ * Memory 不做 boot 判定。加载时缓存原始文本与概要，供 boot 备份与判定读取本实例加载时的原貌。
  */
-import type { ProjectMarker } from '@/contracts/boot';
+import type { ProjectMarker, RawMemorySummary } from '@/contracts/boot';
 import type { Json } from '@/contracts/memory';
 import { checkKey, copyJson, isObject, validateJson } from './json';
+import { checkMarker, summarize, UNPARSED_SUMMARY } from './marker';
 import type { Space, Unit, UnitRecord } from './unit';
 
 /** 平台适配由宿主注入；read/write 必须转发当前 tick 的 RawMemory，不能捕获旧平台对象。 */
@@ -108,6 +110,25 @@ export interface Runtime {
   committing: boolean;
   sizes: SizeSnapshot;
   /**
+   * 本实例加载时读到的原始文本，保留到实例销毁，供 boot 备份；平台读取失败时为 undefined。
+   * 最多约 2 Mi 字符的 heap 占用，换取备份反映迁移或清空之前的原貌（bootPort 设计第 3 节）。
+   */
+  text?: string;
+  /** 加载时计算的深冻结概要；尚未加载时为 undefined，读取或解析失败时为 UNPARSED_SUMMARY。 */
+  summary?: RawMemorySummary;
+  /**
+   * 项目标记最近一次已知合法的编码：加载、初始化、清空时建立，sys 写入后经提交校验通过才更新。
+   * 提交发现 sys 非法时沿用此编码写出（单元级隔离），所以必须在任何 sys 写入之前建立。
+   */
+  sysText?: string;
+  /**
+   * sysText 所代表标记的 epoch，与 sysText 在同一处建立和更新，供 segments 写页头与校验页（kernel.lifecycle 注入）。
+   * 不读 heap 中的 sys：boot 写入的非法值被隔离、或提交失败时，heap 值不是已持久化的 epoch（第二轮审计 SR-03）。
+   */
+  sysEpoch?: number;
+  /** sys 访问器背后的运行时单元，首次取得访问器时创建；不在 units 索引中，提交单独处理。 */
+  sysUnit?: Unit;
+  /**
    * @description 检查实例是否允许访问存储。
    * @returns 无返回值；正常结束表示已加载且可访问。
    * @throws {Error} 实例已销毁、正在提交、加载失败或尚未初始化。
@@ -142,39 +163,18 @@ export const unitId = (space: Space, parent: string, key: string): string => JSO
 export const recordId = (space: Space, key: string): string => JSON.stringify([space, key]);
 
 /**
- * @description 验证项目身份和标记字段；当前世界是否匹配指纹由 boot 判定。
- * @param value 待判断的项目标记。
- * @param options 宿主要求的 signature 与 schema 等配置。
- * @returns 身份匹配且字段结构合法时为 true，否则为 false。
- */
-const checkMarker = (value: unknown, options: MemoryOptions): value is ProjectMarker => {
-  if (!isObject(value) || value.sig !== options.signature || value.schema !== options.schema
-    || typeof value.shard !== 'string' || typeof value.release !== 'string') return false;
-  if (!['schema', 'epoch', 'lastRun'].every((key) => Number.isSafeInteger(value[key]) && Number(value[key]) >= 0)) return false;
-  if (!isObject(value.fp) || !isObject(value.mode)) return false;
-  const fp = value.fp;
-  const mode = value.mode;
-  return [fp.rooms, fp.spawnIds, mode.evidence].every((list) => Array.isArray(list) && list.every((v) => typeof v === 'string'))
-    && Number.isSafeInteger(fp.creepCount) && Number(fp.creepCount) >= 0
-    && ['NORMAL', 'FRESH_START', 'RECOVERY', 'TAKEOVER', 'SELF_ADOPT', 'SHARD_SEED', 'STRANDED', 'DORMANT', 'AMBIGUOUS'].includes(String(mode.mode))
-    && ['strong', 'medium'].includes(String(mode.strength)) && Number.isSafeInteger(mode.since) && Number(mode.since) >= 0;
-};
-
-/**
- * @description 首次读取时解析完整文本并建立索引，成本与原始数据规模成正比。
+ * @description 首次读取时由解析结果建立索引，成本与原始数据规模成正比。
  * 所有已有单元（包括未声明的 owner）都登记，避免首次拼串时丢弃未知业务数据。
  * 中途失败可能已创建部分索引，但 beginTick 会锁存异常，禁止发布能力或提交半份数据。
  * 本项目命名空间缺失时只保留根对象，等待宿主授权初始化：空根、引擎默认空对象形状（11.3 的 EMPTY）
  * 与外来根键（11.4 b′ 等只读保留情形）都走这条路径；是否允许初始化由 boot 判定，Memory 不推断。
  * 命名空间存在但结构、身份或 schema 不符时仍拒绝，不覆盖已占用的同名命名空间。
  * @param state 待装载的实例状态。
- * @param text 平台原始文本，空白文本按空对象处理。
+ * @param root 原始文本的解析结果，空白文本由调用方按空对象传入。
  * @returns 无返回值；成功时安装根数据及单元索引，命名空间缺失时等待显式初始化。
- * @throws {SyntaxError} 非空文本不是合法 JSON。
  * @throws {Error} 根不是对象，或本项目命名空间的结构、身份、schema 或单元包络非法。
  */
-const load = (state: Runtime, text: string): void => {
-  const root: unknown = text.trim() === '' ? {} : JSON.parse(text);
+const load = (state: Runtime, root: unknown): void => {
   validateJson(root);
   if (!isObject(root)) throw new Error('Memory 根结构非法');
   if (!Object.hasOwn(root, state.options.namespace)) { state.root = root as Record<string, Json>; return; }
@@ -204,6 +204,9 @@ const load = (state: Runtime, text: string): void => {
   }
   state.root = root as Record<string, Json>;
   state.data = data as Namespace;
+  // 已通过 checkMarker 的标记作为 sys 的合法基线，必须早于任何 sys 写入建立。
+  state.sysText = JSON.stringify(data.sys);
+  state.sysEpoch = data.sys.epoch;
   state.structural = true; // reset 后首次提交完整编码，未声明的单元也要原样保留。
 };
 
@@ -302,8 +305,16 @@ export const beginTick = (state: Runtime, facts: TickFacts): 'empty' | 'ready' =
   if (state.failure !== undefined) throw state.failure;
   if (!state.loaded) {
     state.loaded = true;
-    try { load(state, state.options.platform.read()); }
-    catch (error) { state.failure = error; throw error; }
+    // 文本只解析一次：概要与索引共用同一解析结果。概要先于结构校验计算，加载失败时 boot 仍能取得。
+    // 平台读取或 JSON 解析失败时概要为 UNPARSED_SUMMARY；空白文本不调用 JSON.parse。
+    state.summary = UNPARSED_SUMMARY;
+    try {
+      const text = state.options.platform.read();
+      state.text = text;
+      const root: unknown = text.trim() === '' ? {} : JSON.parse(text);
+      state.summary = summarize(root, state.options.namespace, state.options);
+      load(state, root);
+    } catch (error) { state.failure = error; throw error; }
   }
   if (state.pending !== undefined) {
     // write 成功后仍可能因 segment 等收尾检查丢弃整 tick；保留 heap 数据并强制重拼。
@@ -328,6 +339,35 @@ export const initialize = (state: Runtime, marker: ProjectMarker): void => {
   if (!checkMarker(marker, state.options)) throw new Error('初始化标记不匹配');
   state.data = { sys: copyJson(marker), part: {}, rooms: {}, creeps: {}, flags: {} };
   state.root[state.options.namespace] = state.data;
+  state.sysText = JSON.stringify(state.data.sys);
+  state.sysEpoch = state.data.sys.epoch;
+  state.structural = true;
+};
+
+/**
+ * @description 整体替换根为只含本项目命名空间的新根，清除加载失败的锁存（boot 特权端口的 clearMemory）。
+ * 其他根键、所有分区与实体数据一并丢弃；已发布的分区与切片访问器全部失效，sys 访问器继续指向新标记。
+ * 与 initialize 一样不立即写入，下一次 commit 完整编码。能否清空（闸门、备份、普通模块是否已 setup）由宿主判断。
+ * @param state 已执行过 beginTick 的实例状态；允许处于加载失败状态。
+ * @param marker 已由宿主生成的完整项目标记。
+ * @returns 无返回值；替换根并标记结构变化。
+ * @throws {Error} 实例已销毁、尚未开始首个 tick、正在提交、标记不匹配或标记不能作为 JSON 复制。
+ */
+export const clear = (state: Runtime, marker: ProjectMarker): void => {
+  if (!state.active || !state.loaded || !state.facts) throw new Error('Memory 不可清空');
+  if (state.committing) throw new Error('提交期间不可重入 Memory');
+  if (!checkMarker(marker, state.options)) throw new Error('清空标记不匹配');
+  // 先完成会抛错的复制，再改状态，失败时原数据不变。
+  const sys = copyJson(marker);
+  // 加载失败时 load 可能已登记部分单元，这里一并撤销。
+  for (const unit of state.units.values()) unit.active = false;
+  state.units.clear(); state.records.clear(); state.dirty.clear();
+  state.data = { sys, part: {}, rooms: {}, creeps: {}, flags: {} };
+  state.root = { [state.options.namespace]: state.data };
+  state.sysText = JSON.stringify(sys);
+  state.sysEpoch = sys.epoch;
+  if (state.sysUnit) { state.sysUnit.isolated = false; state.sysUnit.needsValidation = false; }
+  state.failure = undefined;
   state.structural = true;
 };
 

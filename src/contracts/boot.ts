@@ -28,14 +28,21 @@ export type ProjectMarker = {
   };
 };
 
-/** 原始 Memory 的概要，供启动判定使用。 */
+/**
+ * 原始 Memory 的概要，供启动判定使用；内容是本 kernel 实例加载时的原貌，之后的写入、迁移与清空都不改变它。
+ * 概要只校验项目标记，不代表 Memory 能够加载：标记合法而命名空间其余结构不合法时，访问 sys 抛错
+ * （docs/design/kernel/bootPort.md 第 3 节"概要与加载"）。
+ */
 export interface RawMemorySummary {
-  /** 原始文本为空或为 '{}'。 */
+  /** 架构设计 11.3 的 EMPTY：文本为空白，或根键只有 creeps/spawns/rooms/flags/powerCreeps 且值都是空对象。 */
   readonly empty: boolean;
   /** 能否解析为对象。 */
   readonly parsed: boolean;
   readonly rootKeys: readonly string[];
-  /** 结构合法的项目标记，否则为 null。 */
+  /**
+   * 签名相符的项目标记，否则为 null。schema 与当前版本相同时按当前结构完整校验，不合法为 null；
+   * 不同时只保证 sig 与 schema 两个字段，其余字段可能属于其他版本的结构（供判定 OURS_NEWER）。
+   */
   readonly marker: DeepReadonly<ProjectMarker> | null;
 }
 
@@ -51,15 +58,23 @@ export interface BootPort {
    */
   summary(): RawMemorySummary;
   /**
-   * @description 把原始 Memory 写入 segment 备份区；可能跨 tick 完成，重复调用推进进度。
-   * @returns 备份进度：pending 表示仍需在后续 tick 继续调用，done 表示已完成，failed 表示无法完成。
+   * @description 把本 kernel 实例加载时的原始 Memory 写入 segment 备份区并回读校验；跨 tick 完成，重复调用推进进度。
+   * 返回 pending 的 tick 为暂停 tick：kernel 跳过普通模块 setup 与业务阶段，保证备份完成前没有动作改变开局证据。
+   * @returns 备份进度：pending 表示仍需在后续 tick 继续调用，done 表示已完成，failed 表示无法完成（超过备份区容量或回读不一致）。
    * @throws {Error} 不在 boot 阶段调用。
    */
   backup(): BackupState;
   /**
+   * @description Memory 为 empty（本项目命名空间缺失、加载成功）时加入本项目命名空间，保留其他根键；
+   * 项目标记由 kernel 生成，epoch 为 1，指纹与模式为占位值，boot 随后在同一 tick 经 sys 写入。
+   * @returns 无返回值；Memory 随即就绪，等待本 tick 提交。
+   * @throws {Error} 不在 boot 阶段调用，或 Memory 不是 empty。
+   */
+  initialize(): void;
+  /**
    * @description 整体清空主 Memory，并按当前 epoch + 1 重建项目标记；属于不可逆操作，须先满足闸门条件（架构设计 11.8）。
    * @returns 无返回值；清空并重建项目标记，等待本 tick 提交。
-   * @throws {Error} 不在 boot 阶段调用。
+   * @throws {Error} 不在 boot 阶段调用，或本 kernel 实例的普通模块已 setup（须先软重置）。
    */
   clearMemory(): void;
   /**
@@ -70,6 +85,7 @@ export interface BootPort {
   clearInterShard(): void;
   /**
    * @description 请求软重置：丢弃 heap 缓存、进程实例与路径缓存，效果等同于一次 global reset（架构设计 5.5）。
+   * 本 tick 为暂停 tick：跳过业务阶段但照常提交。boot 钩子在同一 tick 抛错时，登记作废。
    * @returns 无返回值；软重置在下一 tick 生效。
    * @throws {Error} 不在 boot 阶段调用。
    */

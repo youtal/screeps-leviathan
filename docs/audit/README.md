@@ -14,6 +14,8 @@
 
 | 日期 | 报告 | 类型 |
 | --- | --- | --- |
+| 2026-10-20 | [M1 第 4 步工作区第二轮审计（segments、bootPort、intershard）](./2026-10-20-segments-bootport-recheck.md) | 审计 |
+| 2026-10-20 | [M1 第 4 步工作区交付审计（segments、bootPort、intershard）](./2026-10-20-segments-bootport-delivery.md) | 审计 |
 | 2026-10-19 | [M1 第 2 步工作区交付审计（外部评审核实）](./2026-10-19-kernel-skeleton.md) | 审计 |
 | 2026-10-19 | [Memory v1 工作区交付审计](./2026-10-19-memory-delivery.md) | 审计 |
 | 2026-10-19 | [Memory 纯数据边界下的方法复核](./2026-10-19-memory-simplification.md) | 审计 |

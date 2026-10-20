@@ -10,6 +10,7 @@
  *   独立入口 src/fallback.ts 不得导入项目模块，包括类型依赖和自身；
  *   使用者设置 src/settings.ts 只能导入 contracts（类型），且只有 app 与 main 可以导入它（架构 4.3）；
  * - package：src 不导入外部包，运行时代码全部打入构建产物；`@/` 是 src/ 的别名（tsconfig.json 的 paths），不算外部包；
+ *   构建注入版本号的虚拟模块 `virtual:release`（rollup 内联插件提供）只允许 app/assembly 导入；
  * - alias：跨模块导入必须使用 `@/` 别名，相对路径只用于模块内部（README 开发规范）；
  * - domain：领域之间不互相导入，领域以 domains/<分组>/<领域>/ 为单位；
  * - storage：全局 Memory、RawMemory、InterShardMemory，游戏对象的原生 memory 属性，以及
@@ -29,6 +30,10 @@ export type Rule = 'layer' | 'package' | 'domain' | 'alias' | 'storage' | 'libSt
 
 /** src/ 的导入别名前缀。 */
 const ALIAS = '@/';
+
+/** 构建时注入版本号的虚拟模块（docs/design/kernel/bootPort.md 第 6 节），只允许此目录（相对 src，以 / 结尾）导入。 */
+const RELEASE_MODULE = 'virtual:release';
+const RELEASE_IMPORTER = 'app/assembly/';
 
 export interface Violation {
   readonly file: string;
@@ -221,6 +226,7 @@ export const checkBoundaries = (options: CheckOptions): Violation[] => {
      */
     const checkSpecifier = (node: ts.Node, specifier: string): void => {
       const aliased = specifier.startsWith(ALIAS);
+      if (specifier === RELEASE_MODULE && srcPath.startsWith(RELEASE_IMPORTER)) return;
       if (!aliased && !specifier.startsWith('.')) {
         report(node, 'package', `不得导入外部包 ${specifier}`);
         return;

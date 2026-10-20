@@ -13,7 +13,8 @@ export type UnitRecord = { version: number; data: Json };
 /** 不持久化的单元控制块；record 与根表共享引用，encoded 仅由成功提交发布。 */
 export interface Unit {
   readonly id: string;
-  readonly space: Space;
+  /** 所在空间；'sys' 只用于项目标记单元，它不在单元索引中，由提交单独处理（sys.ts）。 */
+  readonly space: Space | 'sys';
   readonly owner: string;
   readonly record: UnitRecord;
   readonly dirty: Set<Unit>;

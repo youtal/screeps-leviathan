@@ -1,13 +1,14 @@
 /**
  * 文件摘要：入口切换逻辑（src/main.ts 的 createEntry）的单元测试，以假依赖驱动，不需要 Game。
  * 覆盖：正常运行只装配一次、抛错（含装配抛错）当 tick 转保底并在下一 tick 重新装配、连续 3 次抛错进入
- * 100 tick 冷却、连续 3 个 degraded tick 追加保底并在恢复后停止、接管失败与保底抛错只报告。
+ * 100 tick 冷却、连续 3 个 degraded tick 追加保底并在恢复后停止、接管失败与保底抛错只报告、
+ * 软重置后重新装配且不计入抛错、暂停 tick 不改变 degraded 计数且连续暂停超过上限后按 degraded 计数。
  */
 import type { Kernel, KernelHealth } from '@/kernel/lifecycle';
-import { KERNEL_COOLDOWN, KERNEL_CRASH_LIMIT, SAFE_MODE_TICKS, createEntry } from '@/main';
+import { KERNEL_COOLDOWN, KERNEL_CRASH_LIMIT, PAUSE_LIMIT, SAFE_MODE_TICKS, createEntry } from '@/main';
 
 /**
- * @description 创建可编排的入口：每次 kernel.tick 依次取 script 中的结果（'throw' 表示抛错）。
+ * @description 创建可编排的入口：每次 kernel.tick 依次取 script 中的结果（'throw' 表示抛错，'reset' 表示登记软重置的暂停 tick）。
  * @param script kernel.tick 的结果序列；用尽后保持 'ok'。
  * @param options 可选项。
  * @param options.takeoverFails 接管是否抛错。
@@ -15,7 +16,7 @@ import { KERNEL_COOLDOWN, KERNEL_CRASH_LIMIT, SAFE_MODE_TICKS, createEntry } fro
  * @param options.assembleFails 装配是否抛错。
  * @returns 入口 loop 与观测数据。
  */
-const setup = (script: (KernelHealth | 'throw')[], options: { takeoverFails?: boolean; fallbackFails?: boolean; assembleFails?: boolean } = {}) => {
+const setup = (script: (KernelHealth | 'throw' | 'reset')[], options: { takeoverFails?: boolean; fallbackFails?: boolean; assembleFails?: boolean } = {}) => {
   let time = 0;
   const seen = { assembled: 0, ticks: 0, disposed: 0, fallbacks: [] as number[], reports: [] as string[] };
   const loop = createEntry({
@@ -23,8 +24,16 @@ const setup = (script: (KernelHealth | 'throw')[], options: { takeoverFails?: bo
     assemble: (): Kernel => {
       if (options.assembleFails) throw new Error('装配失败');
       seen.assembled += 1;
+      let reset = false;
       return {
-        tick: () => { seen.ticks += 1; const next = script.shift() ?? 'ok'; if (next === 'throw') throw new Error('kernel 崩溃'); return next; },
+        tick: () => {
+          seen.ticks += 1;
+          const next = script.shift() ?? 'ok';
+          if (next === 'throw') throw new Error('kernel 崩溃');
+          if (next === 'reset') { reset = true; return 'paused'; }
+          return next;
+        },
+        resetRequested: () => reset,
         dispose: () => { seen.disposed += 1; },
       };
     },
@@ -87,4 +96,48 @@ test('接管失败与保底循环抛错只报告，不中断入口', () => {
   expect(seen.reports.filter((r) => r.includes('Memory 接管失败'))).toHaveLength(2);
   expect(seen.reports.some((r) => r.includes('保底循环抛错'))).toBe(true);
   expect(seen.ticks).toBe(2);
+});
+
+test('软重置：本 tick 正常结束后销毁实例，下一 tick 重新装配，不计入抛错', () => {
+  const { run, seen } = setup(['ok', 'reset', 'ok', 'reset', 'reset', 'reset']);
+  run(6);
+  expect([seen.assembled, seen.disposed, seen.fallbacks, seen.reports]).toEqual([4, 4, [], []]);
+});
+
+test('暂停 tick 不改变 degraded 计数，也不运行保底', () => {
+  const { run, seen } = setup(['degraded', 'degraded', 'paused', 'paused', 'degraded', 'paused', 'ok', 'degraded']);
+  run(8);
+  expect(seen.fallbacks).toEqual([5]);
+});
+
+test(`连续暂停超过 ${PAUSE_LIMIT} 个 tick 后按 degraded 计数，跨软重置累计`, () => {
+  const script: ('paused' | 'reset')[] = [];
+  for (let i = 0; i < PAUSE_LIMIT + SAFE_MODE_TICKS; i += 1) script.push(i % 2 === 0 ? 'reset' : 'paused');
+  const { run, seen } = setup(script);
+  run(PAUSE_LIMIT + SAFE_MODE_TICKS - 1);
+  expect(seen.fallbacks).toEqual([]);
+  run(1);
+  expect(seen.fallbacks).toEqual([PAUSE_LIMIT + SAFE_MODE_TICKS]);
+  run(1); // 恢复 ok 后清零
+  expect(seen.fallbacks).toEqual([PAUSE_LIMIT + SAFE_MODE_TICKS]);
+});
+
+test(`SB-01：超过 ${PAUSE_LIMIT} 个暂停 tick 后仍每 tick 软重置，按失败计数并进入冷却，重建次数有上限`, () => {
+  const { run, seen } = setup(Array.from({ length: 300 }, () => 'reset' as const));
+  run(PAUSE_LIMIT);
+  expect(seen.reports).toEqual([]); // 上限内的软重置不计失败
+  run(300 - PAUSE_LIMIT);
+  // 前 PAUSE_LIMIT 个 tick 各装配一次；之后每轮 KERNEL_CRASH_LIMIT 次重建触发一次 KERNEL_COOLDOWN 冷却。
+  const rounds = Math.ceil((300 - PAUSE_LIMIT) / (KERNEL_CRASH_LIMIT + KERNEL_COOLDOWN));
+  expect(seen.assembled).toBe(PAUSE_LIMIT + rounds * KERNEL_CRASH_LIMIT);
+  expect(seen.reports.filter((r) => r.includes('停用'))).toHaveLength(rounds);
+});
+
+test('SB-01：超限后软重置与普通暂停交替，失败计数不清零，仍进入冷却', () => {
+  const script: ('paused' | 'reset')[] = [];
+  for (let i = 0; i < 40; i += 1) script.push(i % 2 === 0 ? 'reset' : 'paused');
+  const { run, seen } = setup(script);
+  run(40);
+  expect(seen.reports.some((r) => r.includes('停用'))).toBe(true);
+  expect(seen.assembled).toBe(8);
 });

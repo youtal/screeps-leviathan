@@ -119,6 +119,21 @@ describe('边界检查规则', () => {
     expect(bad.filter((v) => v.file === 'settings.ts').map((v) => `${v.rule}:${v.line}`)).toEqual(['layer:1']);
   });
 
+  test('package：构建注入的 virtual:release 只允许 app/assembly 导入', () => {
+    const result = checkBoundaries({
+      root, srcRoot,
+      files: Object.fromEntries(Object.entries({
+        'app/assembly/index.ts': "import { release } from 'virtual:release';\nexport const r = release;",
+        'kernel/process/index.ts': "import { release } from 'virtual:release';\nexport const r = release;",
+        'main.ts': "import { release } from 'virtual:release';\nexport const loop = (): string => release;",
+        'app/boot/index.ts': "import { other } from 'virtual:other';\nexport const o = other;",
+      }).map(([path, text]) => [join(srcRoot, path), text])),
+    });
+    const at = (file: string) => result.filter((v) => v.file === file).map((v) => `${v.rule}:${v.line}`);
+    expect(at('app/assembly/index.ts')).toEqual([]);
+    expect([at('kernel/process/index.ts'), at('main.ts'), at('app/boot/index.ts')]).toEqual([['package:1'], ['package:1'], ['package:1']]);
+  });
+
   test('alias：跨模块导入必须使用 @/ 别名，相对路径只用于模块内部', () => {
     const result = checkBoundaries({
       root, srcRoot,

@@ -4,8 +4,12 @@
  * 单元级隔离：校验失败的单元沿用最近一次合法编码写出，保持脏与待校验状态并告警一次，其余单元照常提交。
  * 验证与编码全部完成后才调用平台写入，成功后发布缓存、尺寸并清除已编码单元的脏状态；写入失败保留重试依据。
  * pending 在平台写入前设置，下一 tick 核对驱动是否实际保存，防止收尾拒绝造成永久丢写。
+ * 项目标记 sys 不在单元索引中：写入后变脏，提交时按项目标记结构与装配身份校验，失败同样按单元级隔离沿用上一版。
+ * 写入成功后同时发布 sysText 与其 epoch（sysEpoch），segments 的页头 epoch 只取已交给写入口的合法标记。
  */
+import type { ProjectMarker } from '@/contracts/boot';
 import { validateJson } from './json';
+import { checkMarker } from './marker';
 import { type Runtime, type SizeSnapshot, unitId, warn } from './runtime';
 import type { Space, Unit } from './unit';
 
@@ -27,8 +31,6 @@ const objectText = (pairs: readonly (readonly [string, string])[]): string =>
 export const createCommitter = (state: Runtime): (() => boolean) => {
   // { [根字段名]: 非本命名空间字段的编码 }；这些数据没有可变能力，实例内只编码一次。
   const peers = new Map<string, string>();
-  // 当前宿主入口没有 sys 写能力，首次编码后可一直复用；未来加入写能力时须同步失效此缓存。
-  let sys: string | undefined;
   // 抽查游标跨 commit 轮转，避免总是检查前几个单元；未启用抽查时不额外编码。
   let audit = state.units.values();
   /**
@@ -58,6 +60,19 @@ export const createCommitter = (state: Runtime): (() => boolean) => {
     const staged = new Map<Unit, string>();
     // 本次新进入隔离、待告警的单元；告警在重入保护内发出。
     const isolatedNow: Unit[] = [];
+    // sys 变脏时才校验并编码；未变脏沿用 state.sysText（加载、初始化或清空时建立的合法基线）。
+    // 标记很小，每次变脏都完整校验，不区分 set 与 update。
+    const sysUnit = state.sysUnit;
+    let sysNext: string | undefined;
+    // sysNext 所代表标记的 epoch，与 sysNext 一同在写入成功后发布为 state.sysEpoch。
+    let sysEpochNext = 0;
+    if (sysUnit && state.dirty.has(sysUnit)) {
+      const value: unknown = state.data!.sys;
+      let valid = false;
+      try { validateJson(value); valid = checkMarker(value, state.options); } catch { valid = false; }
+      if (valid) { sysNext = JSON.stringify(value); sysEpochNext = (value as ProjectMarker).epoch; }
+      else if (!sysUnit.isolated) { sysUnit.isolated = true; isolatedNow.push(sysUnit); }
+    }
     for (const unit of state.units.values()) {
       if (unit.encoded === undefined || state.dirty.has(unit)) {
         // 只校验 update 修改过的单元：set/replace 写入前、加载/初始化/迁移发布前都已完整校验，
@@ -75,11 +90,11 @@ export const createCommitter = (state: Runtime): (() => boolean) => {
       }
     }
     // 只剩被隔离的单元待写时没有新内容可持久化，不写入；仍须告警首次隔离。
-    if (staged.size === 0 && !state.structural) {
+    if (staged.size === 0 && sysNext === undefined && !state.structural) {
       for (const unit of isolatedNow) warn(state, `Memory 单元校验失败，沿用上一版编码：${unit.id}`);
       return false;
     }
-    sys ??= JSON.stringify(state.data!.sys);
+    const sys = sysNext ?? state.sysText!;
     const spaces = { sys: sys.length, part: 0, rooms: 0, creeps: 0, flags: 0 };
     // owner 可为 toString 等名字，无原型字典避免累计尺寸时误读继承成员。
     const owners = Object.create(null) as Record<string, number>;
@@ -121,6 +136,12 @@ export const createCommitter = (state: Runtime): (() => boolean) => {
       // pending 仍保留至下一 tick 确认；尺寸快照此时仅代表写入口成功，不代表驱动已保存。
       // 只清除本次成功编码的单元；被隔离单元保持脏与待校验状态，等待修正后再次提交。
       for (const [unit, encoded] of staged) { unit.encoded = encoded; unit.isolated = false; state.dirty.delete(unit); }
+      if (sysUnit && sysNext !== undefined) {
+        state.sysText = sysNext;
+        state.sysEpoch = sysEpochNext;
+        sysUnit.isolated = false; sysUnit.needsValidation = false;
+        state.dirty.delete(sysUnit);
+      }
       state.sizes = sizes;
       state.structural = false;
       state.written = true;
