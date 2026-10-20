@@ -95,7 +95,7 @@ describe('边界检查规则', () => {
     expect(of('fallback/index.ts')).toEqual(['layer:1']);
   });
 
-  test('settings.ts：只能导入 contracts，只有 app 与 main 可以导入它；同名目录不属于任何层', () => {
+  test('settings.ts：只能导入 contracts，只有 app/assembly 与 main 可以导入它；同名目录不属于任何层', () => {
     const check = (extra: Record<string, string>) => checkBoundaries({
       root, srcRoot,
       files: Object.fromEntries(Object.entries({
@@ -109,11 +109,14 @@ describe('边界检查规则', () => {
       'app/assembly/index.ts': "import { levels } from '@/settings';\nexport const assembled = levels;",
       'main.ts': "import { levels } from '@/settings';\nexport const loop = (): unknown => levels;",
       'kernel/process/index.ts': "import { levels } from '@/settings';\nexport const run = levels;",
+      'app/ops/index.ts': "import { levels } from '@/settings';\nexport const ops = levels;",
       'settings/index.ts': 'export const misplaced = 1;',
     });
     const at = (file: string) => ok.filter((v) => v.file === file).map((v) => `${v.rule}:${v.line}`);
     expect([at('settings.ts'), at('app/assembly/index.ts'), at('main.ts')]).toEqual([[], [], []]);
     expect(at('kernel/process/index.ts')).toEqual(['layer:1']);
+    // PA-19：app 层中 assembly 以外的模块同样不得直接读取设置。
+    expect(at('app/ops/index.ts')).toEqual(['layer:1']);
     expect(at('settings/index.ts')).toEqual(['layer:1']);
     const bad = check({ 'settings.ts': "import { createLogRoot } from '@/kernel/logger/index';\nexport const x = createLogRoot;" });
     expect(bad.filter((v) => v.file === 'settings.ts').map((v) => `${v.rule}:${v.line}`)).toEqual(['layer:1']);

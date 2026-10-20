@@ -1,9 +1,11 @@
 /**
  * 文件摘要：版本号规则（scripts/version/lib.ts）的单元测试。
- * 覆盖版本号解析、三种 bump 方式、构建产物判断，以及合并与普通提交的校验规则。
+ * 覆盖版本号解析、三种 bump 方式、构建产物判断（含 overrides，审计 PA-18），以及合并与普通提交的校验规则；
+ * 合并按方向区分发布、集成与同步（PA-14）。
  */
 import {
   checkVersion,
+  classifyMerge,
   dependencyChanged,
   nextVersion,
   parseVersion,
@@ -49,6 +51,12 @@ describe('影响构建产物的判断', () => {
     expect(dependencyChanged({ devDependencies: { a: '1.0.0' } }, { devDependencies: { a: '1.0.1' } })).toBe(true);
     expect(dependencyChanged({ devDependencies: { a: '1.0.0' } }, { devDependencies: { a: '1.0.0' } })).toBe(false);
   });
+  test('PA-18：overrides 变化同样算作依赖声明变化', () => {
+    const overrides = { 'js-yaml@3': { argparse: '2.0.1' } };
+    expect(dependencyChanged({}, { overrides })).toBe(true);
+    expect(dependencyChanged({ overrides }, { overrides: { 'js-yaml@3': { argparse: '2.0.2' } } })).toBe(true);
+    expect(dependencyChanged({ overrides }, { overrides: { 'js-yaml@3': { argparse: '2.0.1' } } })).toBe(false);
+  });
 });
 
 describe('checkVersion', () => {
@@ -71,5 +79,30 @@ describe('checkVersion', () => {
   });
   test('a 的调整需要人工确认', () => {
     expect(checkVersion({ merging: true, base, current: v('1.0.0'), buildChanged: true }).ok).toBe(false);
+  });
+});
+
+describe('PA-14：合并方向', () => {
+  test('dev 的提交合并进 master 为发布；合并进 master 的其他提交与合并进 dev 为集成；其余为同步', () => {
+    expect(classifyMerge({ branch: 'master', mergeHead: 'd1', devHead: 'd1' })).toBe('release');
+    expect(classifyMerge({ branch: 'master', mergeHead: 'h1', devHead: 'd1' })).toBe('integrate');
+    expect(classifyMerge({ branch: 'dev', mergeHead: 't1', devHead: 'd1' })).toBe('integrate');
+    expect(classifyMerge({ branch: 'feat/x', mergeHead: 'd1', devHead: 'd1' })).toBe('sync');
+    expect(classifyMerge({ branch: 'master', mergeHead: 'd1', devHead: null })).toBe('integrate');
+  });
+  test('发布保持 dev 的版本：跨里程碑的发布通过，发布时误 bump 被拒绝', () => {
+    const release = { merging: true, base: v('0.1.11'), buildChanged: true, kind: 'release' as const, incoming: v('0.2.3') };
+    expect(checkVersion({ ...release, current: v('0.2.3') }).ok).toBe(true);
+    expect(checkVersion({ ...release, current: v('0.2.4') }).ok).toBe(false);
+    expect(checkVersion({ ...release, base: v('0.1.5'), incoming: v('0.1.11'), current: v('0.1.12') }).ok).toBe(false);
+  });
+  test('同步取两个父提交中较大的版本', () => {
+    const sync = { merging: true, buildChanged: true, kind: 'sync' as const };
+    expect(checkVersion({ ...sync, base: v('0.1.11'), incoming: v('0.2.2'), current: v('0.2.2') }).ok).toBe(true);
+    expect(checkVersion({ ...sync, base: v('0.2.2'), incoming: v('0.1.11'), current: v('0.2.2') }).ok).toBe(true);
+    expect(checkVersion({ ...sync, base: v('0.1.11'), incoming: v('0.2.2'), current: v('0.1.11') }).ok).toBe(false);
+  });
+  test('发布与同步缺少被合并提交的版本号时抛错', () => {
+    expect(() => checkVersion({ merging: true, base: v('0.1.0'), current: v('0.1.0'), buildChanged: false, kind: 'release' })).toThrow();
   });
 });

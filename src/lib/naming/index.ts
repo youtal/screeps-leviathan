@@ -1,5 +1,5 @@
 /**
- * 文件摘要：lib.naming，正常流程创建的 creep 与 spawn 的名称格式化与校验（设计见 docs/design/lib/naming.md，架构设计 9.2、11.3、11.5、11.6）。
+ * 文件摘要：lib.naming，正常流程创建的 creep 的名称格式化与校验（spawn 名称改为词库，M2 交付；设计见 docs/design/lib/naming.md，架构设计 9.2、11.3、11.5、11.6）。
  *
  * 所属位置：src/lib/naming/，lib 层的无状态纯函数。名称格式：
  *   <前缀>-<来源 shard>-<出生用途>-<目标 shard>-<出生 tick 的 base36>.<同 tick 序号的 base36>-<校验位>
@@ -22,7 +22,7 @@ export interface NamingKey {
 export interface NameFields {
   /** 来源 shard 名；私服没有 shard 时为 `x`。 */
   readonly source: string;
-  /** 出生用途：简短的恢复与观察提示；spawn 固定为 `spn`。 */
+  /** 出生用途：简短的恢复与观察提示。spawn 不使用签名名称，从词库取名（docs/design/lib/naming.md 第 4 节）。 */
   readonly purpose: string;
   /** 目标 shard 名；不跨 shard 时为 `x`。 */
   readonly target: string;

@@ -26,7 +26,7 @@ contracts 是各层共同依赖的接口层。kernel 通过上下文向模块注
 | `context.ts` | `ModuleId`、阶段钩子、实例钩子、`ProcessTable`、`ModuleContext`、`InstanceContext` | console、log、cpu、memory、mode |
 | `module.ts` | `ModuleManifest`、`ModuleDefinition` | context、cpu |
 | `boot.ts` | 项目标记、`BootPort`、`BootContext`、`BootDefinition` | context、memory、mode |
-| `settings.ts` | 各模块的使用者设置类型，命名为 `<模块名>Settings`，目前有 `LoggerSettings` | log |
+| `settings.ts` | 各模块的使用者设置类型，命名为 `<模块名>Settings`：`LoggerSettings`、`MemorySettings`（提交抽查数）、`ProfilerSettings`（实例计时） | log |
 
 **使用者设置**：`src/settings.ts`（架构 4.3）为每个需要使用者设置的模块导出一个常量 `<模块名>Settings`，类型定义在 `contracts/settings.ts` 的同名接口中；装配方读取后作为参数注入对应模块，模块自身不导入设置文件。新增模块的设置时，两处同时增加。
 
@@ -82,6 +82,7 @@ interface ProcessTable {
 - 模块在自己掌握的集合发生变化时显式增删实例，例如发现新 source、殖民地退役。kernel 不在每 tick 轮询实例清单。
 - 进程键为 `<模块 ID>:<实例键>`，由 kernel 拼接；实例键由模块从稳定事实派生，例如 `W1N1:<sourceId>`。global reset 后由模块在 `setup` 中重新添加。
 - 实例继承所属模块的层级和优先级，在桶内按优先级排列；同一模块的实例按添加顺序排列。
+- 模块与实例各自准入（[cpu](../kernel/cpu.md#31-准入单位)）。维护层的模块与实例按各自的进程键错峰，实例运行的 tick 模块自身的钩子不一定运行；实例不能依赖模块钩子在同一 tick 准备的数据。
 
 ## 3. 上下文
 
@@ -268,7 +269,7 @@ interface BootPort {
   softReset(): void;                          // 下一 tick 生效（5.5）；boot 钩子同 tick 抛错时登记作废
 }
 
-interface BootContext extends ModuleContext {
+interface BootContext extends Omit<ModuleContext, 'processes' | 'instance'> {
   readonly port: BootPort;                    // 只在 boot 阶段有效，其他阶段调用即报错
   readonly sys: Accessor<ProjectMarker>;
   setMode(view: BootModeView): void;
@@ -280,6 +281,7 @@ interface BootDefinition {
 ```
 
 - kernel 只接受一个 `BootDefinition`，由 app.boot 提供。它在每 tick 的 boot 阶段最先运行，其他模块的上下文中没有 `port`、`sys` 与 `setMode`。
+- boot 不经进程表调度，所以 `BootContext` 不含 `processes` 与 `instance`；`onDispose` 登记的清理函数在 kernel 销毁时调用，与模块一致。
 - 判定逻辑本身是纯函数 `assess(facts) → {mode, strength, evidence[]}`，属于 app.boot 的内部实现，不进入 contracts。
 - `initialize()` 与 `clearMemory()` 由 kernel 生成项目标记的初值（身份、shard、epoch、lastRun、release），指纹与模式为占位值，boot 在同一 tick 经 `sys` 写入。各操作的前置条件与失败语义见 [bootPort](../kernel/bootPort.md)。
 

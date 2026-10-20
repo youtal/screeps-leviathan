@@ -16,16 +16,16 @@ import type { Accessor, UnitSpec } from '@/contracts/memory';
 import type { BootModeView } from '@/contracts/mode';
 import type { Breakable, MemoryHost, ModuleRuntime } from '@/kernel/context';
 import type { CpuHost } from '@/kernel/cpu';
+import { KERNEL_OWNER } from '@/kernel/process';
 import type { SegmentsHost } from '@/kernel/segments';
-import { STATS_TOP, type StatsSnapshot } from '@/kernel/stats';
+import { STATS_MEMORY_TOP, STATS_TOP, type StatsSnapshot } from '@/kernel/stats';
 
 /** 一个模块的运维覆盖：暂停或运行。 */
 export type Switch = 'pause' | 'run';
 /** 启停标志分区：{ [模块 id]: 运维覆盖 }。 */
 export type Switches = { [id: string]: Switch };
 
-/** kernel 分区的 owner 与启停标志的分区名；owner 是保留模块 id（kernel.process 的 RESERVED_MODULE_IDS）。 */
-export const KERNEL_OWNER = 'kernel';
+/** 启停标志的分区名；分区的 owner 是保留模块 id KERNEL_OWNER（kernel.process）。 */
 export const SWITCHES_ID = 'switches';
 
 /** 启停标志分区的声明；Memory 要求同一身份始终使用同一 spec 对象，所以是模块级常量。 */
@@ -350,7 +350,8 @@ export const createKernelOps = (deps: KernelOpsDeps): KernelOps => ({
 });
 
 /**
- * @description 生成统计页的状态快照（stats 设计第 2 节）：平滑耗用最高的进程、熔断与暂停的模块、Memory 体积与待写页数。
+ * @description 生成统计页的状态快照（stats 设计第 2 节）：平滑耗用最高的进程、熔断与暂停的模块、Memory 体积
+ * （总量、各空间与体积最大的 owner）与待写页数。
  * 只在统计窗口写出时调用，成本为 O(进程数 × log)。
  * @param deps 运行记录、Memory、segments、版本号与模式。
  * @param deps.runtimes 运行记录。
@@ -371,7 +372,10 @@ export const buildStatsSnapshot = (deps: { readonly runtimes: readonly ModuleRun
   let memory: StatsSnapshot['memory'] = null;
   if (deps.memory.ready()) {
     const sizes = deps.memory.sizes();
-    memory = { total: sizes.total, spaces: sizes.spaces };
+    // owner 数随模块数增长，有界；只在写出时排序一次。
+    const owners = Object.keys(sizes.owners).map((owner) => [owner, sizes.owners[owner]] as const);
+    owners.sort((a, b) => b[1] - a[1]);
+    memory = { total: sizes.total, spaces: sizes.spaces, owners: owners.slice(0, STATS_MEMORY_TOP) };
   }
   return {
     release: deps.release, mode: deps.mode.mode, top: sampled.slice(0, STATS_TOP),

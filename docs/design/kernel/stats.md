@@ -17,6 +17,7 @@ M1 只采集 kernel 自身能观测到的指标。5.8 中按殖民地记录的�
 | 指标 | 来源 | 窗口内的聚合 |
 | --- | --- | --- |
 | 每 tick 总耗用 | `Game.cpu.getUsed()`，收尾前读取 | 平均、最大 |
+| kernel 收尾耗用 | Memory 维护之前与统计采集时两次读数之差，即 Memory 维护与提交的耗用 | 平均 |
 | 各层耗用 | [cpu](./cpu.md) 的本 tick 计量（不含 boot，它不参与准入与计量） | 平均 |
 | 预算 B、收尾预留 | cpu | 最后一个 tick 的值 |
 | 被准入与落选的进程数 | cpu | 合计 |
@@ -27,10 +28,11 @@ M1 只采集 kernel 自身能观测到的指标。5.8 中按殖民地记录的�
 | 熔断次数 | 运行记录 | 窗口内新增次数 |
 | 模式 | boot 发布的模式视图 | 写出时的值 |
 | 版本号 | 构建注入的 `release` | 写出时的值 |
-| Memory 体积 | `memory.sizes()` | 写出时的总量与各空间 |
+| Memory 体积 | `memory.sizes()` | 写出时的总量、各空间，以及体积最大的前 `STATS_MEMORY_TOP` 个 owner |
 | 待写的 segment 页数 | segments | 写出时的值 |
 
 - 标签与进程键都来自有限集合（contracts 第 4 节的约束），不含 tick、creep 名等无界字段。
+- kernel 收尾耗用与按 owner 的体积是 14.4 候选优化的观测依据（[memory](./memory.md#1-触发条件)），也用于 M2 校准 5.3 的 kernel 固定开销。
 - 保底循环是否接管由入口掌握，kernel 观测不到，所以不在统计页中。13.4 的"保底循环接管"告警由入口发出（[内核设计](./README.md#6-入口正常循环与保底循环)"接管通知"）。
 
 ## 3. 统计页
@@ -41,19 +43,20 @@ M1 只采集 kernel 自身能观测到的指标。5.8 中按殖民地记录的�
 
 ```json
 {"t":75012360,"n":20,"release":"0.1.10","mode":"NORMAL","health":{"ok":20,"degraded":0,"paused":0},
- "cpu":{"avg":3.1,"max":5.4,"b":21.5,"r":2.15,"tiers":{"survival":0.4,"economy":1.8,"maintenance":0.3,"planning":0}},
+ "cpu":{"avg":3.1,"max":5.4,"finish":0.35,"b":21.5,"r":2.15,"tiers":{"survival":0.4,"economy":1.8,"maintenance":0.3,"planning":0}},
  "admit":{"admitted":412,"skipped":3},"bucket":{"min":9800,"last":9820},
  "top":[["mining:W1N1:5bbc…",0.42]],"breakers":2,"down":["lab"],"paused":["market"],
- "memory":{"total":182044,"spaces":{"sys":512,"part":30211,"rooms":80110,"creeps":71211,"flags":0}},"segPending":0}
+ "memory":{"total":182044,"spaces":{"sys":512,"part":30211,"rooms":80110,"creeps":71211,"flags":0},
+  "owners":[["logistics",60120],["mining",41005]]},"segPending":0}
 ```
 
-- 数值保留两位小数，减小体积。`top` 为 `[进程键, 平滑耗用]` 数组，按耗用从高到低。
-- **体积**：M1 的正文在 2 KB 以内。提交返回 `too-large` 时，清空 `top`、把 `down` 与 `paused` 各截为前 10 项后重试一次，仍超限则放弃本窗口并告警（6.8 安全规则 4）。
+- 数值保留两位小数，减小体积。`top` 为 `[进程键, 平滑耗用]` 数组，按耗用从高到低；`memory.owners` 为 `[owner, 字符数]` 数组，按体积从大到小。
+- **体积**：M1 的正文在 2 KB 以内。提交返回 `too-large` 时，清空 `top`、把 `down` 与 `paused` 各截为前 10 项、`memory.owners` 截为前 3 项后重试一次，仍超限则放弃本窗口并告警（6.8 安全规则 4）。
 
 ## 4. 时机与成本
 
-- 每 tick 在收尾阶段累计：Memory 提交之后、segment 提交之前，读取 cpu 的本 tick 计量与 bucket，更新窗口内的几个数值，不分配对象。
-- 写出的 tick 额外拼装一次正文：排序取前 `STATS_TOP` 个进程，O(进程数 × log)；`JSON.stringify` 一个小对象。
+- 每 tick 在收尾阶段累计：Memory 提交之后、segment 提交之前，读取 cpu 的本 tick 计量与 bucket，更新窗口内的几个数值，不分配对象。kernel 收尾耗用需要在 Memory 维护之前多读一次 `Game.cpu.getUsed()`。
+- 写出的 tick 额外拼装一次正文：排序取前 `STATS_TOP` 个进程，O(进程数 × log)；按体积排序 owner，owner 数随模块数有界；`JSON.stringify` 一个小对象。
 - 暂停 tick 照常累计。Memory 为 empty 或加载失败时，Memory 体积按缺失写出（字段为 `null`）；模式取 boot 发布的视图，总是存在。
 - heap 状态只有当前窗口，global reset 与软重置后从新窗口开始；未写出的窗口丢失。
 
@@ -63,6 +66,7 @@ M1 只采集 kernel 自身能观测到的指标。5.8 中按殖民地记录的�
 | --- | --- | --- |
 | `STATS_INTERVAL` | 20 tick | 窗口长度与提交间隔 |
 | `STATS_TOP` | 20 | 写出的高耗用进程数 |
+| `STATS_MEMORY_TOP` | 10 | 写出的 Memory 体积最大的 owner 数 |
 
 ## 6. 接口与用法
 
@@ -77,7 +81,7 @@ interface StatsHost {
 }
 ```
 
-- `StatsTick` 为本 tick 的耗用、预算、各层耗用、准入计数、bucket 与健康状态；`StatsSnapshot` 为写出时的版本号、模式、高耗用进程、熔断与暂停的模块、Memory 体积与待写页数，由 lifecycle 只在写出时生成。
+- `StatsTick` 为本 tick 的耗用、kernel 收尾耗用、预算、各层耗用、准入计数、bucket 与健康状态；`StatsSnapshot` 为写出时的版本号、模式、高耗用进程、熔断与暂停的模块、Memory 体积（含体积最大的 owner）与待写页数，由 lifecycle 只在写出时生成。
 - 外部采集端读取第 50 页：页头 `o` 为 `stats`、`v` 为 1；正文是一行 JSON，字段见第 3 节。
 
 ## 7. 验证

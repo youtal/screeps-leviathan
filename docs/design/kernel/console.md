@@ -37,7 +37,7 @@ interface ModuleContext {
 }
 ```
 
-- 命名空间就是模块 id，所以 boot 注册的 `assess` 在控制台中写作 `boot.assess()`，与 11.9 一致。`BootContext` 继承 `ModuleContext`，同样取得 `console`。
+- 命名空间就是模块 id，所以 boot 注册的 `assess` 在控制台中写作 `boot.assess()`，与 11.9 一致。`BootContext` 继承 `ModuleContext` 中除进程表以外的能力，同样取得 `console`。
 - 实例上下文不提供 `console`：命令名必须取自有限集合，按实例注册会使全局命名空间随实例数增长。需要针对实例的命令，由模块注册一个以实例键为参数的命令。
 - 宿主侧（不进入 contracts）：`Kernel.console(namespace)` 为 app 层取得同样的注册器，app.ops 以 `ops` 为命名空间注册。
 

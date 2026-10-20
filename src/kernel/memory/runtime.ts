@@ -84,6 +84,11 @@ export interface Runtime {
   readonly options: MemoryOptions;
   /** { [JSON 编码的 space,parent,key 三元组]: 对应存储单元 }，编码消除分隔符歧义。 */
   readonly units: Map<string, Unit>;
+  /**
+   * { [根表中的单元包络对象]: 对应存储单元 }，与 units 同步增删。提交按根表结构遍历时以包络的对象身份取得单元，
+   * 不再为每个单元拼接三元组键（审计 PA-02）。包络对象在单元生命周期内不被替换（replace 只替换其 data），身份稳定。
+   */
+  readonly byRecord: Map<UnitRecord, Unit>;
   /** { [JSON 编码的 space,key 二元组]: 实体记录及切片表 }，维护游标直接遍历此表。 */
   readonly records: Map<string, EntityRecord>;
   /** 待编码的单元对象集合；重复写同一单元不会重复排队，成功提交或回收时移除。 */
@@ -221,9 +226,9 @@ export const createRuntime = (options: MemoryOptions): Runtime => {
   if (!options.signature || !Number.isSafeInteger(options.schema) || options.schema < 1
     || !Number.isSafeInteger(options.auditUnits ?? 0) || (options.auditUnits ?? 0) < 0) throw new TypeError('Memory 配置非法');
   const state: Runtime = {
-    // units: { [JSON(space,parent,key)]: 单元 }；records: { [JSON(space,key)]: 实体及其切片表 }。
-    // 两张索引跨 tick 保留；dirty 保存待提交单元，三者由 dispose 清空。
-    options: { ...options }, units: new Map(), records: new Map(), dirty: new Set(),
+    // units: { [JSON(space,parent,key)]: 单元 }；byRecord: { [单元包络对象]: 单元 }；records: { [JSON(space,key)]: 实体及其切片表 }。
+    // 三张索引跨 tick 保留；dirty 保存待提交单元，四者由 dispose 与 clear 清空。
+    options: { ...options }, units: new Map(), byRecord: new Map(), records: new Map(), dirty: new Set(),
     active: true, loaded: false, root: {}, structural: false, written: false, committing: false,
     sizes: { total: 0, spaces: { sys: 0, part: 0, rooms: 0, creeps: 0, flags: 0 }, owners: {} },
     /**
@@ -248,9 +253,12 @@ export const createRuntime = (options: MemoryOptions): Runtime => {
      */
     register(space, parent, key, record, dirty = false) {
       const id = unitId(space, parent, key);
-      const unit: Unit = { id, space, owner: space === 'part' ? parent : key, record,
+      // 键片段只在登记时转义一次，提交拼接时复用。
+      const unit: Unit = { id, owner: space === 'part' ? parent : key, record,
+        head: `${JSON.stringify(key)}:`, parentHead: `${JSON.stringify(parent)}:`,
         dirty: state.dirty, check: state.check, active: true, needsValidation: false, isolated: false };
       state.units.set(id, unit);
+      state.byRecord.set(record, unit);
       if (dirty) { state.dirty.add(unit); state.structural = true; }
       return unit;
     },
@@ -361,7 +369,7 @@ export const clear = (state: Runtime, marker: ProjectMarker): void => {
   const sys = copyJson(marker);
   // 加载失败时 load 可能已登记部分单元，这里一并撤销。
   for (const unit of state.units.values()) unit.active = false;
-  state.units.clear(); state.records.clear(); state.dirty.clear();
+  state.units.clear(); state.byRecord.clear(); state.records.clear(); state.dirty.clear();
   state.data = { sys, part: {}, rooms: {}, creeps: {}, flags: {} };
   state.root = { [state.options.namespace]: state.data };
   state.sysText = JSON.stringify(sys);

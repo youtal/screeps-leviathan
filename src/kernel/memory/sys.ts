@@ -39,7 +39,7 @@ export const sysAccessor = (state: Runtime): Accessor<ProjectMarker> => {
        */
       set: (value: Json) => { state.data!.sys = value as ProjectMarker; },
     });
-    state.sysUnit = { id: 'sys', space: 'sys', owner: 'sys', record, dirty: state.dirty, check: state.check,
+    state.sysUnit = { id: 'sys', owner: 'sys', record, head: '', parentHead: '', dirty: state.dirty, check: state.check,
       active: true, needsValidation: false, isolated: false };
   }
   return accessorFor<ProjectMarker>(state.sysUnit);

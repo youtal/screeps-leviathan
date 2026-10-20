@@ -6,6 +6,7 @@
  * 房间回收依据宿主提供的保护/观测事实，缺失则保留，不在持久层推断 colony 业务。
  */
 import type { EntitySpace, EntitySlices, Json, UnitSpec } from '@/contracts/memory';
+import { CORE_OWNER } from '@/kernel/process';
 import { accessorFor } from './accessor';
 import { checkKey } from './json';
 import { recordId, type Runtime, unitId } from './runtime';
@@ -40,7 +41,7 @@ export const createEntities = (state: Runtime) => {
    */
   const entities = (owner: string): EntitySpaces => {
     state.check(); checkKey(owner);
-    if (owner === 'core') throw new Error('core 切片不能通过私有接口取得');
+    if (owner === CORE_OWNER) throw new Error('core 切片不能通过私有接口取得');
     const cached = owners.get(owner);
     if (cached) return cached;
     /**
@@ -145,7 +146,7 @@ export const createEntities = (state: Runtime) => {
         const id = unitId(space, key, owner);
         const unit = state.units.get(id)!;
         // 先撤销旧能力并移出编码队列，再删根记录；同名重建会分配新单元，不复活旧访问器。
-        if (remove) { unit.active = false; state.dirty.delete(unit); state.units.delete(id); }
+        if (remove) { unit.active = false; state.dirty.delete(unit); state.units.delete(id); state.byRecord.delete(unit.record); }
         else {
           const declaration = declarations.get(JSON.stringify([space, owner]));
           // 未声明切片缺少迁移规则，原样保留；模块暂停不等于授权删除其数据。

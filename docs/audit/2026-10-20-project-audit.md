@@ -861,3 +861,74 @@ checkBoundaries({ root, srcRoot, files: {
 - **已核对事项**：原"版本工具的规则与 README 的版本号规则一致"不成立（check 的问题见 PA-14、PA-18），改为只就 bump 规则作出结论；新增部署 API、平台语义与版本历史三项。
 - **M1 完成度**：platformFakes 改为部分交付。
 - **验证、待用户决定、附录 B**：增加修订时的检查、PA-13 至 PA-21 的建议，以及复现 R6–R11。
+
+## 整改与复核记录（2026-10-21）
+
+### 范围与授权
+
+- **分支**：`fix/project-audit`，从 `dev` 的 `1808bea`（0.1.12）拉出。
+- **授权**：用户要求按本报告的建议方案关闭问题，并对需要单独授权的四类事项全部给出指令：
+  - 章程修订：PA-11 的进度陈述；PA-13 的 `rollback` 说明；PA-14 第 176 行的热修复表述；PA-18 写明 `overrides` 属于依赖声明。
+  - contracts 变更：PA-04 的两个设置类型；PA-05 收窄 `BootContext`。
+  - 新增功能：PA-20 的分支删除命令。
+  - 范围外清理：PA-12 的 `.gitignore` 旧规则与遗留 worktree；PA-21 的 JSDoc 与摘要路径（不引入格式化工具）。
+- **PA-15**：用户决定推迟到 M2 实现接手流程时处理。用户另外提出 spawn 名称词库的设计，已写成提案 [spawn 名称词库](../proposal/2026-10-20-spawn-name-lexicon.md)，待确认。
+- **对原报告的更正**：PA-15 原写"第 6 步 app.boot 设计的输入"不够准确。按架构 14.3，TAKEOVER 与 SELF_ADOPT 是 M2 的交付物，11.6 的成熟度为"定稿 · M2"，签名比例 σ 在 M2 才被计算。
+
+### 逐项处置
+
+| 编号 | 处置 | 主要改动 | 回归测试 | 反向验证 |
+| --- | --- | --- | --- | --- |
+| PA-01 | 方案 A | `src/kernel/lifecycle/index.ts` 的 `runPhases`：模块不可运行时跳过它的实例；可运行时，模块钩子与实例钩子各按自己的判定执行 | `lifecycle.test.ts`"PA-01"：维护层模块与错峰实例 40 tick 内各运行 4 次；默认暂停时都不运行 | 撤 `lifecycle/index.ts` 后失败 |
+| PA-02 | 方案 A | `Unit` 增加登记时转义的键片段 `head`、`parentHead`；`Runtime.byRecord` 以包络对象身份取得单元；`commit.ts` 改为普通循环与字符串累加 | `simplification.test.ts`"PA-02"：一次提交的 `JSON.stringify` 次数与单元总数无关，且拼接结果与全量编码一致 | 撤 `commit.ts` 后失败。n 个 creep 切片、1 个脏单元时，修复前 3n + 7 次（n = 100 时 307 次），修复后 7 次（n = 100 与 1000 相同） |
+| PA-03 | 方案 A | lifecycle 在 Memory 维护之前读一次 CPU，统计页写出 `cpu.finish`；统计快照写出 `memory.owners`（体积最大的前 10 个 owner） | `ops.test.ts`"PA-03"；`stats.test.ts` 的字段与截短 | 撤 `lifecycle/index.ts`、`lifecycle/ops.ts`、`stats/index.ts` 后失败 |
+| PA-04 | 方案 A | `contracts/settings.ts` 增加 `MemorySettings`、`ProfilerSettings`；`src/settings.ts` 增加 `memorySettings`、`profilerSettings`（默认关闭），由装配注入；`InstanceRecord.measure` 直接持有计时器 | `assembly.test.ts`"PA-04"；`lifecycle.test.ts`"PA-04"（计时标签，以及执行期间不再查找实例上下文） | 撤 `assembly/index.ts` 后装配测试失败；撤 `lifecycle/index.ts` 与 `context/index.ts` 后查找计数断言失败 |
+| PA-05 | 方案 A | `BootContext extends Omit<ModuleContext, 'processes' \| 'instance'>`；lifecycle 在 boot 上下文中把这两项遮蔽为 `undefined`；`dispose` 调用 boot 的清理函数 | `lifecycle.test.ts`"PA-05" | 撤 `lifecycle/index.ts` 后失败 |
+| PA-06 | 方案 A | `planModules` 先只按 `requires` 检测依赖环；`optional` 只等待会排入的模块；只由 `optional` 构成的环，在等待环上按"层级 → priority → id"取最先者打破 | `process.test.ts` 两项"PA-06" | 撤 `process/index.ts` 后两项失败 |
+| PA-07 | 建议 | 删除控制台命令表项的 `get`、`set` 与 `Unit.space`；`owners` 随 PA-03 写入统计；profiler 快照与 `LogRoot.defaults()` 保留 | 既有测试 | 只删除死数据，无行为变化，不适用 |
+| PA-08 | 前四项 | `kernel/process` 导出 `BOOT_ID`、`CORE_OWNER`、`KERNEL_OWNER`、`OPS_NAMESPACE` 并组成保留表，memory、lifecycle、app.ops 从这里导入；模式表改为 `satisfies Record<BootMode, true>`；app.ops 导入 `LOG_LEVELS`；errorMapper 的收尾预留使用 kernel.cpu 的常量，并在设计中写明基数 | 既有测试 | 无行为变化。`satisfies` 约束以一张缺项的模式表编译失败验证（临时文件，已删除） |
+| PA-09 | 补测试 | — | `lifecycle.test.ts`"PA-09"：`remove`、`has`、`instance` | 补测试项，原实现即通过 |
+| PA-10 | 第 1–4 条 | 装配设计移到新文档 [app/assembly.md](../design/app/assembly.md) 并修正过时陈述；删除内核设计第 6 节的历史记录句；修正 `ops.status(id)` 的说明；修复 cpu 设计第 3.3 节的表格 | 文档核对 | 不适用 |
+| PA-11 | 章程修订 | README 第 5 行改为不随进度过时的写法，"开发命令"加入 `npm run test:scenarios`；架构的状态改为"定稿"，1.5 节同步 `kernel/memory.md` 的说明 | 文档核对 | 不适用 |
+| PA-12 | 部分 | `.gitignore` 删除 `test/integration` 两条、`server`、`.venv/`、`.tscache/`、`.nyc_output`（这些路径在本机均不存在），`coverage` 作为 Jest 覆盖率的默认目录保留；移除 4 个干净的遗留 worktree，分支保留 | 文件系统与 Git 核对 | 不适用 |
+| PA-13 | 方案 A | 部署工具在本机 `.deploy-history.json` 按账户记录切换；`rollback` 回放生效栈，回到上一个生效分支；没有记录或记录与服务器不一致时拒绝 | `deploy.test.ts` 的 `rollbackTarget` 与"部署历史" | 保留新签名、把选择逻辑换回按版本号后，两个 PA-13 场景失败 |
+| PA-14 | 方案 A | `classifyMerge` 区分发布、集成、同步；`checkVersion` 对发布要求等于 dev 的版本，对同步要求等于两边较大者 | `version.test.ts`"PA-14"；临时 Git 仓库端到端复跑 R7：跨里程碑发布通过，发布时误 bump 被拒绝，同步合并通过 | 撤 `version/lib.ts` 后四项失败 |
+| PA-16 | 方案 A | `beginTick` 在更新事实之前失败（tick 倒退、接管过晚）时，本 tick 跳过 setup、业务阶段、维护与提交，计为 degraded；加载失败仍按原路径处理，boot 清空后照常提交 | `lifecycle.test.ts`"PA-16" | 撤 `lifecycle/index.ts` 后失败 |
+| PA-17 | 方案 A | 告警越线时只告警一次，回落到 1.7 Mi 字符以下才重新告警；lifecycle 对连续的提交失败只记录一次，恢复时记录一次 | `memory/lifecycle.test.ts`"PA-17"；`lifecycle.test.ts`"PA-17" | 撤 `commit.ts` 或 `lifecycle/index.ts` 后分别失败 |
+| PA-18 | 方案 A | `git diff --name-only --no-renames HEAD`；`dependencyChanged` 比较 `overrides`；README 写明依赖声明的范围 | `version.test.ts`"PA-18"；端到端复跑 R10：文件移出 `src/` 与只改 `overrides` 都要求递增 | 撤 `version/lib.ts` 后失败；`--no-renames` 以端到端修复前后对比验证 |
+| PA-19 | 方案 A | 边界检查新增 `SETTINGS_IMPORTER`，app 层只允许 `app/assembly/` 导入 settings | `boundary.test.ts` 的 settings 一项增加 `app/ops` 违规 | 撤 `check.ts` 后失败 |
+| PA-20 | 新增功能 | `npm run deploy -- delete`：拒绝删除不存在、生效、模拟分支与当前的回滚目标，删除后回读确认；API 客户端增加 `deleteBranch` | `deploy.test.ts` 的 `deleteBranchProblem`、参数解析与请求体 | 新增功能，不适用 |
+| PA-21 | 补齐 | 装配的 `loadMap`、`remaining`、`format`，lifecycle 测试宿主的选项方法，场景辅助模块的 `allowed`，`fallback.ts` 的 `filter` 与 `roomCallback` 补 JSDoc；场景辅助模块摘要的路径改为 `test/scenarios/scenarios/*.scenario.js` | 类型检查 | 不适用 |
+
+### 设计与章程的同步
+
+- 内核设计：第 2 节（beginTick 失败、commit 失败）、第 3.1 节（依赖环）、第 3.2 节（实例按自身准入运行）、第 4 节（BootContext）、第 6 节（健康状态、删除历史记录句）；第 7 节移出。
+- contracts 设计：动态实例的准入说明、`BootContext` 的定义与说明、`settings.ts` 的类型列表。
+- memory、stats、profiler、console、errorMapper、cpu、ops 设计按上表同步；新增 [app/assembly.md](../design/app/assembly.md)，并更新设计索引。
+- README：部署（`rollback` 说明、`delete`、部署历史与分支上限）、版本号（热修复表述、构建产物的依赖声明、按合并方向校验）、开发命令与项目状态。
+- architecture.md：状态与 1.5 节的说明。
+
+### 验证
+
+| 检查 | 结果 |
+| --- | --- |
+| `npm run check` | 通过；33 个测试套件，421 项测试，构建成功 |
+| `git diff --check`（含新增文件） | 通过 |
+| 反向验证 | 见上表；每项撤掉修复后对应测试失败，恢复后通过 |
+| 版本工具端到端 | 以临时 Git 仓库复跑 R7、R10，结果见上表 |
+| 文档链接与锚点 | README、AGENTS、设计、提案与本报告共 244 个链接，只有一处不可解析：本报告 PA-10 原文指向的内核设计第 7 节已移到 [app/assembly.md](../design/app/assembly.md)。原审计记录按基线阅读，不改写 |
+| `npm run test:scenarios` | 通过；fallback-takeover、kernel-smoke、memory-takeover 3 个场景全部通过。本次改动了 lifecycle 流水线与 Memory 提交的拼接，属于跨 tick 状态，所以运行；场景不覆盖维护层实例与 tick 倒退，这两项以单元测试为据 |
+
+### 遗留与限制
+
+- **PA-15**：推迟到 M2。spawn 名称词库提案已于 2026-10-21 采纳，架构 9.2 与 lib.naming 设计已更新；spawn 不再带签名后，11.6 的 σ 口径须在 M2 设计接手流程时修订。
+- **PA-17**：日志已去重，但持续超限时，每 tick 仍要拼装一次约 2 Mi 字符的候选文本，才能判断体积是否回落。经用户授权决定接受：持续超限是已经告警的故障状态，平台此时本来就拒绝写入；增量计算体积会显著增加提交逻辑的复杂度，目前没有运行数据支撑这笔代价。
+- **PA-12**：引号风格没有统一。
+- **PA-03 方案 B**（按分区记录脏写频率）按建议留待 M2 评估块级优化时再议。
+
+### 用户决定后的补充（2026-10-21）
+
+- **词库提案**：批准，第 4 节三项按建议采纳。已更新架构 9.2、[lib.naming 设计](../design/lib/naming.md)第 4 节、设计索引与 hash 设计中的相关表述，以及 `src/lib/naming/index.ts` 的注释。
+- **PA-12**：`../screeps-leviathan-tsconfig-alias` 的 worktree 按用户指令以 `git worktree remove --force` 移除，其中未提交的 `tsconfig.json` 修改（`@/*` 路径别名，dev 已有等价配置）随之丢弃；分支 `chore/tsconfig-alias` 保留。
+- **PA-04**：按用户指令修订架构 6.3 与 15.1，把"开发构建"改为使用者设置中的开关（`memorySettings.auditUnits`，默认关闭）。
+- **合并**：由用户授权决定，整改提交后合并进 `dev`，版本号按规则递增为 0.1.13，不推送。

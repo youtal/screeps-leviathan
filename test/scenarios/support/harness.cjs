@@ -1,7 +1,7 @@
 /**
  * 文件摘要：私服场景共用的产物装载、世界生命周期与运行期断言，只在测试镜像中运行。
  *
- * 所属位置：test/scenarios/support/，由 test/scenarios/*.scenario.cjs 使用；框架为 screeps-integration-tests。
+ * 所属位置：test/scenarios/support/，由 test/scenarios/scenarios/*.scenario.js 使用；框架为 screeps-integration-tests。
  * 主要能力：
  * - leviathanBot：用宿主端生成的模块表（main 与 main.js.map，见 scripts/scenarios/cli.ts）组成 bot 规格，
  *   并在 main 末尾追加调用计数探针（只写 global heap，不写 Memory）；
@@ -64,6 +64,11 @@ const leviathanBot = (username, rooms) => ({ username, rooms, modules: loadModul
  */
 const assertRuntimeClean = (report, options = {}) => {
   const allow = options.allow ?? [];
+  /**
+   * @description 判断一行错误输出是否在允许列表中。
+   * @param {string} line 错误行。
+   * @returns {boolean} 匹配任一允许的模式时为 true。
+   */
   const allowed = (line) => allow.some((pattern) => pattern.test(line));
   assertNoErrors({ ...report, errors: report.errors.filter((line) => !allowed(line)) });
   const bad = report.logs.filter((entry) => {

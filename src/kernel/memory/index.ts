@@ -149,7 +149,7 @@ export const createMemory = (options: MemoryOptions) => {
       state.active = false;
       for (const unit of state.units.values()) unit.active = false;
       if (state.sysUnit) state.sysUnit.active = false;
-      state.units.clear(); state.records.clear(); state.dirty.clear();
+      state.units.clear(); state.byRecord.clear(); state.records.clear(); state.dirty.clear();
       state.root = {}; state.data = undefined; state.text = undefined;
     },
   };

@@ -7,6 +7,8 @@
  * - b：取当前里程碑编号，进入下一个里程碑时加 1，c 归零；
  * - a：M1–M7 期间为 0。
  * 任务分支上的普通提交、发布到 master 的合并、不改变构建产物的合并都不改版本号。
+ * 合并按方向区分规则（审计 PA-14）：发布（dev 合并进 master）保持 dev 的版本；集成（合并进 dev 的任务、
+ * 合并进 master 的热修复）按上述递增规则；同步（合并进其他分支）取两个父提交中较大的版本。
  * 本文件不读写文件、不调用 Git，所有输入由调用方提供。
  */
 
@@ -98,17 +100,21 @@ export const touchesBuildPaths = (changedFiles: readonly string[]): boolean =>
     BUILD_PATHS.some((path) => (path.endsWith('/') ? file.startsWith(path) : file === path)),
   );
 
-/** package.json 中的依赖声明；只比较 dependencies 与 devDependencies。 */
+/**
+ * package.json 中的依赖声明：dependencies、devDependencies 与 overrides。overrides 改变实际安装的依赖版本，
+ * 同样视为依赖声明（README"构建产物"，审计 PA-18）；它的值可以是嵌套对象，按 JSON 文本比较。
+ */
 export interface DependencyFields {
   readonly dependencies?: Readonly<Record<string, string>>;
   readonly devDependencies?: Readonly<Record<string, string>>;
+  readonly overrides?: Readonly<Record<string, unknown>>;
 }
 
 /**
  * @description 判断两份 package.json 的依赖声明是否不同。依赖变化会改变构建工具或打包内容，按影响构建产物处理。
  * @param before 基准的依赖声明。
  * @param after 当前的依赖声明。
- * @returns dependencies 或 devDependencies 任一不同时为 true。
+ * @returns dependencies、devDependencies 或 overrides 任一不同时为 true。
  */
 export const dependencyChanged = (before: DependencyFields, after: DependencyFields): boolean => {
   /**
@@ -122,24 +128,48 @@ export const dependencyChanged = (before: DependencyFields, after: DependencyFie
     const yKeys = Object.keys(y ?? {});
     return xKeys.length === yKeys.length && xKeys.every((key) => (x ?? {})[key] === (y ?? {})[key]);
   };
-  return !same(before.dependencies, after.dependencies) || !same(before.devDependencies, after.devDependencies);
+  return !same(before.dependencies, after.dependencies) || !same(before.devDependencies, after.devDependencies)
+    || JSON.stringify(before.overrides ?? {}) !== JSON.stringify(after.overrides ?? {});
+};
+
+/** 合并的方向：发布（dev → master）、集成（任务 → dev，热修复 → master）、同步（合并进其他分支）。 */
+export type MergeKind = 'release' | 'integrate' | 'sync';
+
+/**
+ * @description 按目标分支与被合并的提交判断合并方向（README"Git 分支与版本"的分支模型）。
+ * @param input 判断依据。
+ * @param input.branch 当前分支名，即合并目标。
+ * @param input.mergeHead 被合并的提交（MERGE_HEAD）。
+ * @param input.devHead dev 分支当前指向的提交；仓库没有 dev 分支时为 null。
+ * @returns 合并方向。
+ */
+export const classifyMerge = (input: { readonly branch: string; readonly mergeHead: string; readonly devHead: string | null }): MergeKind => {
+  if (input.branch === 'master' && input.devHead !== null && input.mergeHead === input.devHead) return 'release';
+  if (input.branch === 'master' || input.branch === 'dev') return 'integrate';
+  return 'sync';
 };
 
 /**
- * @description 校验一次提交中的版本号是否符合规则：普通提交与不改变构建产物的合并保持版本号；
- * 改变构建产物的合并须在同一里程碑内增大 c，或进入下一里程碑时 b 加 1、c 归零；a 的变化须人工确认。
+ * @description 校验一次提交中的版本号是否符合规则：普通提交与不改变构建产物的集成合并保持版本号；
+ * 改变构建产物的集成合并须在同一里程碑内增大 c，或进入下一里程碑时 b 加 1、c 归零；a 的变化须人工确认。
+ * 发布合并保持被合并的 dev 的版本；同步合并取两个父提交中较大的版本。
  * @param input 校验依据。
  * @param input.merging 是否正在完成一次合并（存在 MERGE_HEAD）。
  * @param input.base 合并目标分支（即 HEAD）上的版本号。
  * @param input.current 工作区中的版本号。
  * @param input.buildChanged 相对 HEAD 是否改变了构建产物。
+ * @param input.kind 合并方向，默认 integrate；不在合并时忽略。
+ * @param input.incoming 被合并提交（MERGE_HEAD）上的版本号；发布与同步合并必须给出。
  * @returns ok 表示是否符合规则，message 说明结论或违反的规则。
+ * @throws {Error} 发布或同步合并缺少 incoming。
  */
 export const checkVersion = (input: {
   readonly merging: boolean;
   readonly base: Version;
   readonly current: Version;
   readonly buildChanged: boolean;
+  readonly kind?: MergeKind;
+  readonly incoming?: Version;
 }): CheckResult => {
   const { merging, base, current, buildChanged } = input;
   const order = compareVersion(current, base);
@@ -150,6 +180,16 @@ export const checkVersion = (input: {
     return order === 0
       ? { ok: true, message: `普通提交，版本号保持 ${to}` }
       : { ok: false, message: `普通提交不改版本号：应保持 ${from}，当前为 ${to}` };
+  }
+  const kind = input.kind ?? 'integrate';
+  if (kind !== 'integrate') {
+    if (!input.incoming) throw new Error('发布或同步合并须给出被合并提交的版本号');
+    // 发布保持 dev 的版本（README：发布到 master 的合并不改版本号）；同步取两边较大者，避免版本号倒退。
+    const expected = kind === 'release' || compareVersion(input.incoming, base) > 0 ? input.incoming : base;
+    const label = kind === 'release' ? '发布合并' : '同步合并';
+    return compareVersion(current, expected) === 0
+      ? { ok: true, message: `${label}，版本号为 ${to}` }
+      : { ok: false, message: `${label}的版本号应为 ${formatVersion(expected)}，当前为 ${to}` };
   }
   if (!buildChanged) {
     return order === 0

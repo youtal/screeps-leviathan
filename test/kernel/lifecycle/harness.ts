@@ -28,19 +28,47 @@ export const READY_MEMORY = JSON.stringify({ leviathan: { sys: marker, part: {},
  * @param options.interShard InterShardMemory 所在的对象，默认不提供 InterShardMemory（与私服一致）。
  * @param options.creeps 每 tick 的 creep 名称集合，默认为空。
  * @param options.game 覆盖默认 GamePort 的部分方法（CPU 读数、bucket、额度等）。
+ * @param options.profileInstances 是否对实例钩子单独计时，默认 false。
  * @returns kernel（rebuild 后为新实例）、日志行、平台替身、Memory 全局目标、控制台全局目标 globals、日志根对象、
- * 按 tick 驱动的函数与模拟入口重建的 rebuild。
+ * 计时器 profiler、按 tick 驱动的函数与模拟入口重建的 rebuild。
  */
 export const kernelHarness = (options: { modules: ModuleDefinition[]; boot?: BootDefinition; memory?: string;
-  segments?: Record<number, string>; interShard?: object; creeps?: () => ReadonlySet<string>; game?: Partial<GamePort> }) => {
+  segments?: Record<number, string>; interShard?: object; creeps?: () => ReadonlySet<string>; game?: Partial<GamePort>;
+  profileInstances?: boolean }) => {
   const target = {} as { Memory: unknown; RawMemory: RawMemory };
   // 控制台命名空间的安装目标，跨 rebuild 共用，与游戏中的 globalThis 一致。
   const globals: Record<string, unknown> = {};
   const platform = createMemoryPlatform({ target, memory: options.memory ?? READY_MEMORY, segments: options.segments });
   const lines: string[] = [];
   let time = 0;
-  const logRoot = createLogRoot({ sink: (l) => lines.push(l), time: () => time, format: (e) => String(e),
-    levels: { debug: false, info: true, success: true, warn: true, error: true } });
+  // 跨 rebuild 共用的计时器，供测试读取快照。
+  const profiler = createProfiler({
+    /**
+     * @description 计时器的 CPU 读数，测试中恒为 0。
+     * @returns 0。
+     */
+    cpuUsed: () => 0,
+  });
+  const logRoot = createLogRoot({
+    /**
+     * @description 把日志行记入 lines。
+     * @param l 日志行。
+     * @returns 新的行数。
+     */
+    sink: (l) => lines.push(l),
+    /**
+     * @description 日志前缀中的 tick。
+     * @returns 宿主的当前 tick。
+     */
+    time: () => time,
+    /**
+     * @description 异常格式化：直接转为字符串。
+     * @param e 任意异常值。
+     * @returns 字符串。
+     */
+    format: (e) => String(e),
+    levels: { debug: false, info: true, success: true, warn: true, error: true },
+  });
   /**
    * @description 用同一平台与选项创建 kernel 实例。
    * @returns 新的 kernel。
@@ -61,11 +89,67 @@ export const kernelHarness = (options: { modules: ModuleDefinition[]; boot?: Boo
       }),
     },
     memory: { namespace: 'leviathan', signature: 'leviathan', schema: 1,
-      platform: { target, read: () => target.RawMemory.get(), write: (v) => target.RawMemory.set(v), warn: () => undefined } },
-    game: { time: () => time, cpuUsed: () => 0, tickLimit: () => 500, limit: () => 20, bucket: () => 10000,
-      shard: () => 'x', creepNames: options.creeps ?? (() => new Set()), flagNames: () => new Set(), ...options.game },
+      platform: {
+        target,
+        /**
+         * @description 读取平台替身的原始文本。
+         * @returns 当前 tick 的 RawMemory 文本。
+         */
+        read: () => target.RawMemory.get(),
+        /**
+         * @description 写入平台替身。
+         * @param v 完整根文本。
+         * @returns 无返回值。
+         */
+        write: (v) => target.RawMemory.set(v),
+        /**
+         * @description 容量告警，测试中丢弃。
+         * @returns 无返回值。
+         */
+        warn: () => undefined,
+      } },
+    game: {
+      /**
+       * @description 当前 tick。
+       * @returns 宿主的 tick 计数。
+       */
+      time: () => time,
+      /**
+       * @description 已用 CPU，默认恒为 0。
+       * @returns 0。
+       */
+      cpuUsed: () => 0,
+      /**
+       * @description 本 tick 的 CPU 上限。
+       * @returns 500。
+       */
+      tickLimit: () => 500,
+      /**
+       * @description 每 tick 的 CPU 额度。
+       * @returns 20。
+       */
+      limit: () => 20,
+      /**
+       * @description bucket，默认充满。
+       * @returns 10000。
+       */
+      bucket: () => 10000,
+      /**
+       * @description 身份用的 shard 名，与私服一致为 x。
+       * @returns 'x'。
+       */
+      shard: () => 'x',
+      creepNames: options.creeps ?? (() => new Set()),
+      /**
+       * @description 本 tick 的 flag 名称，默认为空。
+       * @returns 空集合。
+       */
+      flagNames: () => new Set(),
+      ...options.game,
+    },
     logRoot,
-    profiler: createProfiler({ cpuUsed: () => 0 }),
+    profiler,
+    profileInstances: options.profileInstances,
     release: 'test-release',
     segments: {
       /**
@@ -96,7 +180,7 @@ export const kernelHarness = (options: { modules: ModuleDefinition[]; boot?: Boo
     if (result.error !== undefined) throw result.error;
     return health;
   };
-  return { lines, platform, target, globals, logRoot, tick,
+  return { lines, platform, target, globals, logRoot, profiler, tick,
     /**
      * @description 当前 kernel 实例。
      * @returns kernel。

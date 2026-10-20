@@ -92,8 +92,11 @@ export interface BootPort {
   softReset(): void;
 }
 
-/** app.boot 的上下文：在模块上下文之外增加特权端口、项目标记与模式写入。 */
-export interface BootContext extends ModuleContext {
+/**
+ * app.boot 的上下文：在模块上下文之外增加特权端口、项目标记与模式写入。boot 不经进程表调度，所以不提供
+ * processes 与 instance；onDispose 登记的清理函数在 kernel 销毁时调用，与模块一致。
+ */
+export interface BootContext extends Omit<ModuleContext, "processes" | "instance"> {
   readonly port: BootPort;
   readonly sys: Accessor<ProjectMarker>;
   /**

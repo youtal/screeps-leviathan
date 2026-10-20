@@ -19,6 +19,7 @@
 | --- | --- | --- |
 | — | [architecture.md](./architecture.md) | 总体架构 |
 | — | [fallback.md](./fallback.md) | 独立保底循环（`src/fallback.ts`） |
+| app | [app/assembly.md](./app/assembly.md) | 装配：模块清单、boot、Memory 身份、平台注入与使用者设置 |
 | app | [app/config.md](./app/config.md) | 劳动力配置、身体模板、孵化优先级与运营参数 |
 | app | [app/ops.md](./app/ops.md) | 运维命令与模块启停标志 |
 | contracts | [contracts/README.md](./contracts/README.md) | 注入接口与跨模块协议 |
@@ -33,7 +34,7 @@
 | kernel | [kernel/bootPort.md](./kernel/bootPort.md) | boot 特权端口：概要、备份、初始化、清空、软重置 |
 | kernel | [kernel/intershard.md](./kernel/intershard.md) | InterShardMemory 封装：M1 的特性检测与本 shard 清空 |
 | lib | [lib/hash.md](./lib/hash.md) | 稳定字符串哈希（校验位、错峰、分片） |
-| lib | [lib/naming.md](./lib/naming.md) | creep 与 spawn 的名称格式化与校验 |
+| lib | [lib/naming.md](./lib/naming.md) | creep 名称的格式化与校验，spawn 名称词库 |
 | lib | [lib/geometry.md](./lib/geometry.md) | 房间坐标、坐标打包、方向与距离 |
 | world | [world/market.md](./world/market.md) | 物价模型 |
 | colony | [colony/inventory.md](./colony/inventory.md) | 资源库存控制 |

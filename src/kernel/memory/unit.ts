@@ -13,10 +13,15 @@ export type UnitRecord = { version: number; data: Json };
 /** 不持久化的单元控制块；record 与根表共享引用，encoded 仅由成功提交发布。 */
 export interface Unit {
   readonly id: string;
-  /** 所在空间；'sys' 只用于项目标记单元，它不在单元索引中，由提交单独处理（sys.ts）。 */
-  readonly space: Space | 'sys';
   readonly owner: string;
   readonly record: UnitRecord;
+  /**
+   * 单元在所属表中的键片段 `"<键>":`（已 JSON 转义），登记时计算一次，提交拼接根文本时直接复用（审计 PA-02）。
+   * 键在单元生命周期内不变；项目标记单元不参与拼接，为空串。
+   */
+  readonly head: string;
+  /** 所属表在空间中的键片段 `"<分区 owner 或实体名>":`，同一表的单元各持一份；项目标记单元为空串。 */
+  readonly parentHead: string;
   readonly dirty: Set<Unit>;
   readonly check: () => void;
   active: boolean;

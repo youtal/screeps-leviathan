@@ -9,6 +9,7 @@
  */
 import type { ProjectMarker, RawMemorySummary } from '@/contracts/boot';
 import type { DeepReadonly } from '@/contracts/memory';
+import type { BootMode } from '@/contracts/mode';
 import { copyJson, isObject } from './json';
 
 /** 项目标记校验所需的装配身份。 */
@@ -20,9 +21,15 @@ export interface MarkerIdentity {
 /** 11.3 中 EMPTY 允许出现的引擎默认根键：值都是没有键的对象时，Memory 仍视为空。 */
 const ENGINE_KEYS: ReadonlySet<string> = new Set(['creeps', 'spawns', 'rooms', 'flags', 'powerCreeps']);
 
-/** 合法的运营模式，与 contracts 的 BootMode 一致。 */
-const MODES: ReadonlySet<unknown> = new Set(['NORMAL', 'FRESH_START', 'RECOVERY', 'TAKEOVER', 'SELF_ADOPT',
-  'SHARD_SEED', 'STRANDED', 'DORMANT', 'AMBIGUOUS']);
+/**
+ * 合法的运营模式。以 BootMode 为键的对象加 satisfies 约束：contracts 增删模式而此处未同步时编译失败（审计 PA-08）。
+ */
+const MODE_TABLE = {
+  NORMAL: true, FRESH_START: true, RECOVERY: true, TAKEOVER: true, SELF_ADOPT: true,
+  SHARD_SEED: true, STRANDED: true, DORMANT: true, AMBIGUOUS: true,
+} as const satisfies Record<BootMode, true>;
+/** 运行时查表用的模式集合，由 MODE_TABLE 的键生成。 */
+const MODES: ReadonlySet<unknown> = new Set(Object.keys(MODE_TABLE));
 
 /** 原始文本无法读取或无法解析为对象时的概要；冻结后共享，不含任何可变状态。 */
 export const UNPARSED_SUMMARY: RawMemorySummary = Object.freeze({ empty: false, parsed: false,

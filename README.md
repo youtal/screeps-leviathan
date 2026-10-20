@@ -2,7 +2,7 @@
 
 Screeps Leviathan 是一个使用 TypeScript 开发、能长期无人值守运营的 Screeps AI。
 
-**当前状态**：工程已初始化，构建、类型检查、单元测试与部署工具链已建立；私服场景测试待建立。开发阶段与里程碑见[设计文档](./docs/design/README.md)。
+开发阶段与里程碑见[设计文档](./docs/design/README.md)，各阶段的交付与验证记录见[审计报告与里程碑审查](./docs/audit/README.md)。
 
 ## 开发命令
 
@@ -14,9 +14,10 @@ npm run typecheck     # 类型检查（游戏代码与测试代码分别检查�
 npm test              # 单元测试
 npm run build         # 构建 dist/main.js 与 source map
 npm run check         # 依次运行以上三项
+npm run test:scenarios  # 私服场景测试（需要 Docker；-- --only <场景名> 只运行单个场景）
 ```
 
-命令以 `package.json` 的 `scripts` 为准。私服场景测试命令建立后在本节补充。
+命令以 `package.json` 的 `scripts` 为准。
 
 ### 部署
 
@@ -28,12 +29,15 @@ npm run deploy -- branches --account <账户>                   # 列出该账�
 npm run deploy -- upload   --account <账户> [--branch <分支>]  # 构建、上传并回读校验
 npm run deploy -- upload   --account <账户> --activate         # 上传后把生效分支切换到该分支
 npm run deploy -- activate --account <账户> --branch <分支>    # 切换生效分支
-npm run deploy -- rollback --account <账户>                   # 把生效分支切回上一个版本分支
+npm run deploy -- rollback --account <账户>                   # 把生效分支切回上一个生效分支
+npm run deploy -- delete   --account <账户> --branch <分支>    # 删除不再需要的分支
 ```
 
 - 未指定 `--branch` 时上传到版本分支 `v<版本号>`。版本分支是回滚的依据，只能在工作区干净且 HEAD 带同名标签（即 `master` 上的发布提交）时上传；开发调试用 `--branch` 指定其他分支名。
 - 覆盖当前生效分支会立即改变线上运行的代码，只在同时给出 `--activate` 时允许。
-- 上传、切换生效分支与回滚都是外部操作，需单独发起（见[验证与发布](#validation)）。
+- 每次切换生效分支成功后，工具把切换前后的分支追加到本机的 `.deploy-history.json`（按账户分开，不提交到仓库）。`rollback` 据此切回上一个生效分支，它可以是首次切换前账户原有的分支；本机没有记录，或记录与服务器上的生效分支不一致时拒绝，须用 `activate` 指定。
+- 服务器限制每个账户的分支数（私服 backend 为 30 个），版本分支需要定期清理。`delete` 不能删除生效分支、模拟分支与当前的回滚目标，删除后回读确认。
+- 上传、切换生效分支、回滚与删除分支都是外部操作，需单独发起（见[验证与发布](#validation)）。
 
 ## 文档
 
@@ -173,11 +177,11 @@ Logger 只承载纯文本日志，作用域名和正文在统一出口转义；�
 | --- | --- |
 | `a` | 全部里程碑完成前为 0；全部完成后为 1；之后只在持久化数据或运维方式出现不兼容变更时加 1 |
 | `b` | 取当前里程碑的编号；进入下一个里程碑时加 1，`c` 归零 |
-| `c` | 每个改变构建产物的任务合并进 `dev` 时加 1；紧急修复取 `dev` 与 `master` 中最大的 `c` 再加 1 |
+| `c` | 每个改变构建产物的任务合并进 `dev` 时加 1；紧急修复在同一 `a.b` 下取 `dev` 与 `master` 中最大的 `c` 再加 1 |
 
 - **何时改版本号**：只在合并提交中修改。任务分支上的普通提交、发布到 `master` 的合并、不改变构建产物的合并（例如只改文档或测试）都不改版本号。发布到 `master` 时直接为当前版本打标签。
-- **构建产物**：`src/`、构建配置（`rollup.config.mjs`、`tsconfig.json`）与 `package.json` 中的依赖声明发生变化，即视为改变了构建产物。
-- **工具**：`npm run version:bump [task|milestone|hotfix]` 按规则写入下一个版本号（默认 `task`）；`npm run check:version` 校验工作区中的版本号是否符合规则。
+- **构建产物**：`src/`、构建配置（`rollup.config.mjs`、`tsconfig.json`）与 `package.json` 中的依赖声明（`dependencies`、`devDependencies` 与 `overrides`）发生变化，即视为改变了构建产物。
+- **工具**：`npm run version:bump [task|milestone|hotfix]` 按规则写入下一个版本号（默认 `task`）；`npm run check:version` 校验工作区中的版本号是否符合规则。合并时按方向校验：`dev` 合并进 `master`（发布）要求版本号等于 `dev` 的版本；合并进 `dev` 的任务与合并进 `master` 的紧急修复按上表递增；合并进其他分支（同步）取两边较大的版本。
 
 合并任务分支到 `dev` 的步骤：
 

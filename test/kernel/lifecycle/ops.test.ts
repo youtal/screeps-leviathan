@@ -214,3 +214,14 @@ test('统计：每 STATS_INTERVAL 个 tick 写出第 50 页', () => {
   expect(body).toMatchObject({ t: STATS_INTERVAL, n: STATS_INTERVAL, release: 'test-release', mode: 'AMBIGUOUS', paused: [], down: [] });
   expect(body.memory.total).toBeGreaterThan(0);
 });
+
+test('PA-03：统计页写出 kernel 收尾耗用与体积最大的 owner', () => {
+  // 每次读取 CPU 递增 1：收尾耗用等于维护之前与统计采集之间的读数次数，可以确定地检验。
+  let reading = 0;
+  const h = kernelHarness({ modules: [mod('a', [])], game: { cpuUsed: () => (reading += 1) } });
+  for (let i = 0; i <= STATS_INTERVAL; i += 1) h.tick();
+  const body = JSON.parse(decodePage(h.platform.segment(STATS_PAGE) ?? '')!.body);
+  expect(body.cpu.finish).toBeGreaterThan(0);
+  expect(body.cpu.finish).toBeLessThan(body.cpu.avg);
+  expect(body.memory.owners.map(([owner]: [string, number]) => owner)).toContain('kernel');
+});

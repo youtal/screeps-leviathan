@@ -8,7 +8,7 @@
  * 检查的规则：
  * - layer：依赖只能从上往下；除 app 与 main 外，任何层都不得导入 kernel 的实现；
  *   独立入口 src/fallback.ts 不得导入项目模块，包括类型依赖和自身；
- *   使用者设置 src/settings.ts 只能导入 contracts（类型），且只有 app 与 main 可以导入它（架构 4.3）；
+ *   使用者设置 src/settings.ts 只能导入 contracts（类型），且只有 app/assembly 与 main.ts 可以导入它（架构 4.3）；
  * - package：src 不导入外部包，运行时代码全部打入构建产物；`@/` 是 src/ 的别名（tsconfig.json 的 paths），不算外部包；
  *   构建注入版本号的虚拟模块 `virtual:release`（rollup 内联插件提供）只允许 app/assembly 导入；
  * - alias：跨模块导入必须使用 `@/` 别名，相对路径只用于模块内部（README 开发规范）；
@@ -37,6 +37,9 @@ const ALIAS = '@/';
 const RELEASE_MODULE = 'virtual:release';
 const RELEASE_IMPORTER = 'app/assembly/';
 
+/** 除 main.ts 外唯一可以导入 settings.ts 的目录（相对 src，以 / 结尾，架构 4.3）。 */
+const SETTINGS_IMPORTER = 'app/assembly/';
+
 export interface Violation {
   readonly file: string;
   readonly line: number;
@@ -51,7 +54,8 @@ type Layer = 'main' | 'fallback' | 'settings' | 'app' | 'kernel' | 'lib' | 'worl
 const ROOT_FILES: ReadonlySet<string> = new Set(['main', 'fallback', 'settings']);
 
 /**
- * 各层允许导入的层：fallback 单独禁止全部项目依赖；settings 只能导入 contracts，除 app 与 main（any）外没有层可以导入它；
+ * 各层允许导入的层：fallback 单独禁止全部项目依赖；settings 只能导入 contracts，除 app 与 main（any）外没有层可以导入它，
+ * app 层内另由 SETTINGS_IMPORTER 限定为 app/assembly；
  * 其余同层允许，domains 另受 domain 规则约束。
  */
 const ALLOWED: Readonly<Record<Layer, readonly Layer[] | 'any'>> = {
@@ -249,6 +253,11 @@ export const checkBoundaries = (options: CheckOptions): Violation[] => {
       const allowed = ALLOWED[layer];
       if (targetLayer !== layer && allowed !== 'any' && (targetLayer === null || !allowed.includes(targetLayer))) {
         report(node, 'layer', `${layer} 不得导入 ${targetLayer ?? targetPath}（${specifier}）`);
+        return;
+      }
+      // 层规则允许 app 导入 settings；架构 4.3 只允许装配方读取，其他 app 模块须经参数注入（审计 PA-19）。
+      if (targetLayer === 'settings' && layer === 'app' && !srcPath.startsWith(SETTINGS_IMPORTER)) {
+        report(node, 'layer', `settings.ts 只能由 app/assembly 与 main.ts 导入（${specifier}）`);
         return;
       }
       if (layer === 'domains' && targetLayer === 'domains' && domainOf(srcPath) !== domainOf(targetPath)) {

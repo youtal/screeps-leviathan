@@ -13,7 +13,7 @@
 - **只放 heap**：计时是诊断数据，丢失只影响平滑值的预热，不影响运营正确性；写入主 Memory 会让一个存储单元每 tick 变脏。
 - **与 cpu 计量分开**：准入与统计所用的进程耗用来自 [cpu](./cpu.md) 的平滑计量，不依赖 profiler；统计页（[stats](./stats.md)）写出的是 cpu 的进程耗用，不读取本模块的快照。profiler 按标签提供更细的计时明细，M1 中没有读取快照的使用方，快照接口保留给后续的诊断命令。
 - **零依赖**：CPU 读数由装配方注入（游戏中为 `Game.cpu.getUsed`）；不写日志，不访问 Memory 与 segment。
-- **计时粒度由调用方决定**：profiler 只负责聚合；kernel 默认只对模块级钩子计时，实例级明细是否计时由 kernel 的配置决定。原因是每次计时都要读 `Game.cpu.getUsed()`，并非零成本。kernel 的阶段循环不调用 `begin`，而是把 cpu 计量的读数作为开始读数传给 `end`，每次计时只多读一次（[cpu](./cpu.md#5-计量)）。
+- **计时粒度由调用方决定**：profiler 只负责聚合；kernel 默认只对模块级钩子计时，实例级明细是否计时由 kernel 的 `profileInstances` 决定，装配方取自 `src/settings.ts` 的 `profilerSettings`，默认关闭；开启时实例记录直接持有计时器。原因是每次计时都要读 `Game.cpu.getUsed()`，并非零成本。kernel 的阶段循环不调用 `begin`，而是把 cpu 计量的读数作为开始读数传给 `end`，每次计时只多读一次（[cpu](./cpu.md#5-计量)）。
 
 ## 接口
 

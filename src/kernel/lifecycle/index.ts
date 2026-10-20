@@ -5,7 +5,8 @@
  * 流水线：cpu 预算 → Memory 与 segments 的 beginTick → boot（特权端口只在此期间开放）→ 普通模块 setup
  * （Memory 首次就绪且非暂停时一次）→ 启停标志刷新与 CPU 准入 → sense/plan/arbitrate/act/move → cpu 计量收尾 →
  * Memory 维护与提交 → stats → segments 提交。
- * Memory 为空时只运行 boot，跳过 setup、业务钩子、维护与提交；boot 失败的 tick 跳过 setup 与业务钩子。
+ * Memory 为空，或本 tick 的 beginTick 在更新 tick 事实之前失败（tick 倒退等）时只运行 boot，跳过 setup、业务钩子、
+ * 维护与提交；boot 失败的 tick 跳过 setup 与业务钩子。
  * 暂停 tick（boot 的备份尚未完成或登记了软重置）同样跳过 setup 与业务钩子，但照常提交，返回 paused，
  * 使开局判定与清空之间没有业务动作改变证据（docs/design/kernel/bootPort.md 第 3 节）。
  * CPU（docs/design/kernel/cpu.md）：准入在本 tick 内固定，只有被准入的进程运行；阶段循环在相邻钩子之间只读一次
@@ -13,7 +14,8 @@
  * 错误边界：每次钩子调用独立 try/catch；连续失败 BREAKER_THRESHOLD 次熔断，同一进程失败只记录到熔断为止；
  * setup 失败或清单校验被拒绝即初始化失败，本 global 不重试。熔断、初始化失败或运维暂停的模块，
  * 连同经 requires 依赖它的模块一同暂停。
- * 健康：本 tick boot 抛错、生存层任一模块不可运行，或 Memory 加载失败时为 degraded；暂停 tick 为 paused（boot 抛错优先）。
+ * 健康：本 tick boot 抛错、生存层任一模块不可运行、Memory 加载失败，或本 tick 的 beginTick 如上失败时为 degraded；
+ * 暂停 tick 为 paused（boot 抛错优先）。
  * 由入口决定是否追加保底循环，以及是否在登记软重置后重建 kernel。
  * 状态：kernel 实例在闭包中持有模块运行记录、boot 钩子、模式视图、阶段序号、cpu、console、stats 与启停标志，
  * 存在于一个 global；dispose 后不可再用，控制台命名空间换为桩对象。
@@ -28,7 +30,7 @@ import { type CpuNode, VERDICT_ADMIT, VERDICT_NONE, createCpu } from '@/kernel/c
 import { createInterShard } from '@/kernel/intershard';
 import type { LogRoot } from '@/kernel/logger';
 import { type MemoryOptions, createMemory } from '@/kernel/memory';
-import { planModules } from '@/kernel/process';
+import { BOOT_ID, planModules } from '@/kernel/process';
 import type { Profiler } from '@/kernel/profiler';
 import { type SegmentsPlatformPort, createSegments } from '@/kernel/segments';
 import { STATS_VERSION, type StatsSnapshot, createStats } from '@/kernel/stats';
@@ -151,7 +153,9 @@ export const createKernel = (options: KernelOptions): Kernel => {
   // 本实例的普通模块是否已 setup；为 true 后不再允许清空 Memory（须先软重置）。
   let modulesSetUp = false;
   let memoryReported = false;
+  // boot 与 Memory 提交的连续失败次数：只在连续失败开始时记录，恢复时报告次数。
   let bootStreak = 0;
+  let commitStreak = 0;
   let bootHooks: ReturnType<BootDefinition['setup']> | undefined;
   let lastHealth: KernelHealth | undefined;
   // { [模块 id]: 运行记录 }，用于按 requires 查找依赖、运维命令与控制台日志；boot 不在其中。
@@ -164,7 +168,7 @@ export const createKernel = (options: KernelOptions): Kernel => {
      * @param namespace 命名空间。
      * @returns Logger。
      */
-    logger: (namespace) => (namespace === 'boot' ? bootRuntime?.ctx.log : byId.get(namespace)?.ctx.log)
+    logger: (namespace) => (namespace === BOOT_ID ? bootRuntime?.ctx.log : byId.get(namespace)?.ctx.log)
       ?? logRoot.scope(namespace),
   });
   const services = {
@@ -185,7 +189,7 @@ export const createKernel = (options: KernelOptions): Kernel => {
   // 本 tick 参与准入的进程，按执行顺序（模块在前、其实例随后）；数组跨 tick 复用，避免每 tick 分配。
   const nodes: CpuNode[] = [];
 
-  bootRuntime = new ModuleRuntime({ id: 'boot', tier: 'survival', priority: 0, setup: options.boot.setup as never },
+  bootRuntime = new ModuleRuntime({ id: BOOT_ID, tier: 'survival', priority: 0, setup: options.boot.setup as never },
     services, cpu.budgets, () => phase);
   const bootPort = createBootPort({
     memory, segments, interShard: createInterShard(options.interShard), game,
@@ -196,7 +200,10 @@ export const createKernel = (options: KernelOptions): Kernel => {
      */
     canClear: () => !modulesSetUp,
   });
+  // boot 不经进程表调度：遮蔽继承来的 processes 与 instance，误用时立即抛 TypeError，而不是添加永不运行的实例。
   const bootContext: BootContext = Object.create(bootRuntime.ctx, {
+    processes: { value: undefined },
+    instance: { value: undefined },
     port: { value: bootPort.port },
     /**
      * @description 项目标记访问器；Memory 为 empty 或加载失败时抛错，清空后仍指向新标记。
@@ -283,6 +290,9 @@ export const createKernel = (options: KernelOptions): Kernel => {
   /**
    * @description 依次运行五个业务阶段：每个阶段先调用模块钩子，再调用其实例的同名钩子；只运行被准入的进程。
    * 每次访问模块时重新判断能否运行：模块按拓扑顺序排列，依赖在本阶段熔断后，依赖它的模块从同一阶段起即暂停。
+   * 模块不可运行（熔断、初始化失败、暂停或依赖不可运行）时连同实例一起跳过；模块可运行时，模块钩子与实例钩子
+   * 各按自己的判定结果执行（cpu.md 第 3.1 节）：维护层的模块与实例按各自的进程键错峰，模块空闲的 tick 实例仍可运行；
+   * 模块落选时 kernel.cpu 已把实例判为落选。
    * 本 tick 新增的实例没有判定结果，按预热规则视为准入（cpu.md 第 3.2 节），从下一个阶段开始参与调度。
    * 计量：相邻钩子之间只读一次 CPU，差值计入进程的 spent；读数到达 hardEnd 时跳过剩余的非生存层钩子。
    * @returns 无返回值。
@@ -306,21 +316,23 @@ export const createKernel = (options: KernelOptions): Kernel => {
       let last = game.cpuUsed();
       for (const runtime of runtimes) {
         runtime.runnable = canRun(runtime);
-        if (!runtime.runnable || runtime.verdict !== VERDICT_ADMIT) continue;
+        if (!runtime.runnable) continue;
         const survival = runtime.tier === 'survival';
-        if (!survival && brake(last)) continue;
-        const hook = runtime.hooks?.[name];
-        if (hook) {
-          guarded(runtime, `${runtime.def.id}.${name}`, hook, runtime.hooks);
-          runtime.ctx.measure.end(name, last);
-          const now = game.cpuUsed();
-          runtime.spent += now - last;
-          last = now;
-        }
-        if (runtime.broken) {
-          // 本阶段刚熔断：立即不可运行，排在后面、依赖它的模块从同一阶段起暂停。
-          runtime.runnable = false;
-          continue;
+        if (runtime.verdict === VERDICT_ADMIT) {
+          if (!survival && brake(last)) continue;
+          const hook = runtime.hooks?.[name];
+          if (hook) {
+            guarded(runtime, `${runtime.def.id}.${name}`, hook, runtime.hooks);
+            runtime.ctx.measure.end(name, last);
+            const now = game.cpuUsed();
+            runtime.spent += now - last;
+            last = now;
+          }
+          if (runtime.broken) {
+            // 本阶段刚熔断：立即不可运行，排在后面、依赖它的模块从同一阶段起暂停。
+            runtime.runnable = false;
+            continue;
+          }
         }
         for (const record of runtime.instances.values()) {
           const instanceHook = record.hooks[name];
@@ -328,7 +340,7 @@ export const createKernel = (options: KernelOptions): Kernel => {
           if (record.verdict !== VERDICT_ADMIT && record.verdict !== VERDICT_NONE) continue;
           if (!survival && brake(last)) break;
           guarded(record, `${record.key}.${name}`, instanceHook, record.hooks);
-          if (services.profileInstances) runtime.instance(record.key.slice(runtime.def.id.length + 1)).measure.end(name, last);
+          record.measure?.end(name, last);
           const now = game.cpuUsed();
           record.spent += now - last;
           last = now;
@@ -342,12 +354,13 @@ export const createKernel = (options: KernelOptions): Kernel => {
    * 运维暂停只发生在非生存层（ops.md 第 3.2 节），不影响健康状态。
    * @param bootFailed 本 tick boot 是否抛错。
    * @param paused 本 tick 是否为暂停 tick。
+   * @param memoryStale 本 tick Memory 的 beginTick 是否在更新 tick 事实之前失败（tick 倒退、接管过晚）。
    * @returns degraded、paused 或 ok。
    */
-  const health = (bootFailed: boolean, paused: boolean): KernelHealth => {
+  const health = (bootFailed: boolean, paused: boolean, memoryStale: boolean): KernelHealth => {
     if (bootFailed) return 'degraded';
     if (paused) return 'paused';
-    if (memory.failed() || rejectedSurvival) return 'degraded';
+    if (memoryStale || memory.failed() || rejectedSurvival) return 'degraded';
     const survivalDown = runtimes.some((r) => r.def.tier === 'survival'
       && (r.state === 'failed' || r.broken || (modulesSetUp && !r.runnable)));
     return survivalDown ? 'degraded' : 'ok';
@@ -394,10 +407,21 @@ export const createKernel = (options: KernelOptions): Kernel => {
       if (disposed) throw new Error('kernel 已销毁');
       profiler.beginTick();
       cpu.beginTick();
+      // 加载失败时 beginTick 已更新 tick 事实与提交状态，失败锁存，ready() 为 false，boot 可在本 tick 清空后照常提交。
+      // 其他失败（tick 倒退、接管过晚）发生在更新之前、不锁存：ready() 仍为 true，但本 tick 的修改无法正确提交，
+      // 所以本 tick 按 Memory 不可用处理（stale），跳过 setup、业务钩子、维护与提交，计为 degraded（内核设计第 2 节）。
+      // 同一段连续失败只记录一次，恢复时记录一次。
+      let memoryStale = false;
       try {
         memory.beginTick({ time: game.time(), creeps: game.creepNames(), flags: game.flagNames() });
+        if (memoryReported) log.info('Memory 恢复可用');
+        memoryReported = false;
       } catch (error) {
-        if (!memoryReported) log.error('Memory 不可用，本 global 内所有模块都无法读写持久数据', error);
+        memoryStale = !memory.failed();
+        if (!memoryReported) {
+          log.error(memoryStale ? 'Memory 本 tick 无法开始，跳过模块 setup、业务钩子、维护与提交，直到恢复'
+            : 'Memory 不可用，本 global 内所有模块都无法读写持久数据', error);
+        }
         memoryReported = true;
       }
       try { segments.beginTick(); } catch (error) { log.error('segment 读取失败', error); }
@@ -413,7 +437,7 @@ export const createKernel = (options: KernelOptions): Kernel => {
         bootStreak += 1;
         if (bootStreak === 1) log.error('boot 失败，本 tick 跳过业务钩子；连续失败期间不再重复记录', error);
       }
-      const ready = memory.ready();
+      const ready = !memoryStale && memory.ready();
       const paused = bootPort.paused();
       if (ready && !bootFailed && !paused && !modulesSetUp) setupModules();
       if (ready && !bootFailed && !paused) {
@@ -425,16 +449,29 @@ export const createKernel = (options: KernelOptions): Kernel => {
         // 不运行业务阶段的 tick 没有进程耗用；摘要只保留本 tick 的预算。
         cpu.settle([]);
       }
+      // kernel 收尾（Memory 维护与提交）的起点读数；与统计采集时的读数相减，得到 cpu.finish（stats 设计第 2 节），
+      // 供 14.4 候选优化的触发条件判断。每 tick 多一次 getUsed()。
+      const finishStart = game.cpuUsed();
       if (ready) {
         // Memory 维护是收尾工作，不参与分层准入（cpu.md 第 3.3 节）；单次成本受每 tick 记录上限约束。
         try { memory.maintain(); } catch (error) { log.error('Memory 维护失败', error); }
-        try { memory.commit(); } catch (error) { log.error('Memory 提交失败，下一 tick 重试', error); }
+        // 提交失败保留脏状态，下一 tick 重试；持续失败（例如超过体积上限）时只在连续失败开始时记录一次，
+        // 恢复时记录一次，避免每 tick 刷日志（审计 PA-17）。
+        try {
+          memory.commit();
+          if (commitStreak > 0) log.info(`Memory 提交恢复（此前连续失败 ${commitStreak} 次）`);
+          commitStreak = 0;
+        } catch (error) {
+          commitStreak += 1;
+          if (commitStreak === 1) log.error('Memory 提交失败，下一 tick 重试；连续失败期间不再重复记录', error);
+        }
       }
-      const result = health(bootFailed, paused);
+      const result = health(bootFailed, paused, memoryStale);
       lastHealth = result;
       try {
         const summary = cpu.summary();
-        stats.record({ time: game.time(), cpu: game.cpuUsed(), budget: summary.budget, reserve: summary.reserve,
+        const used = game.cpuUsed();
+        stats.record({ time: game.time(), cpu: used, finish: used - finishStart, budget: summary.budget, reserve: summary.reserve,
           tiers: summary.tiers, admitted: summary.admitted, rejected: summary.rejected, bucket: game.bucket(), health: result },
         statsSnapshot);
       } catch (error) { log.error('统计采集失败', error); }
@@ -454,7 +491,7 @@ export const createKernel = (options: KernelOptions): Kernel => {
      * @throws {TypeError} 与模块 id 或 boot 冲突。
      */
     console(namespace) {
-      if (namespace === 'boot' || byId.has(namespace)) throw new TypeError(`控制台命名空间 ${namespace} 属于模块`);
+      if (namespace === BOOT_ID || byId.has(namespace)) throw new TypeError(`控制台命名空间 ${namespace} 属于模块`);
       return consoleHost.registry(namespace);
     },
     /**
@@ -471,6 +508,10 @@ export const createKernel = (options: KernelOptions): Kernel => {
         for (const fn of runtime.disposers) {
           try { fn(); } catch (error) { log.error(`模块 ${runtime.def.id} 清理失败`, error); }
         }
+      }
+      // boot 的运行记录不在 runtimes 中，它经 onDispose 登记的清理函数单独调用（contracts BootContext）。
+      for (const fn of bootRuntime!.disposers) {
+        try { fn(); } catch (error) { log.error('boot 清理失败', error); }
       }
       try { consoleHost.dispose(); } catch (error) { log.error('控制台命名空间清理失败', error); }
       try { memory.dispose(); } catch (error) { log.error('Memory 销毁失败', error); }

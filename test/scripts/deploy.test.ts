@@ -1,14 +1,22 @@
 /**
  * 文件摘要：部署工具（scripts/deploy/lib.ts 与 api.ts）的单元测试。
  * 覆盖参数解析、账户选择与校验（含令牌不外泄）、分支名与版本分支规则、模块表整理、
- * 上传规划、回滚目标选择，以及 API 客户端的请求形状与失败处理（fetch 以假实现替换，不访问网络）。
+ * 上传规划、按本机切换历史选择回滚目标（审计 PA-13）、分支删除的前置检查（PA-20），
+ * 以及 API 客户端的请求形状与失败处理（fetch 以假实现替换，不访问网络）。
  */
 import { createApi } from '../../scripts/deploy/api';
 import {
+  type Activation,
   type Branch,
+  HISTORY_LIMIT,
+  accountHistory,
+  activeStack,
+  appendActivation,
   assertBranchName,
   collectModules,
+  deleteBranchProblem,
   describeAccounts,
+  historyKey,
   mismatchedModules,
   parseDeployArgs,
   planUpload,
@@ -34,6 +42,12 @@ describe('parseDeployArgs', () => {
       branch: 'test',
       activate: true,
     });
+  });
+  test('delete 必须指定账户与分支', () => {
+    expect(parseDeployArgs(['delete', '--account', 'main', '--branch', 'v0.1.0'])).toEqual({
+      command: 'delete', account: 'main', branch: 'v0.1.0', activate: false,
+    });
+    expect(() => parseDeployArgs(['delete', '--account', 'main'])).toThrow('--branch');
   });
   test('访问服务器的命令必须指定账户，不设默认账户', () => {
     expect(() => parseDeployArgs(['upload'])).toThrow('--account');
@@ -126,13 +140,74 @@ describe('planUpload', () => {
   });
 });
 
+/**
+ * @description 构造一条切换记录。
+ * @param from 切换前的生效分支。
+ * @param to 切换后的生效分支。
+ * @param rollback 是否为回滚。
+ * @returns 切换记录。
+ */
+const switched = (from: string | null, to: string, rollback = false): Activation => ({ time: '2026-10-20T00:00:00.000Z', from, to, rollback });
+
+/**
+ * @description 构造服务器分支列表，active 为生效分支。
+ * @param names 分支名。
+ * @param active 生效分支。
+ * @returns 分支列表。
+ */
+const server = (names: string[], active: string): Branch[] => names.map((branch) => ({ branch, activeWorld: branch === active }));
+
 describe('rollbackTarget', () => {
-  test('按版本号而不是字符串顺序选出上一个版本分支', () => {
-    expect(rollbackTarget(branches)).toEqual({ from: 'v0.1.11', to: 'v0.1.10' });
+  test('PA-13：首次切换后回滚到账户原有的非版本分支，而不是从未生效的演练版本分支', () => {
+    const history = [switched('default', 'v0.2.0')];
+    expect(rollbackTarget(history, server(['default', 'v0.1.15', 'v0.2.0'], 'v0.2.0'))).toEqual({ from: 'v0.2.0', to: 'default' });
   });
-  test('生效分支不是版本分支或没有更早版本时报错', () => {
-    expect(() => rollbackTarget([{ branch: 'default', activeWorld: true }])).toThrow('activate');
-    expect(() => rollbackTarget([{ branch: 'v0.1.0', activeWorld: true }])).toThrow('没有早于');
+  test('PA-13：回滚后发布热修复再回滚，回到上一个生效分支，而不是已知有问题的版本', () => {
+    const history = [switched('v0.2.2', 'v0.2.3'), switched('v0.2.3', 'v0.2.4'), switched('v0.2.4', 'v0.2.3', true), switched('v0.2.3', 'v0.2.5')];
+    expect(activeStack(history)).toEqual(['v0.2.2', 'v0.2.3', 'v0.2.5']);
+    expect(rollbackTarget(history, server(['v0.2.2', 'v0.2.3', 'v0.2.4', 'v0.2.5'], 'v0.2.5'))).toEqual({ from: 'v0.2.5', to: 'v0.2.3' });
+  });
+  test('连续回滚沿生效栈逐级后退', () => {
+    const history = [switched('a', 'b'), switched('b', 'c'), switched('c', 'b', true)];
+    expect(rollbackTarget(history, server(['a', 'b', 'c'], 'b'))).toEqual({ from: 'b', to: 'a' });
+  });
+  test('没有记录、记录与服务器不一致、没有更早分支或目标已删除时拒绝', () => {
+    expect(() => rollbackTarget([], server(['a', 'b'], 'b'))).toThrow('没有该账户的生效切换记录');
+    expect(() => rollbackTarget([switched('a', 'b')], server(['a', 'b', 'c'], 'c'))).toThrow('工具之外');
+    expect(() => rollbackTarget([switched(null, 'b')], server(['b'], 'b'))).toThrow('没有早于');
+    expect(() => rollbackTarget([switched('a', 'b')], server(['b'], 'b'))).toThrow('已不在服务器上');
+  });
+  test('期间在工具之外切换过时，生效栈从下一次记录的切换重新开始', () => {
+    expect(activeStack([switched('a', 'b'), switched('x', 'y')])).toEqual(['x', 'y']);
+  });
+});
+
+describe('部署历史', () => {
+  test('按账户名与服务器地址分开；记录形状不合法时报错', () => {
+    const key = historyKey(selectAccount(secret, 'main'));
+    expect(key).toBe('main@https://screeps.com:443');
+    expect(accountHistory({}, key)).toEqual([]);
+    expect(accountHistory({ [key]: [switched('a', 'b')] }, key)).toEqual([switched('a', 'b')]);
+    expect(() => accountHistory({ [key]: [{ to: 'b' }] }, key)).toThrow('形状不合法');
+    expect(() => accountHistory([], key)).toThrow('顶层');
+  });
+  test('只保留最近 HISTORY_LIMIT 条记录', () => {
+    let history: Activation[] = [];
+    for (let i = 0; i < HISTORY_LIMIT + 5; i += 1) history = appendActivation(history, switched(`b${i}`, `b${i + 1}`));
+    expect(history).toHaveLength(HISTORY_LIMIT);
+    expect(history[HISTORY_LIMIT - 1].to).toBe(`b${HISTORY_LIMIT + 5}`);
+  });
+});
+
+describe('deleteBranchProblem', () => {
+  test('PA-20：拒绝删除不存在的分支、生效或模拟分支，以及当前的回滚目标；其余可以删除', () => {
+    const list: Branch[] = [{ branch: 'v0.2.3' }, { branch: 'v0.2.4', activeWorld: true }, { branch: 'sim', activeSim: true }, { branch: 'v0.1.0' }];
+    const history = [switched('v0.2.3', 'v0.2.4')];
+    expect(deleteBranchProblem(list, history, 'ghost')).toContain('没有分支');
+    expect(deleteBranchProblem(list, history, 'v0.2.4')).toContain('生效');
+    expect(deleteBranchProblem(list, history, 'sim')).toContain('模拟');
+    expect(deleteBranchProblem(list, history, 'v0.2.3')).toContain('回滚目标');
+    expect(deleteBranchProblem(list, history, 'v0.1.0')).toBeNull();
   });
 });
 
@@ -156,17 +231,20 @@ describe('createApi', () => {
     expect((calls[0].init.headers as Record<string, string>)['X-Token']).toBe(TOKEN);
     expect(calls[0].url).not.toContain(TOKEN);
   });
-  test('上传、新建分支与切换生效分支的请求体', async () => {
+  test('上传、新建分支、切换生效分支与删除分支的请求体', async () => {
     const api = createApi(account, fakeFetch({ ok: 1 }));
     await api.uploadCode('test', { main: 'x' });
     await api.cloneBranch('v0.1.2', { main: 'x' });
     await api.setActiveWorld('v0.1.2');
+    await api.deleteBranch('v0.1.0');
     const bodies = calls.map(({ init }) => JSON.parse(init.body as string) as Record<string, unknown>);
     expect(calls.map(({ url, init }) => `${init.method} ${url}`)).toEqual([
       'POST https://screeps.com/api/user/code',
       'POST https://screeps.com/api/user/clone-branch',
       'POST https://screeps.com/api/user/set-active-branch',
+      'POST https://screeps.com/api/user/delete-branch',
     ]);
+    expect(bodies[3]).toEqual({ branch: 'v0.1.0' });
     expect(bodies[0]).toMatchObject({ branch: 'test', modules: { main: 'x' } });
     expect(bodies[1]).toEqual({ branch: '', newName: 'v0.1.2', defaultModules: { main: 'x' } });
     expect(bodies[2]).toEqual({ branch: 'v0.1.2', activeName: 'activeWorld' });

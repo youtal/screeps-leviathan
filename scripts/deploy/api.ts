@@ -7,7 +7,8 @@
  * - GET  /api/user/code?branch=：读取分支代码，用于上传后回读校验；
  * - POST /api/user/code：覆盖已存在分支的代码（分支不存在时服务器报错）；
  * - POST /api/user/clone-branch：以给定模块新建分支（服务器限制每个账户的分支数量）；
- * - POST /api/user/set-active-branch：切换世界（activeWorld）的生效分支。
+ * - POST /api/user/set-active-branch：切换世界（activeWorld）的生效分支；
+ * - POST /api/user/delete-branch：删除分支（服务器对生效分支静默不删、仍返回成功，调用方须先检查并回读确认）。
  * 副作用：发起真实网络请求。fetch 由调用方注入，测试中替换为假实现。
  * 令牌只放在请求头中，不出现在 URL、日志或错误消息里。
  */
@@ -54,6 +55,14 @@ export interface ScreepsApi {
    * @throws {Error} 请求失败、超时、响应不是 JSON 或 ok !== 1。
    */
   setActiveWorld(branch: string): Promise<void>;
+  /**
+   * @description 删除分支（POST /api/user/delete-branch）。backend 3.3.0 对生效分支与模拟分支静默不删、仍返回成功，
+   * 所以调用方须先检查，并在删除后重新列出分支确认。
+   * @param branch 分支名。
+   * @returns 无返回值；服务器确认后完成。
+   * @throws {Error} 请求失败、超时、响应不是 JSON 或 ok !== 1。
+   */
+  deleteBranch(branch: string): Promise<void>;
 }
 
 /**
@@ -170,6 +179,15 @@ export const createApi = (account: Account, fetchImpl: typeof fetch = fetch, tim
      */
     async setActiveWorld(branch) {
       await request('POST', '/set-active-branch', { body: { branch, activeName: 'activeWorld' } });
+    },
+    /**
+     * @description 删除分支。
+     * @param branch 分支名。
+     * @returns 无返回值。
+     * @throws {Error} 请求失败。
+     */
+    async deleteBranch(branch) {
+      await request('POST', '/delete-branch', { body: { branch } });
     },
   };
 };
