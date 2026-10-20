@@ -928,6 +928,7 @@ checkBoundaries({ root, srcRoot, files: {
 
 ### 用户决定后的补充（2026-10-21）
 
+- **PA-15 的 M2 设计输入**：用户批准"名称在词库中的 spawn 计入 σ 的分子，但只在至少有一个带签名的 creep 时计入"，规则、理由与推演记在[词库提案](../proposal/2026-10-20-spawn-name-lexicon.md#6-补充决定词库-spawn-计入签名比例2026-10-21)第 6 节，架构 11.6 在 M2 修订。
 - **词库提案**：批准，第 4 节三项按建议采纳。已更新架构 9.2、[lib.naming 设计](../design/lib/naming.md)第 4 节、设计索引与 hash 设计中的相关表述，以及 `src/lib/naming/index.ts` 的注释。
 - **PA-12**：`../screeps-leviathan-tsconfig-alias` 的 worktree 按用户指令以 `git worktree remove --force` 移除，其中未提交的 `tsconfig.json` 修改（`@/*` 路径别名，dev 已有等价配置）随之丢弃；分支 `chore/tsconfig-alias` 保留。
 - **PA-04**：按用户指令修订架构 6.3 与 15.1，把"开发构建"改为使用者设置中的开关（`memorySettings.auditUnits`，默认关闭）。

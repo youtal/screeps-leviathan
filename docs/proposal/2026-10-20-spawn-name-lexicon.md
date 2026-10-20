@@ -90,3 +90,35 @@
 - 已更新架构 9.2（spawn 名称改为从词库抽取，签名格式只用于 creep）与 [lib.naming 设计](../design/lib/naming.md)第 4 节。词库与抽取逻辑随 M2 第一个建造 spawn 的使用方实现，开局提示随 app.boot 的 FRESH_START 实现。
 
 11.6 的签名比例 σ 仍按 creep 与 spawn 统计；spawn 不再带签名后，σ 的口径与词库作为弱证据的用法，在 M2 设计接手流程时与审计 PA-15 一并修订。
+
+## 6. 补充决定：词库 spawn 计入签名比例（2026-10-21）
+
+用户批准以下规则，作为 M2 设计接手流程、修订 11.6 时的输入（审计 PA-15）。本节只记录决定，架构 11.6 在 M2 修订。
+
+**规则**：σ 的分母仍为全部 creep 与 spawn；名称在词库中的 spawn 计入分子，但只在 creep 中至少有一个带签名时计入。
+
+```ts
+const named = [...creeps, ...spawns];
+const signedCreeps = creeps.filter(x => sig(x.name)).length;
+const lexiconSpawns = signedCreeps > 0 ? spawns.filter(x => inLexicon(x.name)).length : 0;
+const σ = named.length ? (signedCreeps + lexiconSpawns) / named.length : 0;
+```
+
+**理由**：
+
+- 首个 spawn 由玩家命名。玩家按词库命名时，早期殖民地的 σ 不再被这个 spawn 拉低；不按词库命名时，结果与不计入时相同，符合"建议遵循、不做强制"。
+- 词库公开，且是普通英文单词，名称在词库中只是弱证据（2.5）。限制条件使 spawn 不能单独把 σ 推过 θ_SELF，只在有带签名的 creep 佐证时抵消首个 spawn 的偏差。
+
+**推演**（θ_SELF = 0.8）：
+
+| 情形 | σ | 判定 |
+| --- | --- | --- |
+| 早期殖民地：按词库命名的首个 spawn，1–3 个带签名的 creep | 1.0 | SELF_ADOPT |
+| 同上，首个 spawn 不在词库中 | k/(k+1)，k ≥ 4 才达标 | 与不计入时相同 |
+| 3 个 spawn（2 个由系统按词库命名）、2 个带签名的 creep | 0.8 | SELF_ADOPT |
+| 外来殖民地：1 个碰巧在词库中的 spawn，没有 creep | 0 | TAKEOVER（不计入时为 1.0，会误判为 SELF_ADOPT） |
+| 本系统殖民地：creep 全部死亡且 Memory 丢失，只剩 spawn | 0 | TAKEOVER；偏保守，不造成损失 |
+
+**未采纳**：给词库中的每个词附一位哈希校验字符（例如 `AbyssK`），可把碰巧重名的概率再降到约 1/36，但名称不再是纯单词，削弱了词库的彩蛋性质。
+
+**留待 M2**：保底循环生成的 creep 仍不带签名，会拉低 σ；保底名称（`fb-…`）格式特殊，是否也计入分子，在 M2 修订 11.6 时一并决定。
