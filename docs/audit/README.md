@@ -14,6 +14,7 @@
 
 | 日期 | 报告 | 类型 |
 | --- | --- | --- |
+| 2026-10-20 | [全项目审计：架构合理性与无用方法（dev 0.1.12）](./2026-10-20-project-audit.md) | 审计 |
 | 2026-10-20 | [lib 核心与第 5 步设计的工作区交付审计](./2026-10-20-lib-core-delivery.md) | 审计 |
 | 2026-10-20 | [M1 第 4 步工作区第二轮审计（segments、bootPort、intershard）](./2026-10-20-segments-bootport-recheck.md) | 审计 |
 | 2026-10-20 | [M1 第 4 步工作区交付审计（segments、bootPort、intershard）](./2026-10-20-segments-bootport-delivery.md) | 审计 |
