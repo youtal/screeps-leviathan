@@ -224,7 +224,11 @@ const spawnIfNeeded = (info: RoomInfo, state: TickState): void => {
   if (pending || info.room.energyAvailable < 200) return;
   const spawn = info.spawns.find((s) => !s.spawning && s.isActive());
   if (!spawn) return;
-  const prefix = `fb-${Game.shard?.name ?? 'x'}-${Game.time.toString(36)}-`;
+  // 身份用的 shard 名（架构 11.3 的 here）：有 InterShardMemory 时取 Game.shard.name，否则为 x。私服的 driver 会注入
+  // Game.shard，名称是服务器主机名（F7），可能含 "-" 且随容器重建变化，所以不能用 Game.shard 是否存在来判断。
+  // typeof 只做特性检测，不读写 InterShardMemory 的内容（5.7）。
+  const shard = typeof InterShardMemory !== 'undefined' && Game.shard ? Game.shard.name : 'x';
+  const prefix = `fb-${shard}-${Game.time.toString(36)}-`;
   let seq = 0;
   while (Game.creeps[prefix + seq] !== undefined || state.names.has(prefix + seq)) seq += 1;
   state.names.add(prefix + seq);

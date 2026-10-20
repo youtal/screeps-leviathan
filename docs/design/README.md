@@ -28,6 +28,9 @@
 | kernel | [kernel/segments.md](./kernel/segments.md) | Segment 整页覆盖写入（备份区与统计） |
 | kernel | [kernel/bootPort.md](./kernel/bootPort.md) | boot 特权端口：概要、备份、初始化、清空、软重置 |
 | kernel | [kernel/intershard.md](./kernel/intershard.md) | InterShardMemory 封装：M1 的特性检测与本 shard 清空 |
+| lib | [lib/hash.md](./lib/hash.md) | 稳定字符串哈希（校验位、错峰、分片） |
+| lib | [lib/naming.md](./lib/naming.md) | creep 与 spawn 的名称格式化与校验 |
+| lib | [lib/geometry.md](./lib/geometry.md) | 房间坐标、坐标打包、方向与距离 |
 | world | [world/market.md](./world/market.md) | 物价模型 |
 | colony | [colony/inventory.md](./colony/inventory.md) | 资源库存控制 |
 | domains | [domains/industry/economics.md](./domains/industry/economics.md) | 产业规划 |

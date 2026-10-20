@@ -1235,8 +1235,8 @@ const nonCore = structs.filter(s => s.structureType !== 'spawn' && s.structureTy
 const sites   = Object.keys(Game.constructionSites).length;
 const creeps  = Object.values(Game.creeps);               // 仅本 shard
 const pcHere  = Object.values(Game.powerCreeps).filter(pc => pc.room !== undefined);
-const here    = Game.shard?.name ?? 'x';
 const hasISM  = typeof InterShardMemory !== 'undefined';
+const here    = hasISM ? Game.shard.name : 'x';            // 身份用的 shard 名；私服的 Game.shard 是主机名（F7）
 ```
 
 **Memory 状态 `memState`**（由原始 Memory 文本判断）：
@@ -1639,7 +1639,7 @@ F1–F7、F10–F18 依据公开发布的 Screeps 服务端组件：`@screeps/en
 | F4 | `Game.structures` 只含本方 `OwnedStructure`，包括 controller | engine `src/game/game.js` |
 | F5 | 重生删除玩家的 creep、PowerCreep、工地和 flag，建筑转为 ruin，控制器重置；不清除 Memory 与 segment | backend `lib/utils.js`（`respawnUser`） |
 | F6 | 只调度活跃玩家；玩家没有对象时被标记为非活跃，代码不执行。VM 只在代码更新、isolate 销毁或闲置超过 3 分钟时回收，因此开局第一 tick 不一定伴随 global reset | driver `lib/index.js`、`lib/runtime/data.js`、`lib/runtime/user-vm.js` |
-| F7 | 私有服务器不提供 `InterShardMemory`、`Game.shard`、`Game.cpu.shardLimits`；portal 只在同一 shard 内转移对象 | engine `src/game/`、`src/processor/global.js` |
+| F7 | 私有服务器不提供 `InterShardMemory`、`Game.cpu.shardLimits`；`Game.shard` 由 driver 注入，`name` 为服务器主机名（Docker 中默认为容器 ID，重建即变化），不代表多 shard 环境；portal 只在同一 shard 内转移对象 | engine `src/game/`、`src/processor/global.js`；driver `lib/index.js`（`playerSandbox` 事件） |
 | F8 | creep 跨 shard 后名称保持不变，对象 id 不保证保持 | 官服运行行为 |
 | F9 | 每个返回 `OK` 的状态变更动作约 0.2 CPU；Segment 100 页 × 100 KB、同时最多激活 10 页、下一 tick 可用；bucket 上限 10000；市场历史保留近 14 天；全局 `Memory` 在本 tick 首次访问时解析并在 tick 末写回；官服支持多个代码分支并可切换生效分支 | Screeps 官方文档 |
 | F10 | 市场历史按资源、按日汇总，字段为 `transactions`、`volume`、`avgPrice`（量加权）、`stddevPrice`（量加权） | backend `lib/cronjobs.js` |

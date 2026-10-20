@@ -19,7 +19,7 @@ interface GamePort {                     // 当 tick 的游戏事实，由装配
   tickLimit(): number;
   limit(): number;                       // Game.cpu.limit，用于计算收尾预留
   bucket(): number;
-  shard(): string;                       // Game.shard 的名称；私服没有 Game.shard（F7），为 'x'
+  shard(): string;                       // 身份用的 shard 名（11.3 的 here）：有 InterShardMemory 时为 Game.shard.name，否则为 'x'（F7）
   creepNames(): ReadonlySet<string>;     // 含孵化中的 creep
   flagNames(): ReadonlySet<string>;
 }

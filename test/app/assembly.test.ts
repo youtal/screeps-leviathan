@@ -47,6 +47,18 @@ test('真实 loop 连续运行：空存储不被初始化，已初始化存储�
   jest.restoreAllMocks();
 });
 
+test('LC-01：身份用的 shard 名只在提供 InterShardMemory 时取 Game.shard.name，私服注入的主机名不作为身份', () => {
+  installGame(8);
+  const g = globalThis as Record<string, unknown>;
+  (g.Game as { shard: { name: string } }).shard = { name: 'screeps-server-1' };
+  delete g.InterShardMemory;
+  expect(createGameServices().game.shard()).toBe('x');
+  (g.Game as { shard: { name: string } }).shard = { name: 'shard3' };
+  g.InterShardMemory = { getLocal: () => '' };
+  expect(createGameServices().game.shard()).toBe('shard3');
+  delete g.InterShardMemory;
+});
+
 test('日志输出端：存在 console.logUnsafe 时经它输出并上色，否则经 console.log 输出纯文本', () => {
   installGame(7);
   const unsafe: string[] = [];
