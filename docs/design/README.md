@@ -25,6 +25,9 @@
 | kernel | [kernel/errorMapper.md](./kernel/errorMapper.md) | 错误规范化与源码映射 |
 | kernel | [kernel/profiler.md](./kernel/profiler.md) | 计时聚合（只放 heap） |
 | kernel | [kernel/memory.md](./kernel/memory.md) | Memory v1 与候选块级优化 |
+| kernel | [kernel/segments.md](./kernel/segments.md) | Segment 整页覆盖写入（备份区与统计） |
+| kernel | [kernel/bootPort.md](./kernel/bootPort.md) | boot 特权端口：概要、备份、初始化、清空、软重置 |
+| kernel | [kernel/intershard.md](./kernel/intershard.md) | InterShardMemory 封装：M1 的特性检测与本 shard 清空 |
 | world | [world/market.md](./world/market.md) | 物价模型 |
 | colony | [colony/inventory.md](./colony/inventory.md) | 资源库存控制 |
 | domains | [domains/industry/economics.md](./domains/industry/economics.md) | 产业规划 |

@@ -46,6 +46,11 @@ export interface GamePort {
    */
   bucket(): number;
   /**
+   * @description 当前 shard 名，用于新建的项目标记；私服没有 Game.shard（附录 A F7）。
+   * @returns Game.shard.name；私服为 'x'。
+   */
+  shard(): string;
+  /**
    * @description 本 tick 存在的 creep 名称，含孵化中的 creep。
    * @returns 名称集合。
    */

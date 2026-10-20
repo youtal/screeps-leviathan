@@ -237,10 +237,10 @@ type ProjectMarker = {                        // Memory[NS].sys，字段含义�
 
 ```ts
 interface RawMemorySummary {
-  readonly empty: boolean;                    // 原始文本为空或为 '{}'
+  readonly empty: boolean;                    // 11.3 的 EMPTY：文本为空白，或根键只有引擎默认键且值都是空对象
   readonly parsed: boolean;                   // 能否解析为对象
   readonly rootKeys: readonly string[];
-  readonly marker: DeepReadonly<ProjectMarker> | null; // 结构合法的项目标记，否则为 null
+  readonly marker: DeepReadonly<ProjectMarker> | null; // sig 相符的项目标记，否则为 null；schema 与当前不同时只保证 sig 与 schema
 }
 
 type BackupState = 'pending' | 'done' | 'failed';
@@ -248,9 +248,10 @@ type BackupState = 'pending' | 'done' | 'failed';
 interface BootPort {
   summary(): RawMemorySummary;
   backup(): BackupState;                      // 把原始 Memory 写入备份区；可能跨 tick，重复调用推进进度
+  initialize(): void;                         // Memory 为 empty 时加入本项目命名空间，保留其他根键
   clearMemory(): void;                        // 整体清空，并按当前 epoch + 1 重建项目标记
   clearInterShard(): void;                    // InterShardMemory 不可用时什么也不做
-  softReset(): void;                          // 下一 tick 生效（5.5）
+  softReset(): void;                          // 下一 tick 生效（5.5）；boot 钩子同 tick 抛错时登记作废
 }
 
 interface BootContext extends ModuleContext {
@@ -266,6 +267,7 @@ interface BootDefinition {
 
 - kernel 只接受一个 `BootDefinition`，由 app.boot 提供。它在每 tick 的 boot 阶段最先运行，其他模块的上下文中没有 `port`、`sys` 与 `setMode`。
 - 判定逻辑本身是纯函数 `assess(facts) → {mode, strength, evidence[]}`，属于 app.boot 的内部实现，不进入 contracts。
+- `initialize()` 与 `clearMemory()` 由 kernel 生成项目标记的初值（身份、shard、epoch、lastRun、release），指纹与模式为占位值，boot 在同一 tick 经 `sys` 写入。各操作的前置条件与失败语义见 [bootPort](../kernel/bootPort.md)。
 
 ## 7. 待加入的接口
 

@@ -5,9 +5,16 @@
  * 所属位置：src/main.ts，构建入口（rollup.config.mjs 的 input）。
  * 每 tick：先接管全局 Memory（使引擎内部写入只落在临时对象上，保底循环的 spawnCreep 也依赖这一点）；
  * 处于停用冷却期时只运行保底循环；否则运行 kernel，抛错时丢弃实例、下一 tick 重新装配，本 tick 改由保底循环运行；
- * 连续 KERNEL_CRASH_LIMIT 次抛错后停用正常循环 KERNEL_COOLDOWN tick；连续 SAFE_MODE_TICKS 个 tick 处于 degraded 时，
- * 在正常循环之后追加保底循环，直到恢复。CPU 硬终止无法被 catch 接管，计数只统计可捕获的异常。
- * 状态：kernel 实例、连续抛错与 degraded 计数、冷却截止 tick 保存在 createEntry 的闭包中（heap），global reset 后重新计数。
+ * 连续 KERNEL_CRASH_LIMIT 次失败（kernel 抛错，或连续暂停超过 PAUSE_LIMIT 后仍登记软重置）后停用正常循环 KERNEL_COOLDOWN tick；
+ * 连续 SAFE_MODE_TICKS 个 tick 计为 degraded 时，在正常循环之后追加保底循环，直到恢复。
+ * CPU 硬终止无法被 catch 接管，失败计数只统计可捕获的异常与超限的软重置。
+ * 软重置：boot 登记后 tick 正常结束时销毁 kernel，下一 tick 重新装配；连续暂停未超过 PAUSE_LIMIT 时不计为失败。
+ * boot 抛错的 tick 登记的软重置已由 kernel 作废，不会到达这里（docs/design/kernel/bootPort.md 第 3 节）。
+ * 暂停 tick（paused）不改变 degraded 计数，使开局备份期间保底循环不会抢先孵化；连续暂停超过 PAUSE_LIMIT 后
+ * 按 degraded 计数，保证 boot 卡在暂停时保底循环最终仍能接管（内核设计第 6 节）。超限后再登记的软重置按一次失败
+ * 与抛错共用计数和冷却，避免 boot 陷入重置循环时每 tick 重新装配并解析 Memory；超限期间失败计数不清零。
+ * 状态：kernel 实例、连续失败、degraded 与暂停计数、冷却截止 tick 保存在 createEntry 的闭包中（heap），
+ * 跨软重置累计，global reset 后重新计数。
  * 切换逻辑写成 createEntry(deps)，测试以假依赖驱动；loop 由游戏依赖创建，模块加载时不读取 Game。
  */
 import { type GameServices, assemble, createGameServices } from '@/app/assembly';
@@ -17,10 +24,12 @@ import { takeoverMemory } from '@/kernel/memory';
 
 /** 连续处于 degraded 的 tick 数达到此值后，追加运行保底循环。 */
 export const SAFE_MODE_TICKS = 3;
-/** kernel 连续抛出可捕获异常的次数上限，达到后停用正常循环。 */
+/** 连续失败的次数上限，达到后停用正常循环；失败指 kernel 抛出可捕获异常，或连续暂停超过 PAUSE_LIMIT 后仍登记软重置。 */
 export const KERNEL_CRASH_LIMIT = 3;
 /** 停用冷却期（tick），期间只运行保底循环。 */
 export const KERNEL_COOLDOWN = 100;
+/** 连续暂停 tick 的上限，跨软重置累计；备份一次重写加软重置最多约 7 tick。 */
+export const PAUSE_LIMIT = 10;
 
 /** 入口的外部依赖，游戏中由 gameEntryDeps 提供。 */
 export interface EntryDeps {
@@ -63,7 +72,22 @@ export const createEntry = (deps: EntryDeps): (() => void) => {
   let kernel: Kernel | undefined;
   let crashes = 0;
   let degraded = 0;
+  let paused = 0;
   let cooldownUntil = Number.NEGATIVE_INFINITY;
+
+  /**
+   * @description 计入一次失败（kernel 抛错，或连续暂停超过上限后 boot 仍登记软重置）；连续达到 KERNEL_CRASH_LIMIT 次时
+   * 进入停用冷却并清零计数。两类失败都会使下一 tick 重新装配并完整解析 Memory，冷却把这项成本限制在每 KERNEL_COOLDOWN tick 一次。
+   * @returns 无返回值；达到上限时设置冷却截止 tick 并报告。
+   */
+  const countCrash = (): void => {
+    crashes += 1;
+    if (crashes < KERNEL_CRASH_LIMIT) return;
+    // 本 tick 之后整整 KERNEL_COOLDOWN 个 tick 只运行保底循环。
+    cooldownUntil = deps.time() + KERNEL_COOLDOWN + 1;
+    crashes = 0;
+    deps.report(`正常循环连续 ${KERNEL_CRASH_LIMIT} 次失败，停用 ${KERNEL_COOLDOWN} tick，期间只运行保底循环`);
+  };
 
   return () => {
     try { deps.takeover(); } catch (error) { deps.report('Memory 接管失败，引擎内部写入可能落到真实 Memory', error); }
@@ -74,22 +98,31 @@ export const createEntry = (deps: EntryDeps): (() => void) => {
       try {
         kernel ??= deps.assemble();
         const health = kernel.tick();
-        crashes = 0;
-        degraded = health === 'degraded' ? degraded + 1 : 0;
-        fallback = degraded >= SAFE_MODE_TICKS;
+        // 未超过上限的暂停 tick 既不计数也不运行保底：备份期间保底孵化会破坏开局证据（11.4）。
+        const counted = health !== 'paused' || (paused += 1) > PAUSE_LIMIT;
+        if (health !== 'paused') paused = 0;
+        if (counted) degraded = health === 'ok' ? 0 : degraded + 1;
+        fallback = counted && degraded >= SAFE_MODE_TICKS;
+        // 超限的暂停 tick 不是恢复的证据，不清零失败计数；否则软重置与普通暂停交替就能绕过冷却。
+        const overLimit = health === 'paused' && paused > PAUSE_LIMIT;
+        if (!overLimit) crashes = 0;
+        if (kernel.resetRequested()) {
+          // 软重置：本 tick 已完成并提交；丢弃全部进程实例与 heap 缓存，下一 tick 从已提交的文本重新装配。
+          try { kernel.dispose(); } catch (error) { deps.report('软重置时 kernel 清理失败', error); }
+          kernel = undefined;
+          // 正常开局流程最多约 7 个暂停 tick；超限后仍登记软重置说明 boot 陷入重置循环，按失败计数以进入冷却。
+          if (overLimit) {
+            deps.report(`连续暂停超过 ${PAUSE_LIMIT} tick 后 boot 仍登记软重置，按一次失败计数`);
+            countCrash();
+          }
+        }
       } catch (error) {
         deps.report('正常循环抛错，本 tick 改由保底循环运行；下一 tick 重新装配', error);
         try { kernel?.dispose(); } catch { /* 实例可能已不一致，清理失败不再处理。 */ }
         kernel = undefined;
         degraded = 0;
-        crashes += 1;
         fallback = true;
-        if (crashes >= KERNEL_CRASH_LIMIT) {
-          // 抛错的这个 tick 之后整整 KERNEL_COOLDOWN 个 tick 只运行保底循环。
-          cooldownUntil = deps.time() + KERNEL_COOLDOWN + 1;
-          crashes = 0;
-          deps.report(`正常循环连续 ${KERNEL_CRASH_LIMIT} 次抛错，停用 ${KERNEL_COOLDOWN} tick，期间只运行保底循环`);
-        }
+        countCrash();
       }
     }
     if (fallback) {

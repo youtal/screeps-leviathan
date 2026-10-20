@@ -79,7 +79,17 @@ RawMemory.set 返回不代表驱动已接受整个 tick。提交前保留待确�
 
 `createMemory({namespace, signature, schema, platform, auditUnits?})` 创建实例，不访问平台。platform 显式提供 `target`、`read()`、`write(text)`、`warn(message)`；游戏装配的 read/write 转发当前 tick 的 RawMemory，不能缓存上一 tick 的平台对象。
 
-实例提供 `beginTick(facts)`、`initialize(marker)`、`partitions(owner)`、`entities(owner)`、`maintain(limit?)`、`commit()`、`sizes()`、`ready()`、`failed()`、`dispose()`。`ready()` 表示数据可用（命名空间已加载或已初始化），`failed()` 表示加载失败已锁存，两者都不抛错，供 kernel 判断 Memory 为空的阶段与健康状态。游戏装配用 `createGamePlatform(warn)` 取得绑定全局 RawMemory 的平台端口，装配方自身不访问 RawMemory（架构 4.2）。`partitions` 返回已有 PartitionFactory；`entities` 返回三个已有 EntitySpace。其余是 kernel.memory 宿主入口，不向 contracts 扩展业务 API。创建实例、加载、初始化、注册分区/切片、commit 的先后由宿主控制；初始化不立即写入。
+实例提供 `beginTick(facts)`、`initialize(marker)`、`clear(marker)`、`summary()`、`loadedText()`、`sys()`、`epoch()`、`partitions(owner)`、`entities(owner)`、`maintain(limit?)`、`commit()`、`sizes()`、`ready()`、`failed()`、`dispose()`。`ready()` 表示数据可用（命名空间已加载或已初始化），`failed()` 表示加载失败已锁存，两者都不抛错，供 kernel 判断 Memory 为空的阶段与健康状态。游戏装配用 `createGamePlatform(warn)` 取得绑定全局 RawMemory 的平台端口，装配方自身不访问 RawMemory（架构 4.2）。`partitions` 返回已有 PartitionFactory；`entities` 返回三个已有 EntitySpace。其余是 kernel.memory 宿主入口，不向 contracts 扩展业务 API。创建实例、加载、初始化、注册分区/切片、commit 的先后由宿主控制；初始化不立即写入。
+
+为 boot 特权端口（[bootPort](./bootPort.md)）提供的宿主能力：
+
+- `summary()`、`loadedText()`：加载时一并缓存原始文本与概要（按 11.3 判断是否为空、能否解析、根键、签名相符的项目标记，判定规则见 [bootPort](./bootPort.md#3-操作)），加载失败时同样可用；文本保留到本实例销毁，软重置后由新实例重新读取。
+- `clear(marker)`：整体替换根为只含本项目命名空间的新根，清除加载失败的锁存，所有已发布的分区与切片访问器失效；与 `initialize` 一样不立即写入，下一次 commit 完整编码。
+- `sys()`：项目标记的访问器，路径语义与单元访问器相同，始终指向当前命名空间的标记；提交时额外按项目标记结构与装配身份校验，失败按单元级隔离处理（沿用上次合法标记并告警）。
+
+为 kernel.segments 提供的宿主能力：
+
+- `epoch()`：最近一次合法项目标记的 epoch，供页头写出与校验（[segments](./segments.md) 第 4 节）。与上次合法标记的编码在同一处建立和更新：加载、初始化、清空时立即生效，`sys` 写入经提交校验并成功调用写入口后更新；隔离或写入失败时保持不变。O(1)，不抛错；Memory 不可用时为 0。
 
 facts 包含递增的 tick（同 tick 重入不重复处理）、当前 creep/flag 名称集合，以及可选的房间事实表 `{owned, protected, lastSeen}`。维护上限默认每 tick 累计 50 条记录，limit 指定本 tick 累计预算，游标跨 tick 轮转，不在每次维护创建全部记录数组。名称快照在 beginTick 时复制，看不到之后才创建的 creep/flag，因此每条实体记录在 heap 中保存创建 tick（不持久化）：creep 记录至少存在 2 tick、flag 记录至少存在 1 tick 才可因缺席回收。创建 tick 属于整条记录，为已有记录增加其他 owner 的切片不刷新；加载得到的记录不受此保护；回收后同名重建得到新的创建 tick。creep 只在相邻两个已观测 tick 均缺席时回收；跳 tick/reset 后重新积累证据。flag 不存在即回收。房间需完整可靠事实，且非自有、未受殖民地保护、距 lastSeen 超过 20000 tick 才回收；缺少事实时保留，Memory 不推断 colony 归属。维护同时推进已声明切片迁移。记录删除后所有原访问器失效；同名记录重新创建不会复用旧对象。
 

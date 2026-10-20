@@ -2,7 +2,9 @@
  * 文件摘要：app.assembly，把 kernel 及其服务与游戏环境装配起来（设计见 docs/design/kernel/README.md 第 7 节）。
  *
  * 所属位置：src/app/assembly/，只被 main.ts 使用。读取 Game、使用者设置（src/settings.ts）与全局 require，
- * 以参数注入 kernel；RawMemory 经 kernel.memory 的 createGamePlatform 绑定，本模块不直接访问持久化存储。
+ * 以参数注入 kernel；RawMemory 经 kernel.memory 的 createGamePlatform 与 kernel.segments 的 createGameSegmentsPlatform 绑定，
+ * InterShardMemory 由 kernel.intershard 在 globalThis 上检测，本模块不直接访问持久化存储。
+ * 版本号来自构建时注入的虚拟模块 virtual:release（rollup 内联插件，docs/design/kernel/bootPort.md 第 6 节）。
  * 第 2 步的临时内容：模块清单为空；临时 boot 只发布 AMBIGUOUS/medium，不执行任何不可逆操作，也不初始化 Memory，
  * 在 M1 第 6 步由 app.boot 替换。Memory 身份常量暂存于此，app.config 建立后迁入。
  * 状态：无模块级可变状态；createGameServices 每次调用创建新的服务对象，由入口在 heap 中缓存。
@@ -14,7 +16,9 @@ import { type GamePort, type Kernel, createKernel } from '@/kernel/lifecycle';
 import { type LogRoot, type LogSink, createLogRoot } from '@/kernel/logger';
 import { createGamePlatform } from '@/kernel/memory';
 import { createProfiler } from '@/kernel/profiler';
+import { createGameSegmentsPlatform } from '@/kernel/segments';
 import { loggerSettings } from '@/settings';
+import { release } from 'virtual:release';
 
 /** 本项目在 Memory 中的命名空间、签名与根 schema。 */
 export const MEMORY_IDENTITY = { namespace: 'leviathan', signature: 'leviathan', schema: 1 } as const;
@@ -113,6 +117,11 @@ export const createGameServices = (): GameServices => {
      */
     bucket: () => Game.cpu.bucket,
     /**
+     * @description 当前 shard 名；私服没有 Game.shard（附录 A F7）。
+     * @returns Game.shard.name；私服为 'x'。
+     */
+    shard: () => (Game as { shard?: { name?: string } }).shard?.name ?? 'x',
+    /**
      * @description 本 tick 存在的 creep 名称，含孵化中的 creep。
      * @returns 新建的名称集合。
      */
@@ -140,7 +149,7 @@ export const createGameServices = (): GameServices => {
 };
 
 /**
- * @description 用游戏服务装配 kernel：模块清单、临时 boot、Memory 配置与计时器。
+ * @description 用游戏服务装配 kernel：模块清单、临时 boot、Memory 配置、计时器、版本号与持久化平台端口。
  * @param services 游戏服务。
  * @returns 新的 kernel 实例；首个 tick 才加载 Memory。
  */
@@ -153,5 +162,8 @@ export const assemble = (services: GameServices): Kernel => {
     game: services.game,
     logRoot: services.logRoot,
     profiler: createProfiler({ cpuUsed: services.game.cpuUsed }),
+    release,
+    segments: createGameSegmentsPlatform(),
+    interShard: globalThis,
   });
 };

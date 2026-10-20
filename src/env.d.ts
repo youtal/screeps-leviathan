@@ -24,3 +24,12 @@ interface Console {
 }
 
 declare var console: Console;
+
+/**
+ * 构建时注入的版本号（docs/design/kernel/bootPort.md 第 6 节）：rollup 的内联插件提供此虚拟模块，
+ * 内容取自 package.json 的 version；单元测试由 Jest 的 moduleNameMapper 映射到测试替身。只有 app.assembly 导入它。
+ */
+declare module 'virtual:release' {
+  /** 当前构建的版本号，例如 "0.1.9"。 */
+  export const release: string;
+}
