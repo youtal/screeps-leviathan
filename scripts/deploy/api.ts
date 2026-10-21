@@ -16,6 +16,9 @@
  * `{ ok: 1, ...结果 }`。官服实现未开源，这两个接口在官服上的响应形状尚未核实（计划在官服非生效分支验证时以只读请求核实）。
  * 副作用：发起真实网络请求。fetch 由调用方注入，测试中替换为假实现。
  * 令牌只放在请求头中，不出现在 URL、日志或错误消息里。
+ * 每个请求同时附带 X-Username（取账户名）：私服后端以 passport-token 0.2.0 认证，要求 x-username 与 x-token 两个请求头
+ * 都存在，缺一个即判为缺少凭据（backend 3.3.0 lib/game/api/auth.js；passport-token lib/strategy.js），校验时不检查用户名的值；
+ * 官服只需要 X-Token，多出的请求头不影响认证（审计 DV-12）。
  */
 import type { Account, Branch, Modules } from './lib.ts';
 import { serverOrigin } from './lib.ts';
@@ -124,7 +127,7 @@ export const createApi = (account: Account, fetchImpl: typeof fetch = fetch, tim
     try {
       const response = await fetchImpl(url, {
         method,
-        headers: { 'Content-Type': 'application/json; charset=utf-8', 'X-Token': account.token },
+        headers: { 'Content-Type': 'application/json; charset=utf-8', 'X-Token': account.token, 'X-Username': account.name },
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
         signal: AbortSignal.timeout(timeoutMs),
       });

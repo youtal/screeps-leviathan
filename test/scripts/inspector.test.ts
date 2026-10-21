@@ -104,7 +104,9 @@ describe('体积与输出', () => {
     expect(sizes[0].path).toBe('leviathan.sys');
     expect(sizes.map((s) => s.path)).toEqual(expect.arrayContaining(['leviathan.part.boot.control', 'leviathan.creeps.c1.m', 'other']));
     expect(sizes.find((s) => s.path === 'leviathan.part.boot.control')!.length).toBe(JSON.stringify(unit).length);
-    expect(formatSizes(decodeMemoryData(gz(root)))).toContain(`Memory 总长度 ${JSON.stringify(root).length} 个字符`);
+    const text = formatSizes(decodeMemoryData(gz(root)));
+    expect(text).toContain(`Memory 重新序列化后的长度 ${JSON.stringify(root).length} 个字符`);
+    expect(text).toContain('原文可能更长');
   });
   test('根不是对象时 sizes 报告 CORRUPT，与 marker 一致，而不是报告为空', () => {
     for (const root of [[1, 2], 42, 'text']) {

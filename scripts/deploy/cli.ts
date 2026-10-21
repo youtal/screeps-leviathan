@@ -17,6 +17,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { createApi, type ScreepsApi } from './api.ts';
 import {
   type Account,
+  type Activation,
   type DeployArgs,
   accountHistory,
   activeWorldBranch,
@@ -66,22 +67,41 @@ const readHistoryFile = (): Record<string, unknown> => {
   }
 };
 
+/** 已读取并校验的部署历史：整个文件、本账户的键与本账户的切换记录。 */
+interface LoadedHistory {
+  readonly file: Record<string, unknown>;
+  readonly key: string;
+  readonly history: Activation[];
+}
+
+/**
+ * @description 读取部署历史并校验本账户的记录。凡是会改变服务器的命令，都在第一次写服务器之前调用，
+ * 文件损坏时在改变服务器之前失败（ultrareview 第 4 项、审计 DV-05）。
+ * @param account 目标账户。
+ * @returns 已校验的部署历史。
+ * @throws {Error} 文件不是合法 JSON，或本账户的记录形状不合法。
+ */
+const loadHistory = (account: Account): LoadedHistory => {
+  const file = readHistoryFile();
+  const key = historyKey(account);
+  return { file, key, history: accountHistory(file, key) };
+};
+
 /**
  * @description 切换世界的生效分支，然后重新读取分支列表，确认服务器上的生效分支确实已变更；
  * 确认后把这次切换追加到本机的部署历史。切换前的生效分支在切换前读取，首次切换也能记下账户原有的分支。
- * 部署历史在切换之前读取并校验（ultrareview 第 4 项）：文件损坏时在改变服务器之前失败，不会出现线上已切换、
- * 命令却报错且没有记录的情况。
+ * 部署历史须在调用方第一次写服务器之前读取并校验：upload 在上传之前取得并传入，其他命令省略时在切换之前读取。
  * @param api 绑定目标账户的客户端。
  * @param account 目标账户，用于定位部署历史。
  * @param branch 要切换到的分支名。
  * @param rollback 是否为 rollback 命令的切换。
+ * @param loaded 已校验的部署历史；省略时在切换之前读取。
  * @returns 无返回值；成功时输出切换结果并写部署历史。
  * @throws {Error} 部署历史不合法（切换前），请求失败，或切换后生效分支与目标不一致。
  */
-const activateAndConfirm = async (api: ScreepsApi, account: Account, branch: string, rollback: boolean): Promise<void> => {
-  const file = readHistoryFile();
-  const key = historyKey(account);
-  const history = accountHistory(file, key);
+const activateAndConfirm = async (api: ScreepsApi, account: Account, branch: string, rollback: boolean,
+  loaded: LoadedHistory = loadHistory(account)): Promise<void> => {
+  const { file, key, history } = loaded;
   const before = activeWorldBranch(await api.listBranches());
   await api.setActiveWorld(branch);
   const active = activeWorldBranch(await api.listBranches());
@@ -133,6 +153,8 @@ const upload = async (api: ScreepsApi, account: Account, args: DeployArgs): Prom
   const modules = collectModules(readFileSync(MAIN_FILE, 'utf8'), existsSync(MAP_FILE) ? readFileSync(MAP_FILE, 'utf8') : null);
 
   const { create } = planUpload(await api.listBranches(), target, args.activate);
+  // 覆盖生效分支时上传本身就改变线上代码，所以部署历史在第一次写服务器之前校验（审计 DV-05）。
+  const loaded = args.activate ? loadHistory(account) : undefined;
   if (create) {
     await api.cloneBranch(target, modules);
   } else {
@@ -145,7 +167,7 @@ const upload = async (api: ScreepsApi, account: Account, args: DeployArgs): Prom
   console.log(`已${create ? '新建' : '覆盖'}分支 ${target} 并通过回读校验（${Object.keys(modules).join('、')}）`);
 
   if (args.activate) {
-    await activateAndConfirm(api, account, target, false);
+    await activateAndConfirm(api, account, target, false, loaded);
   }
 };
 

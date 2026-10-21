@@ -203,6 +203,14 @@ describe('部署历史', () => {
     expect(() => accountHistory({ [key]: [{ to: 'b' }] }, key)).toThrow('形状不合法');
     expect(() => accountHistory([], key)).toThrow('顶层');
   });
+  test('审计 DV-06：重新激活当前生效分支不写入历史，反复覆盖不会把真实切换挤出窗口', () => {
+    let history = [switched('previous', 'current')];
+    for (let i = 0; i < HISTORY_LIMIT + 50; i += 1) history = appendActivation(history, switched('current', 'current'));
+    expect(history).toEqual([switched('previous', 'current')]);
+    const list = server(['previous', 'current'], 'current');
+    expect(rollbackTarget(history, list)).toEqual({ from: 'current', to: 'previous' });
+    expect(deleteBranchProblem(list, history, 'previous')).toContain('回滚目标');
+  });
   test('只保留最近 HISTORY_LIMIT 条记录', () => {
     let history: Activation[] = [];
     for (let i = 0; i < HISTORY_LIMIT + 5; i += 1) history = appendActivation(history, switched(`b${i}`, `b${i + 1}`));
@@ -242,6 +250,16 @@ describe('createApi', () => {
     expect(calls[0].url).toBe('https://screeps.com/api/user/branches');
     expect((calls[0].init.headers as Record<string, string>)['X-Token']).toBe(TOKEN);
     expect(calls[0].url).not.toContain(TOKEN);
+  });
+  test('审计 DV-12：每个请求附带 X-Username（账户名），私服后端缺少它时拒绝认证；令牌不出现在其中', async () => {
+    const api = createApi(account, fakeFetch({ ok: 1, list: [] }));
+    await api.listBranches();
+    await api.getMemory();
+    for (const { init } of calls) {
+      const headers = init.headers as Record<string, string>;
+      expect(headers['X-Username']).toBe('main');
+      expect(headers['X-Username']).not.toContain(TOKEN);
+    }
   });
   test('inspector 的只读请求：Memory 与 segment 都是 GET，查询参数按需附带，返回 data 字段原样', async () => {
     const api = createApi(account, fakeFetch({ ok: 1, data: 'gz:AAAA' }));

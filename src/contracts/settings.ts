@@ -26,7 +26,10 @@ export interface MemorySettings {
 
 /** app.boot 的使用者设置（架构 11.8、11.9，设计见 docs/design/app/boot.md 第 8 节）。 */
 export interface BootSettings {
-  /** 11.8 的 boot.autoClear：证据与备份满足时是否允许自动清空 Memory；关闭时改判 AMBIGUOUS 并通知人工。 */
+  /**
+   * 11.8 的 boot.autoClear：证据与备份满足时是否允许自动清空 Memory；关闭时改判 AMBIGUOUS 并通知人工。
+   * 只约束自动判定的清空，人工确认 boot.force('FRESH_START') 不受它约束（docs/design/app/boot.md 第 6.1 节）。
+   */
   readonly autoClear: boolean;
   /**
    * 只判定、发布模式，不执行初始化、备份、清空与软重置，也不写项目标记（11.9 的 boot.dryRun）。

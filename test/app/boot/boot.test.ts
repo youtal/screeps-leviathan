@@ -3,7 +3,7 @@
  * 覆盖：开局初始化（11.4 a）；外来 Memory 的备份与清空（b）；运行中途重生先软重置、新实例再备份清空（附录 C 用例 15）；
  * 中证据须两次判定一致（c′）；dryRun；autoClear 关闭与备份失败时改判 AMBIGUOUS；M1 接手分支初始化后保持 AMBIGUOUS、
  * boot.force 的生效与跨重建保留；廉价不变量；项目标记的维护（lastRun、release、fp 与 RECOVERY 时不更新）；
- * 模式变化只通知一次；控制台命令。
+ * 模式变化只通知一次；控制台命令；审计 DV-01、DV-02、DV-03、DV-10 的回归。
  */
 import { type BootFacts, createBoot } from '@/app/boot';
 import type { BootDefinition } from '@/contracts/boot';
@@ -201,6 +201,83 @@ test("ultrareview 第 2 项：11.4 c′ 因停运不足 GAP 判为 AMBIGUOUS 后
   b.h.rebuild();
   b.step();
   expect(b.sys()).toMatchObject({ epoch: 0, fp: { spawnIds: ['s0'] }, mode: { mode: 'AMBIGUOUS' } });
+});
+
+/**
+ * @description 推进若干 tick；kernel 登记软重置时按入口的做法重建实例。
+ * @param b boot 测试宿主。
+ * @param n tick 数。
+ * @returns 无返回值。
+ */
+const run = (b: ReturnType<typeof bootHarness>, n: number) => {
+  for (let i = 0; i < n; i += 1) { b.step(); if (b.h.kernel.resetRequested()) b.h.rebuild(); }
+};
+
+test('审计 DV-01：Memory 版本高于代码时，boot.force(FRESH_START) 不清空，无论 autoClear 是否开启', () => {
+  for (const autoClear of [true, false]) {
+    const memory = READY_MEMORY.replace('"schema":1', '"schema":2');
+    const b = bootHarness({ memory, world: opening(19990), settings: { autoClear } });
+    b.step();
+    (b.h.globals.boot as { force: (mode: string) => string }).force('FRESH_START');
+    run(b, 12);
+    expect({ autoClear, memory: b.h.platform.memory }).toEqual({ autoClear, memory });
+  }
+});
+
+test('审计 DV-01 方案 A：autoClear 关闭时，人工确认 boot.force(FRESH_START) 仍完成 b′ 的清空', () => {
+  const b = bootHarness({ memory: FOREIGN_TEXT, world: opening(undefined), settings: { autoClear: false } });
+  b.step();
+  expect(JSON.parse(b.h.platform.memory).other).toEqual({ data: 1 });
+  (b.h.globals.boot as { force: (mode: string) => string }).force('FRESH_START');
+  run(b, 12);
+  const saved = JSON.parse(b.h.platform.memory);
+  expect(Object.keys(saved)).toEqual(['leviathan']);
+  // b′ 先初始化（epoch 1），人工确认后备份并清空（epoch 2）。
+  expect(saved.leviathan.sys).toMatchObject({ epoch: 2, mode: { mode: 'FRESH_START', strength: 'strong' } });
+});
+
+test('审计 DV-02：开局时关闭 dryRun，下一 tick 重新判定并初始化', () => {
+  const b = bootHarness({ world: opening(19999), settings: { dryRun: true } });
+  b.step();
+  expect(b.h.platform.memory).toBe('');
+  (b.h.globals.boot as Record<string, unknown>).dryRun = false;
+  b.step();
+  expect(b.sys()).toMatchObject({ epoch: 1, mode: { mode: 'FRESH_START' } });
+});
+
+test('审计 DV-02：重生时关闭 dryRun，下一 tick 重新判定并登记软重置，不覆盖 lastRun', () => {
+  const memory = READY_MEMORY.replace('"spawnIds":[]', '"spawnIds":["s0"]');
+  const b = bootHarness({ memory, world: opening(19990, 's9', 'W5N5'), settings: { dryRun: true } });
+  b.state.t = 1000;
+  b.step();
+  (b.h.globals.boot as Record<string, unknown>).dryRun = false;
+  b.step();
+  expect(b.h.kernel.resetRequested()).toBe(true);
+  expect(b.sys()).toMatchObject({ lastRun: 1, fp: { spawnIds: ['s0'] } });
+});
+
+test('审计 DV-03：AMBIGUOUS 期间世界离开又回到开局状态，指纹不写入新 spawn，仍为 AMBIGUOUS', () => {
+  const memory = READY_MEMORY.replace('"rooms":[]', '"rooms":["W1N1"]').replace('"spawnIds":[]', '"spawnIds":["old"]');
+  const withCreeps = (creepCount: number): BootFacts => ({ ...opening(undefined, 'new', 'W1N1'), creepCount });
+  const b = bootHarness({ memory, world: withCreeps(0) });
+  b.state.t = 1000;
+  b.step();
+  b.state.world = withCreeps(1);
+  b.step();
+  expect(b.sys()).toMatchObject({ fp: { spawnIds: ['old'] }, mode: { mode: 'AMBIGUOUS' } });
+  b.state.world = withCreeps(0);
+  b.step();
+  b.h.rebuild();
+  b.step();
+  expect(b.sys()).toMatchObject({ epoch: 0, fp: { spawnIds: ['old'] }, mode: { mode: 'AMBIGUOUS' } });
+});
+
+test('审计 DV-10：冻结重生证据期间照常写入当前版本号，lastRun 与 fp 仍冻结', () => {
+  const memory = READY_MEMORY.replace('"spawnIds":[]', '"spawnIds":["s0"]');
+  const b = bootHarness({ memory, world: opening(19990, 's9', 'W5N5'), settings: { autoClear: false } });
+  b.state.t = 1000;
+  b.step(); b.step();
+  expect(b.sys()).toMatchObject({ release: 'r1', lastRun: 1, fp: { spawnIds: ['s0'] }, mode: { mode: 'AMBIGUOUS' } });
 });
 
 test('control 分区申请失败：异常传播为 boot 失败，boot.force 返回错误而不是静默丢失人工指定', () => {

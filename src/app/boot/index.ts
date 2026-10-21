@@ -4,12 +4,11 @@
  * 所属位置：src/app/boot/，由 app.assembly 以 createBoot 创建并交给 kernel；kernel 在每 tick 的 boot 阶段最先调用。
  * 每 tick 流程：读取廉价不变量（spawn、建筑、creep 数与 Memory 是否就绪）→ 需要时完整判定（assess.ts）→
  * 按 11.8 的闸门经特权端口执行（初始化；备份后清空；必要时先软重置）→ setMode 发布并在模式变化时 Game.notify →
- * 按 6.7 维护项目标记（lastRun 每 tick、release 每个实例一次、fp 每 FP_INTERVAL tick 与完整判定后）。
+ * 按 6.7 维护项目标记（lastRun 每 tick、release 每个实例一次、fp 每 FP_INTERVAL tick 与完整判定后，模式为 AMBIGUOUS 或 RECOVERY 时不写 fp）。
  * dryRun 只判定与发布，不调用端口、不写项目标记。
  * 状态（heap，随 kernel 实例存在，软重置与 global reset 后从头开始）：加载时的概要、上一 tick 的不变量、
  * 是否需要在下一 tick 重新判定、连续判定的情形与次数（中证据清空要求两次一致）、本实例是否有过非暂停的就绪 tick
  * （此后普通模块可能已 setup，清空前须软重置）、本 Memory 的清空被闸门拦下后是否冻结 lastRun 与 fp、
- * 开局世界中本 Memory 判为 AMBIGUOUS 后是否冻结 fp、
  * 人工指定的模式（同时持久化在 part.boot.control）与 dryRun 覆盖值。
  */
 import type { BootDefinition, ProjectMarker, RawMemorySummary } from '@/contracts/boot';
@@ -147,10 +146,6 @@ export const createBoot = (options: BootOptions): BootDefinition => ({
     // 本系统 Memory 的清空被闸门拦下（autoClear 关闭或备份失败）后为 true：不写 lastRun 与 fp，保留重生证据，
     // 直到下一次完整判定重新得出结论；global reset 后首个 tick 必然完整判定，届时按事实重新设定。
     let frozen = false;
-    // 开局世界中本系统 Memory 判为 AMBIGUOUS（11.4 c′ 证据不足）后为 true：不写 fp，lastRun 照常写（ultrareview 第 2 项）。
-    // 写入 fp 会把当前 spawn 记进指纹，下一次完整判定即按 11.4 d 判为 NORMAL，未经确认就认领上一局的 Memory；
-    // lastRun 不能冻结：系统实际在运行，冻结会伪造"停运超过 GAP"的证据，使 c′ 改判开局并清空。生命周期同 frozen。
-    let fpFrozen = false;
     let releaseWritten = false;
     // 人工指定的模式；forceSynced 为 false 时尚未与 control 分区同步（Memory 就绪后同步）。
     let forced: BootMode | null = null;
@@ -261,6 +256,7 @@ export const createBoot = (options: BootOptions): BootDefinition => ({
         return { verdict: v, paused: false, hold: false };
       }
       if (v.action !== 'clear') return { verdict: v, paused: false, hold: false };
+      // autoClear 只约束自动判定的清空；boot.force('FRESH_START') 本身是人工确认，不受它约束（boot 设计第 6.1 节）。
       if (!options.settings.autoClear && v.case !== 'force') return blocked(v, mem, 'autoClear 关闭，未清空');
       if (v.strength === 'medium' && streak.count < 2) {
         // 中证据先开始备份：备份跨 tick，期间为暂停 tick，普通模块不会 setup；下一 tick 再判定一次确认。
@@ -323,7 +319,6 @@ export const createBoot = (options: BootOptions): BootDefinition => ({
       rejudge = false;
       frozen = false;
       const outcome = execute(v, mem);
-      fpFrozen = mem.state === 'OURS' && outcome.verdict.mode === 'AMBIGUOUS' && v.case.startsWith('11.4');
       publish(outcome.verdict, time, outcome.hold, before);
       return { facts, paused: outcome.paused, hold: outcome.hold };
     };
@@ -333,8 +328,11 @@ export const createBoot = (options: BootOptions): BootDefinition => ({
      * 模式为 RECOVERY 时不更新，保留损失前的资产作为恢复的比较基准。dryRun 与 Memory 不可用时不写。
      * 清空尚待执行（中证据等待确认、软重置、备份进行中）时也不写：重生的证据正是"spawn 不在指纹中、lastRun 早于放置"，
      * 在新实例或下一次判定读到之前更新它们，会使判定改为 NORMAL（附录 C 用例 15）。调用方据此跳过本函数；
-     * 本系统 Memory 的清空被闸门拦下后（frozen）同样跳过，理由相同。开局世界中本系统 Memory 判为 AMBIGUOUS 后（fpFrozen）
-     * 只跳过 fp，lastRun 照常写。
+     * 本系统 Memory 的清空被闸门拦下后（frozen）同样跳过，理由相同；release 不是证据，由 markRelease 另行写入（审计 DV-10）。
+     * 已持久化的模式为 AMBIGUOUS 时不写 fp、lastRun 照常写（审计 DV-03）：AMBIGUOUS 表示资产归属尚未确认，写入 fp 会把
+     * 当前 spawn 记进指纹，之后世界回到开局状态时即按 11.4 d 判为 NORMAL，未经确认就认领上一局的 Memory；
+     * 这一条件随持久化的模式而定，世界离开开局状态（判定落入"11.7 OURS 保持 AMBIGUOUS"）或 global reset 后同样成立。
+     * lastRun 不能冻结：系统实际在运行，冻结会伪造"停运超过 GAP"的证据，使 c′ 改判开局并清空。
      * @param time 当前 tick。
      * @param facts 本 tick 完整判定读取的事实；没有完整判定时为 undefined。
      * @returns 无返回值。
@@ -343,10 +341,20 @@ export const createBoot = (options: BootOptions): BootDefinition => ({
       const current = marker();
       if (!current || dryRun()) return;
       ctx.sys.set(['lastRun'], time);
-      if (!releaseWritten) { ctx.sys.set(['release'], options.release); releaseWritten = true; }
-      if (current.mode.mode !== 'RECOVERY' && !fpFrozen && (facts || time % FP_INTERVAL === 0)) {
+      if (current.mode.mode !== 'RECOVERY' && current.mode.mode !== 'AMBIGUOUS' && (facts || time % FP_INTERVAL === 0)) {
         ctx.sys.set(['fp'], fingerprint(facts ?? options.facts()));
       }
+    };
+
+    /**
+     * @description 每个实例在 Memory 首次就绪时写入一次当前版本号（6.7）。release 不是重生证据，冻结证据时照常写入（审计 DV-10）；
+     * 清空尚待执行与 dryRun 时不写，与其他字段一致。
+     * @returns 无返回值。
+     */
+    const markRelease = (): void => {
+      if (releaseWritten || dryRun() || marker() === null) return;
+      ctx.sys.set(['release'], options.release);
+      releaseWritten = true;
     };
 
     ctx.console.command('assess', 'boot.assess()：读取当前事实完整判定一次，返回模式、强度、情形与证据；不执行、不发布', () => {
@@ -363,6 +371,9 @@ export const createBoot = (options: BootOptions): BootDefinition => ({
     ctx.console.setting('dryRun', 'boot.dryRun：为 true 时只判定与发布模式，不执行任何操作（只存于 heap）', dryRun, (value) => {
       if (typeof value !== 'boolean') throw new TypeError('dryRun 须为布尔值');
       dryRunOverride = value;
+      // 下一 tick 重新完整判定（审计 DV-02）：dryRun 期间判定的动作没有执行；不重新判定时，关闭 dryRun 会恢复标记维护，
+      // 却不执行闸门，覆盖"lastRun 早于放置"这类重生证据。
+      rejudge = true;
     });
 
     return {
@@ -382,6 +393,7 @@ export const createBoot = (options: BootOptions): BootDefinition => ({
         let paused = false;
         let hold = false;
         if (full) ({ facts, paused, hold } = judge(time));
+        if (!hold) markRelease();
         if (!hold && !frozen) maintain(time, facts);
         wasReady = marker() !== null;
         if (wasReady) syncForce();

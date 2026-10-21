@@ -105,13 +105,18 @@ async function run() {
     const limitPending = world.evalInBot('Game.cpu.limit');
     await world.tick(1);
     assert.equal(await limitPending, 20, '压低后的 CPU 额度应生效');
-    const squeezedFrom = (await marker(world)).lastRun;
-    await world.tick(20);
+    // 逐 tick 读取 lastRun：每个 tick 都应恰好前进 1，只比较最终值不能排除中间的提交中断（审计 DV-09）。
+    let lastRun = (await marker(world)).lastRun;
+    for (let i = 0; i < 20; i += 1) {
+      await world.tick(1);
+      const next = (await marker(world)).lastRun;
+      assert.equal(next, lastRun + 1, `压低 CPU 期间正常循环应每 tick 提交（第 ${i + 1} 个 tick：${lastRun} → ${next}）`);
+      lastRun = next;
+    }
     const squeezed = await status(world);
     assert.match(squeezed, /健康 ok/, `压低 CPU 期间健康状态应为 ok：\n${squeezed}`);
     const budget = (text) => Number(/B ([\d.]+)/.exec(text)?.[1]);
     assert.ok(budget(squeezed) < budget(normal), `压低 CPU 后预算应下降：${budget(normal)} → ${budget(squeezed)}`);
-    assert.ok((await marker(world)).lastRun >= squeezedFrom + 20, '压低 CPU 期间正常循环应每 tick 提交');
     await setCpu(world, 100, 10000);
 
     // 正常循环失效：schema 改为高于代码的值，同一 tick halt，丢弃旧 global 的写回；新 global 加载失败，保底接管。
