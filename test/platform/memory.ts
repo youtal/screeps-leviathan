@@ -12,6 +12,9 @@
  *   且一直保持到再次调用。激活的页出现在下一 tick 的 `RawMemory.segments` 中，从未写过的页为 ""。
  * - tick 结束时 `RawMemory.segments` 中的每个键都被保存（包括本 tick 读到的激活页）：最多 10 个键，
  *   页号 0–99，值为不超过 100 × 1024 个字符的字符串；违反时整个 tick 失败，本 tick 的写入全部丢弃。
+ * - `Game.cpu.halt()`（以 tick 的 halt 选项模拟）：driver 销毁玩家的 isolate，本次运行结果整体作废，Memory、segment 与
+ *   激活请求都不保存，下一 tick 在新的 global 中运行（driver 5.3.0 的 lib/runtime/user-vm.js 中 `_halt` 与
+ *   lib/runtime/make.js 中 `didHaltByUserRequest` 的处理）。
  * 状态：持久化的 Memory 文本、segment 内容与激活请求保存在 createMemoryPlatform 返回的闭包中；
  * 副作用：tick 期间在目标全局对象（默认 globalThis）上定义 Memory 与 RawMemory。
  */
@@ -56,10 +59,12 @@ export interface MemoryPlatform {
   /**
    * @description 执行一个 tick：安装 Memory 访问器与 RawMemory，运行 run，再按平台规则持久化。
    * @param run 本 tick 的用户代码。
+   * @param options 可选项。
+   * @param options.halt 为 true 时模拟本 tick 内调用了 `Game.cpu.halt()`：运行结果整体作废，不保存任何数据。
    * @returns 用户代码抛出的异常；未抛出时 error 为 undefined。
    * @throws {PlatformError} tick 结束时 segment 数量、页号、类型或长度违规，本 tick 的写入全部丢弃。
    */
-  tick(run: () => void): TickResult;
+  tick(run: () => void, options?: { readonly halt?: boolean }): TickResult;
 }
 
 /** 测试中访问 RawMemory 内部状态所用的形状；_parsed 是引擎缓存的已解析 Memory。 */
@@ -89,10 +94,12 @@ export const createMemoryPlatform = (options: MemoryPlatformOptions = {}): Memor
   /**
    * @description 执行一个 tick，语义见 MemoryPlatform.tick 与文件摘要中的平台规则。
    * @param run 本 tick 的用户代码。
+   * @param options 可选项。
+   * @param options.halt 模拟 `Game.cpu.halt()`，本 tick 不保存任何数据。
    * @returns 用户代码抛出的异常；未抛出时 error 为 undefined。
    * @throws {PlatformError} tick 结束时 segment 保存违规。
    */
-  const tick = (run: () => void): TickResult => {
+  const tick = (run: () => void, options: { readonly halt?: boolean } = {}): TickResult => {
     let data = memory;
     let requested: number[] | null = null;
     const loaded = Object.create(null) as Record<string, unknown>;
@@ -183,6 +190,8 @@ export const createMemoryPlatform = (options: MemoryPlatformOptions = {}): Memor
     } catch (thrown) {
       error = thrown;
     }
+    // halt：driver 丢弃整次运行结果，持久状态保持本 tick 开始前的样子。
+    if (options.halt) return { error };
 
     if (raw._parsed) {
       data = JSON.stringify(raw._parsed);
