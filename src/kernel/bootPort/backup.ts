@@ -8,6 +8,8 @@
  *   verifying → done：下一 tick 读到全部页，页头的 g/i/n 与正文都与快照一致；
  *   不一致时整批重写一次（回到 writing），再不一致为 failed。
  * 只在全部写出后才请求激活，避免读到本批尚未覆盖的旧页；代价是比"写出当 tick 即请求"多一个 tick。
+ * 切页：按 UTF-16 码元切分，页末为高位代理时少取一个码元，不把代理对拆到两页（审计 S-27）：公开 driver 经 JSON 转义孤立代理，
+ * 往返无损，但存储若以 utf8 写入且不转义，孤立代理会损坏。少取使页数可能多于按长度估算的值，切完后按实际页数检查容量。
  * 状态：随 kernel 实例存在；done 与 failed 都保持到实例销毁，软重置后新实例从 idle 重新开始。
  */
 import type { BackupState } from '@/contracts/boot';
@@ -87,7 +89,15 @@ export const createBackup = (deps: BackupDeps): (() => BackupState) => {
       if (text === undefined || text.length > BACKUP_CAPACITY) return finish('failed');
       if (text.trim() === '') return finish('done');
       chunks = [];
-      for (let start = 0; start < text.length; start += BACKUP_CHUNK) chunks.push(text.slice(start, start + BACKUP_CHUNK));
+      for (let start = 0; start < text.length;) {
+        let end = Math.min(start + BACKUP_CHUNK, text.length);
+        // 页末码元为高位代理（0xD800–0xDBFF）且后面还有码元时少取一个，使代理对留在下一页。
+        const last = text.charCodeAt(end - 1);
+        if (end < text.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
+        chunks.push(text.slice(start, end));
+        start = end;
+      }
+      if (chunks.length > STORES.backup.pages.length) return finish('failed');
       generation = deps.time();
       if (!submit()) return finish('failed');
       phase = 'writing';

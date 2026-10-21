@@ -72,7 +72,8 @@ export const formatStatus = (s: KernelStatus): string => {
     + `Memory ${s.memory}，B ${num(s.budget)}，R ${num(s.reserve)}`;
   const lines = s.modules.map((m) => `${m.id}（${m.tier}）${STATE_TEXT[m.state]}`
     + `${m.switch ? `，覆盖 ${m.switch}` : m.startPaused ? '，默认暂停' : ''}`
-    + `，耗用 ${num(m.cost)}，连续落选 ${m.starve}，实例 ${m.instances}（熔断 ${m.brokenInstances}）`);
+    + `，耗用 ${num(m.cost)}，连续落选 ${m.starve}，实例 ${m.instances}（熔断 ${m.brokenInstances}）`
+    + `${m.reason ? `，未启动：${m.reason}` : ''}`);
   return [head, ...(lines.length ? lines : ['（没有模块）'])].join('\n');
 };
 

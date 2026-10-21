@@ -1206,7 +1206,7 @@ spawnQueue 统一仲裁各领域提出的孵化需求，同优先级按 deadline
 启动判定位于 `app.boot`，在每 tick 的 boot 阶段运行，根据事实判断当前局面，输出运营模式，并在证据与闸门允许的范围内执行不可逆操作。判定逻辑是纯函数 `assess(facts) → {mode, strength, evidence[]}`。
 
 - 每次 global reset 运行完整判定。
-- 平时每 tick 只检查廉价不变量：spawn 数、`Game.structures` 数量、`Game.creeps` 数量、项目标记是否存在；任何一项突变都触发完整判定。
+- 平时每 tick 只检查廉价不变量：spawn 数、`Game.structures` 数量、`Game.creeps` 数量、项目标记是否存在，以及 tick 是否连续；任何一项突变或 tick 断档都触发完整判定。没有对象的玩家不被调度（附录 A，F6），同一 global 中的重生必然经过不运行代码的 tick，而重新放置后的三个数量可能与重生前相同。
 - 开局第一 tick 不一定伴随 global reset（附录 A，F6），所以判定不能只在 reset 时运行。
 
 ### 11.2 模式集合

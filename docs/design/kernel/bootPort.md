@@ -44,7 +44,7 @@ initialize(): void;
 - **概要与加载**：概要只校验命名空间中的 `sys`；命名空间的字段集合与单元包络在加载时校验。`sys` 合法而其余结构不合法时，`parsed` 为 true，`marker` 为完整的标记，但 Memory 加载失败并锁存，访问 `sys`、`memory`、`rooms`、`creeps`、`flags` 都抛错。boot 以访问 `sys` 抛错识别"标记合法但 Memory 无法加载"；这种情形的判定与处置由 app.boot 的设计规定。schema 低于当前版本的标记同样无法加载（[memory](./memory.md)）。
 - **软重置与 boot 失败**：boot 钩子抛错的 tick 不采信判定结果（[内核设计](./README.md#2-tick-流水线)），本 tick 登记的软重置随之作废，kernel 实例保留，下一 tick boot 在同一实例中重新判定。否则"登记软重置后抛错"的 boot 会使入口每 tick 重建 kernel 并完整解析 Memory；这样的 tick 计为 degraded 而不是 paused，不受 `PAUSE_LIMIT` 与冷却的约束。
 - **备份内容**：`summary()` 与 `backup()` 都基于本 kernel 实例加载时读到的原始文本，而不是当前内存中的数据，所以迁移或清空之前的备份反映的是迁移前的原貌。软重置后的新实例重新读取已提交的文本。空文本无需备份，直接返回 `done`。
-- **备份格式**：按 [segments](./segments.md) 的页格式，store 为 `backup`，数据版本 `v` 为 1，`g` 为快照 tick，`e` 为写出时的 epoch，正文按顺序切分原始文本。回读校验经 `PageReader` 激活备份页，下一 tick 比较拼接结果与快照；不一致时整批重写一次，仍不一致返回 `failed`。
+- **备份格式**：按 [segments](./segments.md) 的页格式，store 为 `backup`，数据版本 `v` 为 1，`g` 为快照 tick，`e` 为写出时的 epoch，正文按顺序切分原始文本。切分按 UTF-16 码元进行，页末为高位代理时少取一个码元，不把代理对拆到两页：公开 driver 经 JSON 转义孤立代理，往返无损，但存储若以 utf8 写入且不转义，孤立代理会损坏。少取使实际页数可能多于按长度估算的页数，切完后按实际页数检查容量，超出时返回 `failed`。回读校验经 `PageReader` 激活备份页，下一 tick 比较拼接结果与快照；不一致时整批重写一次，仍不一致返回 `failed`。
 - **备份区容量**：10 页约 1,000,000 字符，小于 Memory 的 2 MB 上限。超出时返回 `failed`，boot 按闸门不清空（11.8 要求已完成备份）。压缩备份不在 M1 范围。
 - **清空与软重置**：11.4 规定若判定发生时本 global 已运行过，先软重置。kernel 以“本 kernel 实例的普通模块是否已 setup”作为可检查的条件强制这一顺序：普通模块持有的访问器在清空后全部失效，必须重建。
 - **暂停 tick**：备份进行中与登记软重置的 tick，kernel 跳过普通模块 setup 与业务阶段（[内核设计](./README.md#2-tick-流水线)）。所以 Memory 已就绪时（11.4 c），软重置后的新实例在备份完成前不会 setup，备份完成的 tick 仍能清空；判定与清空之间也没有业务模块或保底循环的动作改变开局世界。
@@ -96,6 +96,6 @@ boot 每次 global reset 时更新 `sys.release`（6.7），也需要当前版�
 
 ## 7. 验证
 
-- 单元测试用严格平台模拟覆盖：端口只在 boot 期间有效；`summary` 对空、引擎默认空对象形状、外来、损坏、同签名同 schema、同签名不同 schema 的文本，以及标记合法而命名空间其余结构不合法时概要给出标记、访问 `sys` 抛错；`initialize` 与 `clearMemory` 的前置条件、标记初值与 epoch；清空后旧访问器失效、`sys` 仍可用；备份的分页、跨 tick 写出、回读校验、超容量与不一致；备份进行中与登记软重置的 tick 不 setup、不运行业务阶段、返回 `paused`；Memory 已就绪时“软重置 → 备份 → 清空”能在新实例中完成；软重置在下一 tick 生效且不计为抛错；boot 抛错时本 tick 的软重置登记作废；连续暂停超过 `PAUSE_LIMIT` 后计为 degraded；`sys` 写入非法标记时的隔离，以及隔离期间备份页头仍取已持久化的 epoch。
+- 单元测试用严格平台模拟覆盖：端口只在 boot 期间有效；`summary` 对空、引擎默认空对象形状、外来、损坏、同签名同 schema、同签名不同 schema 的文本，以及标记合法而命名空间其余结构不合法时概要给出标记、访问 `sys` 抛错；`initialize` 与 `clearMemory` 的前置条件、标记初值与 epoch；清空后旧访问器失效、`sys` 仍可用；备份的分页（不拆开代理对，按实际页数检查容量）、跨 tick 写出、回读校验、超容量与不一致；备份进行中与登记软重置的 tick 不 setup、不运行业务阶段、返回 `paused`；Memory 已就绪时“软重置 → 备份 → 清空”能在新实例中完成；软重置在下一 tick 生效且不计为抛错；boot 抛错时本 tick 的软重置登记作废；连续暂停超过 `PAUSE_LIMIT` 后计为 degraded；`sys` 写入非法标记时的隔离，以及隔离期间备份页头仍取已持久化的 epoch。
 - 构建：`npm run build` 的产物包含 `package.json` 的版本号；边界测试覆盖 `virtual:release` 的放行与拒绝。
 - 私服场景：开局时的初始化（kernel-smoke）；外来 Memory 经人工确认后的软重置、备份、回读与清空，以及有资产而 Memory 为空时的初始化（boot-judgment）。Memory 丢失后的认领属于 M2 的接手流程（[app.boot](../app/boot.md#43-m1-尚未交付的分支)）。

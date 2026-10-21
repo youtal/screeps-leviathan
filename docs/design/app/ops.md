@@ -16,10 +16,10 @@ app.ops 以 `ops` 命名空间注册运维命令（[console](../kernel/console.m
 | 命令 | 作用 | 生效 |
 | --- | --- | --- |
 | `ops.help()` | 列出命令与说明（console 自动提供） | 立即 |
-| `ops.status()` | 健康状态、模式、版本号；每个模块的层级、状态（运行、暂停、熔断、初始化失败、依赖暂停）、平滑耗用与连续落选次数；实例只汇总数量与熔断数；末尾附入口状态。kernel 不可用时（抛错重建、冷却期）只返回入口状态（第 4 节）。模块状态还有"未 setup"（Memory 尚未就绪） | 立即，读取本 tick 主循环结束时的状态 |
-| `ops.status(id)` | 一个模块的状态行：层级、状态、平滑耗用、连续落选次数与实例汇总 | 立即 |
+| `ops.status()` | 健康状态、模式、版本号；每个模块的层级、状态（运行、暂停、熔断、初始化失败、依赖暂停）、平滑耗用与连续落选次数；实例只汇总数量与熔断数；末尾附入口状态。kernel 不可用时（抛错重建、冷却期）只返回入口状态（第 4 节）。模块状态还有"未 setup"（Memory 尚未就绪）。被清单拒绝的模块（id 为空、保留名、重复或依赖无效）同样列出，状态为初始化失败并附拒绝原因，空 id 显示为"（空 id）" | 立即，读取本 tick 主循环结束时的状态 |
+| `ops.status(id)` | 一个模块的状态行：层级、状态、平滑耗用、连续落选次数与实例汇总；被拒模块附拒绝原因 | 立即 |
 | `ops.pause(id)` / `ops.resume(id)` | 运维暂停或恢复一个模块，覆盖清单默认值 | 下一 tick |
-| `ops.unset(id)` | 清除该模块的运维覆盖，恢复清单默认值 | 下一 tick |
+| `ops.unset(id)` | 清除该 id 的运维覆盖，恢复清单默认值；接受任何 id，包括已移除、被清单拒绝与生存层模块的记录 | 下一 tick |
 | `ops.recover(key)` | 清除进程（模块 id 或完整进程键）的熔断状态与失败计数，保留钩子与上下文，不重新 setup（[内核设计](../kernel/README.md#33-错误边界与熔断)） | 下一 tick 起参与调度 |
 | `ops.log(level, on)` | 修改日志根对象的默认开关（`LogRoot.setDefault`） | 立即，只存于 heap |
 | `ops.log(level, on, scope)` | 修改一个作用域的覆盖值，`on` 为 `null` 时恢复默认 | 立即，只存于 heap |
@@ -46,12 +46,12 @@ interface ModuleManifest {
 ### 3.2 存储与生效
 
 - **存储**：kernel 自己的分区 `part.kernel.switches`，内容为 `{ [模块 id]: 'pause' | 'run' }`，只记录运维覆盖。没有记录的模块取清单的 `startPaused`。kernel 以保留 owner `kernel` 申请分区，所以清单校验拒绝模块 id `kernel`（[console](../kernel/console.md#4-安装)）。分区在 Memory 首次就绪、普通模块 setup 之前申请，不存在时创建为空对象，所以每份已初始化的 Memory 都会出现这个分区；申请失败时记录错误，按清单默认值运行。
-- **读取**：kernel 在每 tick 准入前读取一次。分区的单元版本与内容由 kernel 管理；记录了不存在的模块 id 时忽略该项并告警一次，不自动删除，避免装配临时缺失模块时丢失运维意图。
+- **读取**：kernel 在每 tick 准入前读取一次。分区的单元版本与内容由 kernel 管理；记录了不存在的模块 id 时忽略该项并告警一次，不自动删除，避免装配临时缺失模块时丢失运维意图，不再需要时以 `ops.unset(id)` 清除。被清单拒绝的模块的记录同样不生效，告警写明模块未启动。记录的值不是 `pause` 或 `run` 时（只可能来自手工编辑），按没有记录处理（取 `startPaused`）并告警一次。
 - **语义**（5.5）：暂停只跳过钩子，不释放实例、不重新 setup；恢复后从下一 tick 继续。
   - 暂停的模块，连同它的全部实例，以及经 `requires` 依赖它的模块，都不参与准入（[cpu](../kernel/cpu.md#32-准入流程)）。
   - 暂停的模块仍执行 `setup`：setup 只在 global 内执行一次，暂停期间不执行，就无法在恢复时补做而不违反"不重新 setup"。
   - 运维暂停不计入熔断，也不使健康状态变为 degraded：能被暂停的只有非生存层模块（下一条），而健康状态只看生存层。
-- **生存层**：生存层模块不能经 `ops.pause` 暂停，命令拒绝并说明原因；Memory 中如有生存层模块的 `pause` 记录（例如手工编辑），kernel 忽略它并告警。生存层承担孵化、tower 与 bootstrap，暂停它们等同于关闭基座；需要停用时应通过发布或回滚完成。
+- **生存层**：生存层模块不能经 `ops.pause` 暂停，命令拒绝并说明原因；Memory 中如有生存层模块的 `pause` 记录（例如手工编辑），kernel 忽略它并告警，`ops.unset(id)` 可以清除它。生存层承担孵化、tower 与 bootstrap，暂停它们等同于关闭基座；需要停用时应通过发布或回滚完成。
 - **Memory 不可用时**：Memory 为 empty、加载失败或普通模块尚未 setup（分区尚未申请）时，`pause`、`resume`、`unset` 返回错误结果，不写入；kernel 按清单默认值运行。
 
 ## 4. 宿主接口
@@ -61,7 +61,7 @@ app.ops 通过 kernel 的宿主接口工作，不导入 kernel 的实现（架�
 ```ts
 interface KernelOps {
   status(): KernelStatus;                        // 最近一次 tick 结束时的状态快照
-  setSwitch(id: ModuleId, value: 'pause' | 'run' | undefined): void;   // undefined 清除覆盖；生存层或未知 id 抛错
+  setSwitch(id: ModuleId, value: 'pause' | 'run' | undefined): void;   // undefined 清除任何 id 的覆盖；设置时生存层或未知 id 抛错
   recover(key: string): void;                    // 未知进程或初始化失败时抛错
   logger(key: string): Logger;                   // 模块或实例的 Logger，供 ops.log 修改作用域覆盖；未知进程抛错
 }

@@ -1,6 +1,7 @@
-/** MS-01～04 与审计 PA-02：用行为与操作计数验证简化，不以 Node 耗时推断 Screeps CPU 收益。 */
+/** MS-01～04、审计 PA-02 与 S-24：用行为与操作计数验证简化，不以 Node 耗时推断 Screeps CPU 收益。 */
+import * as json from '@/kernel/memory/json';
 import type { Accessor } from '@/contracts/memory';
-import { copyJson, isObject, validateJson } from '@/kernel/memory/json';
+import { checkParsed, copyJson, isObject, validateJson } from '@/kernel/memory/json';
 import { deleteAt, getAt, hasAt, setAt } from '@/kernel/memory/path';
 import { touch, type Unit } from '@/kernel/memory/unit';
 import { harness, marker, spec, type Data } from './harness';
@@ -130,4 +131,42 @@ test('PA-02：有写入的提交只编码脏单元，键片段复用登记时的
   // 拼接结果与全量编码一致。
   expect(large.text).toBe(JSON.stringify(JSON.parse(large.text)));
   expect(JSON.parse(large.text).leviathan.creeps.c0.o.data.n).toBe(1);
+});
+
+describe('S-24：加载只检查非有限数', () => {
+  afterEach(() => { jest.restoreAllMocks(); });
+
+  /**
+   * @description 生成已初始化的 Memory 文本，分区 o/a 的数据为 data 的 JSON 文本（可含 JSON.stringify 写不出的 1e400）。
+   * @param data 分区数据的 JSON 文本。
+   * @returns Memory 原始文本。
+   */
+  const text = (data: string): string => JSON.stringify({ leviathan: { sys: marker, part: { o: { a: { version: 1, data: 0 } } },
+    rooms: {}, creeps: {}, flags: {} } }).replace('"data":0', `"data":${data}`);
+
+  test('深层数组中溢出为 Infinity 的数字在加载时被拒绝，加载失败锁存', () => {
+    const h = harness(text('{"x":[1,[2,{"y":-1e400}]]}'));
+    expect(() => h.tick(1, () => undefined)).toThrow(TypeError);
+    expect(h.memory.failed()).toBe(true);
+  });
+
+  test('合法的根照常加载；加载路径不调用完整的 validateJson', () => {
+    const full = jest.spyOn(json, 'validateJson');
+    const parsed = jest.spyOn(json, 'checkParsed');
+    const h = harness(text('{"x":[1,[2,{"y":3}]],"__proto__":{"z":4}}'));
+    h.tick(1, () => { expect(h.memory.ready()).toBe(true); });
+    expect(full).not.toHaveBeenCalled();
+    expect(parsed).toHaveBeenCalled();
+  });
+
+  test('checkParsed 与 validateJson 对 JSON.parse 的产物给出相同结论', () => {
+    for (const source of ['{"a":[1,2,{"b":null}],"c":"x"}', '[1e400]', '{"a":{"b":-1e999}}', '{"__proto__":[1]}', '1e400', '"s"']) {
+      const value: unknown = JSON.parse(source);
+      let full = true;
+      let parsed = true;
+      try { validateJson(value); } catch { full = false; }
+      try { checkParsed(value); } catch { parsed = false; }
+      expect([source, parsed]).toEqual([source, full]);
+    }
+  });
 });

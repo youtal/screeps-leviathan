@@ -15,9 +15,14 @@
  * - `Game.cpu.halt()`（以 tick 的 halt 选项模拟）：driver 销毁玩家的 isolate，本次运行结果整体作废，Memory、segment 与
  *   激活请求都不保存，下一 tick 在新的 global 中运行（driver 5.3.0 的 lib/runtime/user-vm.js 中 `_halt` 与
  *   lib/runtime/make.js 中 `didHaltByUserRequest` 的处理）。
+ * - CPU 超时（以 tick 的 timeout 选项模拟）：driver 以 "Script execution timed out" 结束运行，结果同样整体作废，但不销毁
+ *   isolate，下一 tick 沿用同一个 global 与 heap（driver 5.3.0 的 lib/runtime/make.js 第 279–293 行只为 halt、isolate 销毁与
+ *   heap 耗尽清除 VM；lib/runtime/runtime-driver.js 第 101–106 行）。替身在 node:vm 中以 timeout 运行用户代码：V8 的终止
+ *   与真实超时一样不执行 catch 与 finally。
  * 状态：持久化的 Memory 文本、segment 内容与激活请求保存在 createMemoryPlatform 返回的闭包中；
  * 副作用：tick 期间在目标全局对象（默认 globalThis）上定义 Memory 与 RawMemory。
  */
+import { runInNewContext } from 'node:vm';
 
 /** 引擎对 Memory 原始文本的长度上限（字符数）。 */
 export const MEMORY_LIMIT = 2 * 1024 * 1024;
@@ -61,10 +66,18 @@ export interface MemoryPlatform {
    * @param run 本 tick 的用户代码。
    * @param options 可选项。
    * @param options.halt 为 true 时模拟本 tick 内调用了 `Game.cpu.halt()`：运行结果整体作废，不保存任何数据。
+   * @param options.timeout 毫秒数；给出时在 node:vm 中以此超时运行 run，超时即模拟 CPU 硬终止：运行结果整体作废，
+   * heap 保留（替身不管理 heap，调用方的闭包照常留存），error 为超时错误。
    * @returns 用户代码抛出的异常；未抛出时 error 为 undefined。
    * @throws {PlatformError} tick 结束时 segment 数量、页号、类型或长度违规，本 tick 的写入全部丢弃。
    */
-  tick(run: () => void, options?: { readonly halt?: boolean }): TickResult;
+  tick(run: () => void, options?: TickOptions): TickResult;
+}
+
+/** tick 的可选项，语义见 MemoryPlatform.tick。 */
+export interface TickOptions {
+  readonly halt?: boolean;
+  readonly timeout?: number;
 }
 
 /** 测试中访问 RawMemory 内部状态所用的形状；_parsed 是引擎缓存的已解析 Memory。 */
@@ -96,10 +109,11 @@ export const createMemoryPlatform = (options: MemoryPlatformOptions = {}): Memor
    * @param run 本 tick 的用户代码。
    * @param options 可选项。
    * @param options.halt 模拟 `Game.cpu.halt()`，本 tick 不保存任何数据。
+   * @param options.timeout 模拟 CPU 超时的毫秒数，超时后本 tick 不保存任何数据。
    * @returns 用户代码抛出的异常；未抛出时 error 为 undefined。
    * @throws {PlatformError} tick 结束时 segment 保存违规。
    */
-  const tick = (run: () => void, options: { readonly halt?: boolean } = {}): TickResult => {
+  const tick = (run: () => void, options: TickOptions = {}): TickResult => {
     let data = memory;
     let requested: number[] | null = null;
     const loaded = Object.create(null) as Record<string, unknown>;
@@ -185,13 +199,16 @@ export const createMemoryPlatform = (options: MemoryPlatformOptions = {}): Memor
     });
 
     let error: unknown;
+    let timedOut = false;
     try {
-      run();
+      if (options.timeout === undefined) run();
+      else runInNewContext('run()', { run }, { timeout: options.timeout });
     } catch (thrown) {
       error = thrown;
+      timedOut = options.timeout !== undefined && thrown instanceof Error && /timed out/.test(thrown.message);
     }
-    // halt：driver 丢弃整次运行结果，持久状态保持本 tick 开始前的样子。
-    if (options.halt) return { error };
+    // halt 与 CPU 超时：driver 丢弃整次运行结果，持久状态保持本 tick 开始前的样子。
+    if (options.halt || timedOut) return { error };
 
     if (raw._parsed) {
       data = JSON.stringify(raw._parsed);

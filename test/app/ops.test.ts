@@ -1,7 +1,8 @@
 /**
  * 文件摘要：app.ops 的测试：以 kernel 测试宿主驱动真实 kernel，经控制台全局对象调用 ops 命令。
  * 覆盖：status 的文本与单个模块明细；pause、resume、unset 与下一 tick 生效；生存层暂停与 Memory 不可用时的错误结果；
- * recover；log 修改默认开关与作用域覆盖、参数校验；kernel 销毁后 status 返回入口状态、其他命令返回桩结果（审计 LC-04）。
+ * recover；log 修改默认开关与作用域覆盖、参数校验；kernel 销毁后 status 返回入口状态、其他命令返回桩结果（审计 LC-04）；
+ * 被清单拒绝的模块在 status 与 status(id) 中显示原因，unset 能清除它的记录（审计 S-12、S-15）。
  */
 import { type EntryStatus, createOps, formatEntry } from '@/app/ops';
 import type { ModuleDefinition } from '@/contracts/module';
@@ -101,4 +102,12 @@ test('LC-04：kernel 销毁后 status 返回入口状态，其他命令返回桩
   setEntry(cooling);
   expect(ops().status()).toContain('冷却剩余 37 tick');
   expect(ops().pause('a')).toBe(OFFLINE_RESULT);
+});
+
+test('审计 S-12、S-15：被清单拒绝的模块在 status 与 status(id) 中显示原因；unset 能清除它的记录', () => {
+  const { h, ops } = setup([mod('a', []), { ...mod('orphan', []), requires: ['ghost'] }]);
+  h.tick();
+  expect(ops().status()).toContain('orphan（economy）初始化失败，耗用 -，连续落选 0，实例 0（熔断 0），未启动：依赖的模块 ghost 不存在');
+  expect(ops().status('orphan')).toContain('未启动：依赖的模块 ghost 不存在');
+  expect(ops().unset('orphan')).toBe('已清除 orphan 的运维覆盖，下一 tick 生效');
 });

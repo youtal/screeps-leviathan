@@ -3,8 +3,10 @@
  * 覆盖：正常运行只装配一次、抛错（含装配抛错）当 tick 转保底并在下一 tick 重新装配、连续 3 次抛错进入
  * 100 tick 冷却、连续 3 个 degraded tick 追加保底并在恢复后停止、接管失败与保底抛错只报告、
  * 软重置后重新装配且不计入抛错、暂停 tick 不改变 degraded 计数且连续暂停超过上限后按 degraded 计数、
- * 保底接管开始时通知且间隔内不重复（审计 LC-07）、入口状态（审计 LC-04）。
+ * 保底接管开始时通知且间隔内不重复（审计 LC-07）、入口状态（审计 LC-04）、上一 tick 被 CPU 硬终止后丢弃实例（审计 S-01–S-06，
+ * 以 node:vm 的 timeout 终止 loop：V8 的终止不执行 catch 与 finally，与 driver 的 CPU 超时相同）。
  */
+import { runInNewContext } from 'node:vm';
 import type { EntryStatus } from '@/app/ops';
 import type { Kernel, KernelHealth } from '@/kernel/lifecycle';
 import {
@@ -13,7 +15,8 @@ import {
 } from '@/main';
 
 /**
- * @description 创建可编排的入口：每次 kernel.tick 依次取 script 中的结果（'throw' 表示抛错，'reset' 表示登记软重置的暂停 tick）。
+ * @description 创建可编排的入口：每次 kernel.tick 依次取 script 中的结果（'throw' 表示抛错，'reset' 表示登记软重置的暂停 tick，
+ * 'spin' 表示空转到被终止，须经 terminate 运行）。
  * @param script kernel.tick 的结果序列；用尽后保持 'ok'。
  * @param options 可选项。
  * @param options.takeoverFails 接管是否抛错。
@@ -22,7 +25,7 @@ import {
  * @param options.thrown 'throw' 时 kernel 抛出的值，默认为 Error('kernel 崩溃')。
  * @returns 入口 loop 与观测数据。
  */
-const setup = (script: (KernelHealth | 'throw' | 'reset')[],
+const setup = (script: (KernelHealth | 'throw' | 'reset' | 'spin')[],
   options: { takeoverFails?: boolean; fallbackFails?: boolean; assembleFails?: boolean; thrown?: unknown } = {}) => {
   let time = 0;
   const seen = { assembled: 0, ticks: 0, disposed: 0, fallbacks: [] as number[], reports: [] as string[], notices: [] as string[],
@@ -40,6 +43,12 @@ const setup = (script: (KernelHealth | 'throw' | 'reset')[],
           const next = script.shift() ?? 'ok';
           if (next === 'throw') throw 'thrown' in options ? options.thrown : new Error('kernel 崩溃');
           if (next === 'reset') { reset = true; return 'paused'; }
+          if (next === 'spin') {
+            // 空转到被 vm 的 timeout 终止；不经 vm 调用时（反向验证）1 秒后抛错，避免测试卡死。
+            const end = Date.now() + 1000;
+            while (Date.now() < end) { /* 空转 */ }
+            throw new Error('spin 未被终止');
+          }
           return next;
         },
         resetRequested: () => reset,
@@ -60,7 +69,15 @@ const setup = (script: (KernelHealth | 'throw' | 'reset')[],
    * @returns 无返回值。
    */
   const run = (n = 1) => { for (let i = 0; i < n; i += 1) { time += 1; loop(); } };
-  return { run, seen, loop };
+  /**
+   * @description 推进 1 个 tick，并以 node:vm 的 timeout 终止它（模拟 CPU 硬终止）。
+   * @returns 无返回值；断言 loop 确实被终止。
+   */
+  const terminate = () => {
+    time += 1;
+    expect(() => runInNewContext('loop()', { loop }, { timeout: 20 })).toThrow(/timed out/);
+  };
+  return { run, terminate, seen, loop };
 };
 
 test('正常运行只装配一次，不运行保底循环', () => {
@@ -214,6 +231,40 @@ test('ultrareview 第 6 项：kernel 抛出无法转为文本的值时，入口�
     run(1);
     expect(seen.assembled).toBe(2);
   }
+});
+
+describe('上一 tick 被 CPU 硬终止（审计 S-01–S-06）', () => {
+  test('下一 tick 丢弃并清理实例、计一次失败、只运行保底，再下一 tick 重新装配', () => {
+    const { run, terminate, seen } = setup(['ok', 'spin']);
+    run(1);
+    terminate();
+    expect([seen.assembled, seen.disposed, seen.fallbacks]).toEqual([1, 0, []]);
+    run(1);
+    expect([seen.assembled, seen.disposed, seen.fallbacks]).toEqual([1, 1, [3]]);
+    expect(seen.reports[0]).toContain('CPU 硬终止');
+    expect(seen.entry!()).toMatchObject({ crashes: 1, lastFailure: { tick: 3, message: '上一 tick 未正常结束（CPU 硬终止）' } });
+    expect(seen.notices).toEqual(['tick 3：保底循环接管（上一 tick 被硬终止）']);
+    run(1);
+    expect([seen.assembled, seen.ticks, seen.fallbacks]).toEqual([2, 3, [3]]);
+  });
+
+  test(`确定性的终止与抛错共用计数：连续 ${KERNEL_CRASH_LIMIT} 次后进入冷却，期间不再装配`, () => {
+    const { run, terminate, seen } = setup(['spin', 'spin', 'spin']);
+    for (let i = 0; i < KERNEL_CRASH_LIMIT; i += 1) { terminate(); run(1); }
+    expect(seen.assembled).toBe(KERNEL_CRASH_LIMIT);
+    expect(seen.reports.some((r) => r.includes('停用'))).toBe(true);
+    run(KERNEL_COOLDOWN);
+    expect(seen.assembled).toBe(KERNEL_CRASH_LIMIT);
+    run(1);
+    expect(seen.assembled).toBe(KERNEL_CRASH_LIMIT + 1);
+  });
+
+  test('正常结束与抛错的 tick 不被误判为终止', () => {
+    const { run, seen } = setup(['ok', 'throw', 'reset', 'ok']);
+    run(6);
+    expect(seen.reports.filter((r) => r.includes('CPU 硬终止'))).toEqual([]);
+    expect(seen.fallbacks).toEqual([2]);
+  });
 });
 
 describe('模块重新执行（内核设计第 6 节）', () => {

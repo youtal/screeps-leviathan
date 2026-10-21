@@ -6,7 +6,8 @@
  *   - 房间坐标：`W{n}` → −n−1、`E{n}` → n，`N{n}` → −n−1、`S{n}` → n，与引擎 utils.js 的 roomNameToXY 一致；
  *   - 房间内打包：`y × 50 + x`，0–2499，即 lib.grid 的 Uint8Array(2500) 下标；
  *   - 世界打包：全局坐标 (房间X × 50 + x, 房间Y × 50 + y) 编码为一个非负安全整数，跨房距离、排序与缓存键都是整数运算。
- * 热路径约束：打包、取坐标、距离与方向只做整数运算，不分配对象；只有解析房间名与 unpackWorld 返回新值。
+ * 热路径约束：房间内打包、取坐标、距离与方向只做整数运算，不分配对象；packWorld、roomCoords 与 unpackWorld 解析或生成
+ * 房间名，执行正则并新建对象，适合在缓存建立时调用一次（审计 S-26）。
  * 没有模块级可变状态：方向偏移表是冻结的常量数组。
  */
 
@@ -91,7 +92,8 @@ export const localX = (packed: number): number => packed % ROOM_SIZE;
 export const localY = (packed: number): number => (packed - (packed % ROOM_SIZE)) / ROOM_SIZE;
 
 /**
- * @description 把房间内的位置打包为世界坐标整数。
+ * @description 把房间内的位置打包为世界坐标整数。成本：经 roomCoords 解析房间名，每次执行一次正则并新建一个坐标对象，
+ * 不适合在热路径逐格调用；应在建立缓存时调用一次，之后以打包值做整数运算（geometry 设计第 4 节）。
  * @param room 房间名。
  * @param x 房间内 x 坐标，0–49。
  * @param y 房间内 y 坐标，0–49。

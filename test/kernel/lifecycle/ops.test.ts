@@ -1,6 +1,7 @@
 /**
  * 文件摘要：第 5 步接入 lifecycle 后的集成测试：启停标志、恢复熔断、状态快照、模块的控制台命令、
- * CPU 准入与计量（每次钩子调用一次读数）、紧急刹车与统计页写出。以 kernel 测试宿主驱动。
+ * CPU 准入与计量（每次钩子调用一次读数）、紧急刹车与统计页写出；审计 S-12–S-15（被拒模块的可见性与健康、
+ * 启停标志中的非法值、清除任意记录）。以 kernel 测试宿主驱动。
  */
 import type { PhaseHooks } from '@/contracts/context';
 import type { Tier } from '@/contracts/cpu';
@@ -235,4 +236,61 @@ test('PA-03：统计页写出 kernel 收尾耗用与体积最大的 owner', () =
   expect(body.cpu.finish).toBeGreaterThan(0);
   expect(body.cpu.finish).toBeLessThan(body.cpu.avg);
   expect(body.memory.owners.map(([owner]: [string, number]) => owner)).toContain('kernel');
+});
+
+/**
+ * @description 生成带启停标志记录的已初始化 Memory。
+ * @param data 启停标志分区的数据。
+ * @returns Memory 文本。
+ */
+const withSwitches = (data: Record<string, unknown>): string => {
+  const parsed = JSON.parse(READY_MEMORY);
+  parsed.leviathan.part = { kernel: { switches: { version: 1, data } } };
+  return JSON.stringify(parsed);
+};
+
+describe('被清单拒绝的模块（审计 S-12、S-13）', () => {
+  test('状态快照与统计页列出被拒模块，状态为 failed 并附原因；它的启停记录不报未知模块', () => {
+    const h = kernelHarness({ memory: withSwitches({ orphan: 'pause' }),
+      modules: [mod('a', []), mod('orphan', [], { requires: ['ghost'] })] });
+    for (let i = 0; i <= STATS_INTERVAL; i += 1) h.tick();
+    const modules = h.kernel.ops.status().modules;
+    expect(modules.map((m) => [m.id, m.state])).toEqual([['a', 'running'], ['orphan', 'failed']]);
+    expect(modules[1]).toMatchObject({ tier: 'economy', switch: 'pause', reason: '依赖的模块 ghost 不存在' });
+    const body = JSON.parse(decodePage(h.platform.segment(STATS_PAGE) ?? '')!.body);
+    expect(body.down).toEqual(['orphan']);
+    expect(h.lines.filter((l) => l.includes('未知模块 orphan'))).toEqual([]);
+    expect(h.lines.filter((l) => l.includes('被清单拒绝的模块 orphan'))).toHaveLength(1);
+  });
+
+  test('空 id 的生存层模块被拒绝后计入健康，状态中以"（空 id）"显示', () => {
+    const h = kernelHarness({ modules: [mod('', [], { tier: 'survival' }), mod('a', [])] });
+    expect(h.tick()).toBe('degraded');
+    expect(h.kernel.ops.status().modules.find((m) => m.id === '（空 id）')).toMatchObject({ tier: 'survival', state: 'failed' });
+  });
+});
+
+describe('启停标志的非法值与清除（审计 S-14、S-15）', () => {
+  test('非法值按没有记录处理：startPaused 的模块保持暂停，告警一次', () => {
+    const calls: string[] = [];
+    const h = kernelHarness({ memory: withSwitches({ a: 'stop' }), modules: [mod('a', calls, { startPaused: true })] });
+    h.tick(); h.tick();
+    expect(calls).toEqual([]);
+    expect(h.kernel.ops.status().modules[0]).toMatchObject({ state: 'paused', switch: undefined });
+    expect(h.lines.filter((l) => l.includes('不是 pause 或 run'))).toHaveLength(1);
+  });
+
+  test('清除接受已移除模块与生存层模块的记录，之后不再告警；设置覆盖仍按原规则拒绝', () => {
+    const h = kernelHarness({ memory: withSwitches({ ghost: 'pause', s: 'pause' }), modules: [mod('s', [], { tier: 'survival' })] });
+    h.tick();
+    h.kernel.ops.setSwitch('ghost', undefined);
+    h.kernel.ops.setSwitch('s', undefined);
+    h.tick();
+    expect(JSON.parse(h.platform.memory).leviathan.part.kernel.switches.data).toEqual({});
+    expect(() => h.kernel.ops.setSwitch('s', 'run')).toThrow('生存层');
+    expect(() => h.kernel.ops.setSwitch('ghost', 'pause')).toThrow('未知模块');
+    h.rebuild();
+    h.tick();
+    expect(h.lines.filter((l) => l.includes('ghost') || l.includes('不能暂停'))).toHaveLength(2);
+  });
 });

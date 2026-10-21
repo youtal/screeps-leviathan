@@ -35,7 +35,7 @@ import { BOOT_ID, planModules } from '@/kernel/process';
 import type { Profiler } from '@/kernel/profiler';
 import { type SegmentsPlatformPort, createSegments } from '@/kernel/segments';
 import { STATS_VERSION, type StatsSnapshot, createStats } from '@/kernel/stats';
-import { type KernelOps, buildStatsSnapshot, createKernelOps, createSwitches } from './ops';
+import { type KernelOps, type RejectedModule, buildStatsSnapshot, createKernelOps, createSwitches } from './ops';
 
 export type { GamePort } from '@/kernel/context';
 export type { KernelOps, KernelStatus, ModuleStatus, ModuleStatusState, Switch } from './ops';
@@ -184,9 +184,16 @@ export const createKernel = (options: KernelOptions): Kernel => {
   for (const runtime of runtimes) byId.set(runtime.def.id, runtime);
   // requires 已由清单规划校验存在且无环；依赖总是排在依赖方之前。
   for (const runtime of runtimes) for (const dep of runtime.def.requires ?? []) runtime.deps.push(byId.get(dep)!);
-  const rejectedSurvival = options.modules.some((m) => plan.rejected.has(m.id) && m.tier === 'survival');
+  // 被拒模块：清单中不在执行顺序里的定义，按清单顺序。不按 id 反查规划结果：空 id 的模块在规划结果中以"（空 id）"为键，
+  // 反查会漏掉它（审计 S-13）。
+  const planned = new Set(plan.order);
+  const rejected: RejectedModule[] = options.modules.filter((m) => !planned.has(m)).map((m) => {
+    const id = typeof m.id === 'string' && m.id !== '' ? m.id : '（空 id）';
+    return { id, tier: m.tier, reason: plan.rejected.get(id) ?? '未通过清单规划' };
+  });
+  const rejectedSurvival = rejected.some((m) => m.tier === 'survival');
   for (const [id, reason] of plan.rejected) log.error(`模块 ${id} 未启动：${reason}`);
-  const switches = createSwitches({ memory, byId, log });
+  const switches = createSwitches({ memory, byId, rejected: new Set(rejected.map((m) => m.id)), log });
   // 本 tick 参与准入的进程，按执行顺序（模块在前、其实例随后）；数组跨 tick 复用，避免每 tick 分配。
   const nodes: CpuNode[] = [];
 
@@ -371,7 +378,7 @@ export const createKernel = (options: KernelOptions): Kernel => {
   };
 
   const ops = createKernelOps({
-    byId, runtimes, switches, cpu, memory, release: options.release,
+    byId, runtimes, rejected, switches, cpu, memory, release: options.release,
     /**
      * @description 当前模式视图。
      * @returns 模式视图。
@@ -398,7 +405,7 @@ export const createKernel = (options: KernelOptions): Kernel => {
    * @description 生成统计页的状态快照，只在窗口写出时调用一次。
    * @returns 状态快照。
    */
-  const statsSnapshot = (): StatsSnapshot => buildStatsSnapshot({ runtimes, memory, segments, release: options.release, mode });
+  const statsSnapshot = (): StatsSnapshot => buildStatsSnapshot({ runtimes, rejected, memory, segments, release: options.release, mode });
 
   return {
     ops,

@@ -5,6 +5,10 @@
  * 平台事实：每个 tick 先执行 module.exports.loop()，再在同一全局作用域中求值控制台表达式（engine 4.3.2 src/game/game.js），
  * 所以命令总在 kernel 当 tick 的提交之后运行。命令以全局对象 `<命名空间>.<名称>` 的形式安装在注入的目标上。
  * 每次调用都在 try/catch 中，异常记录日志并以 `错误：<消息>` 返回，不传出到游戏控制台；结果为纯文本。
+ * 结果按 HTML 转义后返回（审计 S-23）：命令结果不经平台编码原样下发，客户端以 `ng:bind-html='message.text | trust'`
+ * 渲染（不净化），并先把 `\n` 换成 `<br>`（2026-10-21 核对官服客户端 components/game/editor-panel/console/console.html
+ * 与 build.min.js，并在官服执行 ops.help() 确认结果原样下发）。所以换行不需要处理，`<模块 id>`、`&` 等片段必须转义，
+ * 否则被当作标签吞掉；私服使用同一客户端（推断）。
  * 状态：各命名空间的命令表与安装的全局对象保存在 createConsole 的闭包中，随 kernel 实例存在；
  * dispose 时替换为桩对象（宿主登记的离线处理函数在桩对象上继续可用），下一个实例重新注册时覆盖桩对象。
  */
@@ -89,6 +93,13 @@ interface Namespace {
 }
 
 /**
+ * @description 转义命令结果中的 HTML 特殊字符，使结果在客户端原样显示；换行由客户端换成 `<br>`，这里不处理。
+ * @param text 结果文本。
+ * @returns 转义了 &、<、> 的文本。
+ */
+const escapeResult = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/**
  * @description 取异常的消息文本。
  * @param error 异常。
  * @returns 消息；不是 Error 时转为字符串。
@@ -129,14 +140,14 @@ export const createConsole = (options: ConsoleOptions): ConsoleHost => {
    * @param name 命令名。
    * @param fn 处理函数。
    * @param args 控制台传入的参数。
-   * @returns 结果文本；抛错时为 `错误：<消息>`。
+   * @returns 转义后的结果文本；抛错时为 `错误：<消息>`。
    */
   const invoke = (namespace: string, name: string, fn: (...args: readonly unknown[]) => unknown, args: readonly unknown[]): string => {
     try {
-      return formatResult(fn(...args));
+      return escapeResult(formatResult(fn(...args)));
     } catch (error) {
       options.logger(namespace).error(`控制台命令 ${namespace}.${name} 失败`, error);
-      return `错误：${messageOf(error)}`;
+      return escapeResult(`错误：${messageOf(error)}`);
     }
   };
 
@@ -145,12 +156,12 @@ export const createConsole = (options: ConsoleOptions): ConsoleHost => {
    * @param namespace 命名空间。
    * @param entries 命令表。
    * @param offline 是否为桩对象的 help。
-   * @returns 每行一个命令或设置及其说明。
+   * @returns 每行一个命令或设置及其说明，已转义。
    */
   const helpText = (namespace: string, entries: Map<string, Entry>, offline: boolean): string => {
     const lines = [...entries].map(([name, e]) => `${namespace}.${name}${e.fn ? '()' : ''}  ${e.help}`);
     if (offline) lines.unshift(`（${OFFLINE_RESULT}；只有离线命令可用）`);
-    return lines.join('\n');
+    return escapeResult(lines.join('\n'));
   };
 
   /**
@@ -246,13 +257,16 @@ export const createConsole = (options: ConsoleOptions): ConsoleHost => {
             Object.defineProperty(space.object, name, {
               enumerable: true,
               /**
-               * @description 读取设置；get 抛错时返回错误文本。
+               * @description 读取设置；get 抛错时返回错误文本。字符串值与错误文本同样转义。
                * @returns 当前值或错误文本。
                */
               get: () => {
-                try { return get(); } catch (error) {
+                try {
+                  const value = get();
+                  return typeof value === 'string' ? escapeResult(value) : value;
+                } catch (error) {
                   options.logger(namespace).error(`控制台设置 ${namespace}.${name} 读取失败`, error);
-                  return `错误：${messageOf(error)}`;
+                  return escapeResult(`错误：${messageOf(error)}`);
                 }
               },
               /**

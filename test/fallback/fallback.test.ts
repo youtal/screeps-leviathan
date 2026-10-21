@@ -3,7 +3,8 @@
  * 替身与平台语义一致：FIND_MY_CREEPS 不含孵化中的 creep、寻路调用 roomCallback、spawnCreep 会访问 Memory.creeps。
  * 覆盖防御与治疗、应急孵化与接替者判断、固定与无 CARRY 矿工、工人与搬运者分工、防降级、当 tick 预留、
  * CPU 上限与快照复用、寻路上限与成本矩阵、房间与资产级异常隔离、Memory 接管前置条件，以及有效代码不超过 400 行。
- * 编号 KS-xx 对应 docs/audit/2026-10-19-kernel-skeleton.md 的整改项。
+ * 编号 KS-xx 对应 docs/audit/2026-10-19-kernel-skeleton.md 的整改项；S-18–S-21 对应 docs/audit/2026-10-21-dev-src-code-audit.md
+ * （同 tick 孵化、寻路名额与预留、疲劳、矿工守 source）。
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -114,6 +115,92 @@ describe('应急孵化', () => {
     installWorld({ rooms: [{ structures: [busy, spawn], creeps: [pending] }], memory: {} });
     runFallback();
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe('审计 S-18：正常循环同 tick 已孵化', () => {
+  test('正常循环本 tick 已在 spawn 上调用 spawnCreep（带 WORK）时，保底不再孵化', () => {
+    const { spawn, calls } = recordingSpawn();
+    installWorld({ rooms: [{ structures: [spawn] }], time: 1000, memory: {} });
+    (spawn.spawnCreep as (body: string[], name: string) => number)(['work', 'carry', 'move'], 'normal-1');
+    calls.length = 0;
+    runFallback();
+    expect(calls).toEqual([]);
+  });
+
+  test('同 tick 孵化的不是采集者时，该 spawn 视为忙碌，改用其他空闲 spawn', () => {
+    const a = recordingSpawn(20);
+    const b = recordingSpawn(30);
+    installWorld({ rooms: [{ structures: [a.spawn, b.spawn] }], time: 1000, memory: {} });
+    (a.spawn.spawnCreep as (body: string[], name: string) => number)(['carry', 'move'], 'normal-1');
+    a.calls.length = 0;
+    runFallback();
+    expect([a.calls.length, b.calls.length]).toEqual([0, 1]);
+  });
+});
+
+describe('审计 S-19、S-20：寻路名额与预留', () => {
+  test('前面房间的 20 个寻路工人不会饿死后面房间的应急升级者与普通工人', () => {
+    const source = structure('source', pos(40, 40));
+    const workers = Array.from({ length: 20 }, (_, i) => creep({ name: `w${i}`, at: pos(i % 10, Math.floor(i / 10)), body: W }));
+    const up = creep({ name: 'up', at: pos(5, 5, 'W2N2'), body: W, energy: 50 });
+    const other = creep({ name: 'other', at: pos(6, 6, 'W2N2'), body: W });
+    const w = installWorld({ rooms: [{ creeps: workers, sources: [source] },
+      { name: 'W2N2', level: 3, ticksToDowngrade: 1, creeps: [up, other], sources: [structure('source', pos(40, 40, 'W2N2'))] }] });
+    runFallback();
+    expect(w.paths).toBe(20);
+    expect(w.actions.filter(([who, action]) => action === 'move' && (who === 'up' || who === 'other')).map(([who]) => who)).toEqual(['up', 'other']);
+  });
+
+  test('疲劳的 creep 不寻路、不占名额，并撤回预留，紧挨目标的 creep 仍能就地补能', () => {
+    const spawn = structure('spawn', pos(10, 10), { store: store(250, 300) });
+    const tired = creep({ name: 'tired', at: pos(30, 30), body: C, energy: 50, fatigue: 2 });
+    const near = creep({ name: 'near', at: pos(10, 11), body: C, energy: 50 });
+    const w = installWorld({ rooms: [{ structures: [spawn], creeps: [tired, near] }] });
+    runFallback();
+    expect(w.paths).toBe(0);
+    expect(w.actions).toEqual([['near', 'transfer', spawn.id]]);
+  });
+
+  test('名额用尽时撤回预留：不动的远处 creep 不挡住紧挨供给的 creep 取能', () => {
+    const source = structure('source', pos(40, 40));
+    // 无 CARRY 的矿工只寻路去采集、不预留，用来耗尽名额。
+    const movers = Array.from({ length: 20 }, (_, i) => creep({ name: `m${i}`, at: pos(i % 10, 1 + Math.floor(i / 10)), body: ['work', 'move'], capacity: 0 }));
+    const dropped = { id: 'drop-1', pos: pos(20, 20), amount: 50, resourceType: 'energy' };
+    const far = creep({ name: 'far', at: pos(45, 45), body: C });
+    const near = creep({ name: 'near', at: pos(20, 21), body: C });
+    const w = installWorld({ rooms: [{ creeps: [...movers, far, near], sources: [source], dropped: [dropped] }] });
+    runFallback();
+    expect(w.actions).toContainEqual(['near', 'pickup', 'drop-1']);
+  });
+});
+
+describe('审计 S-21：矿工守在 source 旁', () => {
+  test('link 矿工（5W1C1M）空载且有 storage 能量时，紧挨活跃 source 原地采集，不离开取能', () => {
+    const source = structure('source', pos(30, 30));
+    const storage = structure('storage', pos(10, 10), { store: store(5000, 1000000) });
+    const miner = creep({ name: 'miner', at: pos(30, 31), body: ['work', 'work', 'work', 'work', 'work', 'carry', 'move'] });
+    const w = installWorld({ rooms: [{ structures: [storage], creeps: [miner], sources: [source] }] });
+    runFallback();
+    expect(w.actions).toEqual([['miner', 'harvest', source.id]]);
+  });
+
+  test('装满的 link 矿工继续采集，不去补能', () => {
+    const spawn = structure('spawn', pos(10, 10), { store: store(100, 300) });
+    const source = structure('source', pos(30, 30));
+    const miner = creep({ name: 'miner', at: pos(30, 31), body: ['work', 'work', 'work', 'work', 'work', 'carry', 'move'], energy: 50 });
+    const w = installWorld({ rooms: [{ structures: [spawn], creeps: [miner], sources: [source] }] });
+    runFallback();
+    expect(w.actions).toEqual([['miner', 'harvest', source.id]]);
+  });
+
+  test('所守 source 暂时枯竭时，无 CARRY 的矿工原地等待，不走向另一个 source', () => {
+    const empty = structure('source', pos(30, 30), { energy: 0 });
+    const other = structure('source', pos(5, 5));
+    const miner = creep({ name: 'miner', at: pos(30, 31), body: ['work', 'work', 'move'], capacity: 0 });
+    const w = installWorld({ rooms: [{ creeps: [miner], sources: [empty, other] }] });
+    runFallback();
+    expect(w.actions).toEqual([]);
   });
 });
 
