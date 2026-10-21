@@ -16,8 +16,20 @@ export const CONSOLE_RESULT_LIMIT = 4000;
 /** kernel 不可用时桩对象的命令结果。 */
 export const OFFLINE_RESULT = 'kernel 未运行（重建或冷却中）';
 
-/** 标记本模块安装的全局对象，用于区分游戏或其他代码的同名全局；模块级常量，不可变。 */
-const MARK = Symbol('kernel.console');
+/**
+ * 标记本模块安装的全局对象，用于区分游戏或其他代码的同名全局。用 Symbol.for 取全局注册的符号：引擎可能在同一个 global
+ * 中重新执行 main（内核设计第 6 节"模块重新执行"），模块级的普通 Symbol 每轮执行都不同，会把上一轮装的命名空间误判为外来对象。
+ */
+const MARK = Symbol.for('kernel.console');
+
+/**
+ * @description 判断全局上的同名对象是否由本模块安装（任何一轮模块执行）：带有描述为 kernel.console 的符号属性。
+ * 按描述而不是按符号本身识别，兼容 0.1.16 及更早版本以普通 Symbol('kernel.console') 标记的对象。
+ * @param value 全局上的同名值。
+ * @returns 由本模块安装时为 true。
+ */
+const ownedByConsole = (value: unknown): boolean => value !== null && typeof value === 'object'
+  && Object.getOwnPropertySymbols(value).some((symbol) => symbol.description === MARK.description);
 /** 命令与设置名：小写字母开头的字母数字串；help 由本模块自动提供。 */
 const NAME = /^[a-z][A-Za-z0-9]*$/;
 
@@ -150,7 +162,7 @@ export const createConsole = (options: ConsoleOptions): ConsoleHost => {
     let space = spaces.get(namespace);
     if (space) return space;
     const existing = target[namespace];
-    const foreign = existing !== undefined && !(existing !== null && typeof existing === 'object' && MARK in existing);
+    const foreign = existing !== undefined && !ownedByConsole(existing);
     const entries = new Map<string, Entry>();
     let object: Record<string | symbol, unknown> | undefined;
     if (foreign) {

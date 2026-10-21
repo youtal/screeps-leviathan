@@ -101,3 +101,20 @@ test('离线命令只能登记给已注册的命令', () => {
   host.registry('ops').offline('missing', () => 'x');
   expect(errors).toEqual(['离线命令 ops.missing 没有对应的命令']);
 });
+
+test('模块重新执行：上一轮执行或 0.1.16 留下的命名空间不算外来对象，被新命名空间取代；无标记的同名全局仍拒绝', () => {
+  // 0.1.16 以普通 Symbol('kernel.console') 标记；模块在同一 global 中重新执行时，旧对象留在全局上。
+  const legacy = Object.defineProperty({ status: () => '旧 kernel' }, Symbol('kernel.console'), { value: true });
+  const other = Object.defineProperty({}, Symbol('other'), { value: true });
+  const { target, errors, host } = setup({ ops: legacy, boot: other });
+  host.registry('ops').command('status', '', () => '新 kernel');
+  host.registry('boot').command('assess', '', () => 'x');
+  expect((target.ops as Space).status()).toBe('新 kernel');
+  expect(target.boot).toBe(other);
+  expect(errors).toEqual(['全局 boot 已被占用，控制台命名空间未安装']);
+  // 新命名空间以注册符号标记，再一轮模块执行同样能识别。
+  const again = createConsole({ target, logger: () => ({ error: (m: string) => { errors.push(m); } }) as unknown as Logger });
+  again.registry('ops').command('status', '', () => '第三轮');
+  expect((target.ops as Space).status()).toBe('第三轮');
+  expect(errors).toHaveLength(1);
+});

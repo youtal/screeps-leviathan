@@ -32,4 +32,6 @@ declare var console: Console;
 declare module 'virtual:release' {
   /** 当前构建的版本号，例如 "0.1.9"。 */
   export const release: string;
+  /** 构建标识：版本号加构建时刻，每次构建都不同，例如 "0.1.9+mabc1234"。入口据此识别同一份代码的重新执行。 */
+  export const build: string;
 }

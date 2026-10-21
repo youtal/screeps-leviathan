@@ -82,7 +82,7 @@ initialize(): void;
 
 ## 6. 版本号注入
 
-`release` 来自构建：rollup 配置用一个内联插件提供虚拟模块 `virtual:release`，导出 `package.json` 的 `version`；app.assembly 读取后作为 kernel 选项传入。不新增依赖。这同时交付架构 13.1 build 的“版本号注入”。
+`release` 来自构建：rollup 配置用一个内联插件提供虚拟模块 `virtual:release`，导出 `package.json` 的 `version`；app.assembly 读取后作为 kernel 选项传入。不新增依赖。同一模块另导出构建标识 `build`（版本号加构建时刻，每次构建都不同），由 app.assembly 以 `BUILD` 转交入口，用于识别同一全局中重新执行的 main 是否为同一份代码（[内核设计](./README.md#6-入口正常循环与保底循环)"模块重新执行"）。这同时交付架构 13.1 build 的“版本号注入”。
 
 boot 每次 global reset 时更新 `sys.release`（6.7），也需要当前版本号。app.assembly 构造 app.boot 时，把同一版本号作为 app 层内部的装配参数一并传入：不经 contracts，`BootContext` 不增加字段，也不放宽下表的边界规则。kernel 生成的标记初值与 boot 写入的值因此来自同一个来源。
 
@@ -90,8 +90,8 @@ boot 每次 global reset 时更新 `sys.release`（6.7），也需要当前版�
 
 | 环节 | 配置 |
 | --- | --- |
-| 类型检查与 rollup 的 TypeScript 插件 | `src/env.d.ts` 声明模块 `virtual:release`，导出 `release: string` |
-| Jest | `moduleNameMapper` 把 `virtual:release` 映射到测试替身 `test/stubs/release.ts`，导出固定的版本号 |
+| 类型检查与 rollup 的 TypeScript 插件 | `src/env.d.ts` 声明模块 `virtual:release`，导出 `release: string` 与 `build: string` |
+| Jest | `moduleNameMapper` 把 `virtual:release` 映射到测试替身 `test/stubs/release.ts`，导出固定的版本号与构建标识 |
 | 边界检查 | `virtual:release` 不算外部包，只允许 `src/app/assembly/` 导入；其他位置导入仍报违规 |
 
 ## 7. 验证

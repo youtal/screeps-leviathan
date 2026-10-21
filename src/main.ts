@@ -18,9 +18,13 @@
  * kernel 不可用时 ops.status() 以它说明正常循环为什么没在运行。
  * 状态：kernel 实例、连续失败、degraded 与暂停计数、冷却截止 tick、最近一次失败、上一 tick 是否运行保底与上次通知的 tick
  * 保存在 createEntry 的闭包中（heap），跨软重置累计，global reset 后重新计数。
- * 切换逻辑写成 createEntry(deps)，测试以假依赖驱动；loop 由游戏依赖创建，模块加载时不读取 Game。
+ * 模块重新执行（内核设计第 6 节）：引擎在 require.cache.main 失效或代码时间戳变化时，会在同一个 global 中重新执行
+ * main（@screeps/engine src/game/game.js），模块作用域里的状态随之重建。入口因此登记在全局注册表 globalThis[ENTRY_KEY]：
+ * 同一构建（assembly 的 BUILD）的重新执行沿用已有入口，kernel 与跨 tick 的流程（如开局备份）得以延续；构建不同时
+ * 先销毁旧入口的 kernel（卸下控制台命名空间）再新建。重新执行的次数在 1、10、100…… 次时各记录一条 info。
+ * 切换逻辑写成 createEntry(deps)，测试以假依赖驱动；loop 由 resolveEntry 取得，模块加载时只读写 globalThis，不读取 Game。
  */
-import { type GameServices, assemble, createGameServices } from '@/app/assembly';
+import { BUILD, type GameServices, assemble, createGameServices } from '@/app/assembly';
 import type { EntryStatus } from '@/app/ops';
 import { runFallback } from '@/fallback';
 import type { Kernel } from '@/kernel/lifecycle';
@@ -77,15 +81,75 @@ export interface EntryDeps {
    * @returns 无返回值；不得抛错。
    */
   report(message: string, error?: unknown): void;
+  /**
+   * @description 记录入口层面的一般信息（info 级），例如模块的重新执行。
+   * @param message 说明。
+   * @returns 无返回值；不得抛错。
+   */
+  notice(message: string): void;
 }
+
+/** 入口：每 tick 调用的 loop，附带供全局注册表使用的方法。 */
+export interface EntryLoop {
+  /**
+   * @description 每 tick 调用一次。
+   * @returns 无返回值。
+   */
+  (): void;
+  /**
+   * @description 同一 global 中 main 模块重新执行、沿用本入口时调用：累计次数，下一次 loop 时按 1、10、100…… 限频记录 info。
+   * @returns 无返回值。
+   */
+  reevaluated(): void;
+  /**
+   * @description 代码更新后丢弃本入口：销毁 kernel（卸下控制台命名空间）；之后再调用 loop 不做任何事。
+   * @returns 无返回值；不抛错。
+   */
+  dispose(): void;
+}
+
+/** 全局注册表的键。Symbol.for 在同一 global 中返回同一个符号，各轮模块执行都能找到同一条记录。 */
+export const ENTRY_KEY = Symbol.for('leviathan.entry');
+
+/** 全局注册表中的入口记录：创建它的构建标识与入口。 */
+interface EntryRecord {
+  readonly build: string;
+  readonly loop: EntryLoop;
+}
+
+/**
+ * @description 取得本次模块执行使用的入口（内核设计第 6 节"模块重新执行"）。同一 global 中已有同一构建的入口时沿用，
+ * 使 kernel 与跨 tick 的流程不因模块重新执行而中断；构建不同（代码更新）时先销毁旧入口再新建；没有时新建并登记。
+ * @param target 登记入口的全局对象，游戏中为 globalThis。
+ * @param build 当前构建的标识。
+ * @param create 新建入口的函数；只在不能沿用时调用。
+ * @returns 入口。
+ */
+export const resolveEntry = (target: object, build: string, create: () => EntryLoop): EntryLoop => {
+  const registry = target as Record<symbol, unknown>;
+  const existing = registry[ENTRY_KEY] as Partial<EntryRecord> | undefined;
+  if (existing?.build === build && typeof existing.loop === 'function') {
+    existing.loop.reevaluated();
+    return existing.loop;
+  }
+  if (typeof existing?.loop?.dispose === 'function') existing.loop.dispose();
+  const loop = create();
+  Object.defineProperty(target, ENTRY_KEY, { value: { build, loop } satisfies EntryRecord, configurable: true, writable: true, enumerable: false });
+  return loop;
+};
 
 /**
  * @description 创建每 tick 调用的入口函数，在闭包中保存 kernel 实例与故障计数。
  * @param deps 外部依赖。
- * @returns 每 tick 调用一次的 loop 函数。
+ * @returns 每 tick 调用一次的入口，附带 reevaluated 与 dispose。
  */
-export const createEntry = (deps: EntryDeps): (() => void) => {
+export const createEntry = (deps: EntryDeps): EntryLoop => {
   let kernel: Kernel | undefined;
+  // 同一 global 中模块重新执行、沿用本入口的累计次数；达到 nextNotice 时记录一次，之后阈值乘 10。
+  let reevaluations = 0;
+  let nextNotice = 1;
+  // 已被新构建的入口取代：不再运行。
+  let disposed = false;
   let crashes = 0;
   let degraded = 0;
   let paused = 0;
@@ -151,8 +215,17 @@ export const createEntry = (deps: EntryDeps): (() => void) => {
     deps.report(`正常循环连续 ${KERNEL_CRASH_LIMIT} 次失败，停用 ${KERNEL_COOLDOWN} tick，期间只运行保底循环`);
   };
 
-  return () => {
+  /**
+   * @description 每 tick 的入口流程，语义见文件摘要。
+   * @returns 无返回值。
+   */
+  const loop = (): void => {
+    if (disposed) return;
     try { deps.takeover(); } catch (error) { deps.report('Memory 接管失败，引擎内部写入可能落到真实 Memory', error); }
+    if (reevaluations >= nextNotice) {
+      deps.notice(`main 模块在同一 global 中重新执行（累计 ${reevaluations} 次），沿用已有的入口与 kernel`);
+      while (nextNotice <= reevaluations) nextNotice *= 10;
+    }
     let fallback = false;
     let reason = '停用冷却';
     if (deps.time() < cooldownUntil) {
@@ -198,6 +271,23 @@ export const createEntry = (deps: EntryDeps): (() => void) => {
       try { deps.fallback(); } catch (error) { deps.report('保底循环抛错', error); }
     }
   };
+
+  return Object.assign(loop, {
+    /**
+     * @description 记录一次沿用本入口的模块重新执行，语义见 EntryLoop.reevaluated。
+     * @returns 无返回值。
+     */
+    reevaluated: (): void => { reevaluations += 1; },
+    /**
+     * @description 销毁本入口的 kernel，语义见 EntryLoop.dispose。
+     * @returns 无返回值；kernel 清理失败只报告。
+     */
+    dispose: (): void => {
+      disposed = true;
+      try { kernel?.dispose(); } catch (error) { deps.report('代码更新时旧入口的 kernel 清理失败', error); }
+      kernel = undefined;
+    },
+  });
 };
 
 /**
@@ -249,8 +339,20 @@ const gameEntryDeps = (): EntryDeps => {
         console.log(`[main] ${message}`);
       }
     },
+    /**
+     * @description 经 main 作用域的日志记录 info；日志不可用时退回 console.log。
+     * @param message 说明。
+     * @returns 无返回值；不抛错。
+     */
+    notice: (message) => {
+      try {
+        get().logRoot.scope('main').info(message);
+      } catch {
+        console.log(`[main] ${message}`);
+      }
+    },
   };
 };
 
-/** Screeps 每 tick 调用的入口。 */
-export const loop = createEntry(gameEntryDeps());
+/** Screeps 每 tick 调用的入口；同一 global 中重新执行 main 时沿用同一构建已登记的入口。 */
+export const loop = resolveEntry(globalThis, BUILD, () => createEntry(gameEntryDeps()));
