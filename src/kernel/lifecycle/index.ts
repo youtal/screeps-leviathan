@@ -481,6 +481,13 @@ export const createKernel = (options: KernelOptions): Kernel => {
       } catch (error) { log.error('统计采集失败', error); }
       // 与 Memory 状态无关：Memory 加载失败时备份页同样要写出。
       try { segments.commit(); } catch (error) { log.error('segment 提交失败', error); }
+      // 官服测试分支的低频观察点；debug 关闭时不生成快照，不改变持久化与调度结果。
+      if (game.time() % 20 === 0) log.debug(() => {
+        const summary = cpu.summary();
+        return `M1 health=${result} memory=${ready ? 'ready' : 'unavailable'} epoch=${memory.epoch()} `
+          + `B=${summary.budget.toFixed(2)} R=${summary.reserve.toFixed(2)} admit=${summary.admitted} skip=${summary.rejected} `
+          + `modules=${runtimes.length} profileLabels=${profiler.snapshot().length} commitFailures=${commitStreak}`;
+      });
       return result;
     },
     /**

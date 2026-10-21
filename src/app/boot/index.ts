@@ -319,6 +319,7 @@ export const createBoot = (options: BootOptions): BootDefinition => ({
       rejudge = false;
       frozen = false;
       const outcome = execute(v, mem);
+      ctx.log.debug(() => `M1 判定 case=${v.case} mode=${outcome.verdict.mode} action=${v.action} paused=${outcome.paused} hold=${outcome.hold}`);
       publish(outcome.verdict, time, outcome.hold, before);
       return { facts, paused: outcome.paused, hold: outcome.hold };
     };

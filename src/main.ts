@@ -317,7 +317,15 @@ const gameEntryDeps = (): EntryDeps => {
      * @returns kernel 实例。
      */
     assemble: (entryStatus) => assemble(get(), entryStatus),
-    fallback: runFallback,
+    /**
+     * @description 运行真实保底循环，测试分支每 20 tick 输出一次资产计数。
+     * @returns 无返回值；可能提交游戏 intent。
+     */
+    fallback: () => {
+      if (Game.time % 20 === 0) get().logRoot.scope('fallback').debug(() =>
+        `M1 接管 spawns=${Object.keys(Game.spawns).length} creeps=${Object.keys(Game.creeps).length}`);
+      runFallback();
+    },
     /**
      * @description 当前 tick。
      * @returns Game.time。

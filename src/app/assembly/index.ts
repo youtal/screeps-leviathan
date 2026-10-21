@@ -10,6 +10,7 @@
  * 模块清单在 M2 起加入业务模块；boot 由 app.boot 的 createBoot 创建，事实读取、通知与设置在此注入。
  * Memory 身份是本项目固定的常量。
  * 状态：无模块级可变状态；createGameServices 每次调用创建新的服务对象，由入口在 heap 中缓存。
+ * 官服测试分支：仅 pinkpunk/shard0 注入 officialProbe 测试夹具，并开启 debug、Memory 抽查与实例计时。
  */
 import { createBoot, readGameCounts, readGameFacts } from '@/app/boot';
 import { type EntryStatus, createOps } from '@/app/ops';
@@ -24,6 +25,7 @@ import { createProfiler } from '@/kernel/profiler';
 import { createGameSegmentsPlatform } from '@/kernel/segments';
 import { bootSettings, loggerSettings, memorySettings, profilerSettings } from '@/settings';
 import { build, release } from 'virtual:release';
+import { createOfficialProbe, officialProbeEnabled } from './officialProbe';
 
 /**
  * 当前构建的标识（版本号加构建时刻），由构建注入。入口据此判断同一 global 中重新执行的 main 是否为同一份代码
@@ -165,31 +167,39 @@ export const createGameServices = (): GameServices => {
  */
 export const assemble = (services: GameServices, entryStatus: () => EntryStatus): Kernel => {
   const memoryLog = services.logRoot.scope('memory');
+  const profiler = createProfiler({ cpuUsed: services.game.cpuUsed });
+  const probe = officialProbeEnabled() ? createOfficialProbe(profiler) : undefined;
+  if (probe) {
+    services.logRoot.setDefault('debug', true);
+    services.logRoot.scope('assembly').debug(`M1 build=${BUILD} intershard=${createInterShard(globalThis).available()} modules=4`);
+  }
+  const boot = createBoot({
+    identity: MEMORY_IDENTITY, release, settings: bootSettings,
+    time: services.game.time,
+    facts: readGameFacts,
+    counts: readGameCounts,
+    /**
+     * @description 模式变化时发出游戏通知。
+     * @param message 纯文本通知。
+     * @returns 无返回值。
+     */
+    notify: (message) => Game.notify(message),
+  });
   const kernel = createKernel({
-    modules: MODULES,
-    boot: createBoot({
-      identity: MEMORY_IDENTITY, release, settings: bootSettings,
-      time: services.game.time,
-      facts: readGameFacts,
-      counts: readGameCounts,
-      /**
-       * @description 模式变化时发出游戏通知。
-       * @param message 纯文本通知。
-       * @returns 无返回值。
-       */
-      notify: (message) => Game.notify(message),
-    }),
-    memory: { ...MEMORY_IDENTITY, auditUnits: memorySettings.auditUnits,
+    modules: probe?.modules ?? MODULES,
+    boot: probe ? probe.boot(boot) : boot,
+    memory: { ...MEMORY_IDENTITY, auditUnits: probe ? 4 : memorySettings.auditUnits,
       platform: createGamePlatform((message) => memoryLog.warn(message)) },
     game: services.game,
     logRoot: services.logRoot,
-    profiler: createProfiler({ cpuUsed: services.game.cpuUsed }),
-    profileInstances: profilerSettings.instances,
+    profiler,
+    profileInstances: probe ? true : profilerSettings.instances,
     release,
     segments: createGameSegmentsPlatform(),
     interShard: globalThis,
     console: globalThis,
   });
   createOps({ kernel, logRoot: services.logRoot, entryStatus });
+  probe?.install(kernel);
   return kernel;
 };
