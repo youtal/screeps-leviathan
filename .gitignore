@@ -1,20 +1,13 @@
 node_modules/
-.venv/
 
 dist/
 
 .secret.json
+# 部署工具在本机记录的生效分支切换历史（按账户），供 rollback 使用。
+.deploy-history.json
 
-.tscache/
-
-.nyc_output
+# Jest 生成覆盖率报告时的默认输出目录。
 coverage
-
-# Screeps 集成测试为每个场景创建独立的私服数据、日志与性能采样结果。
-test/integration/.cache/
-test/integration/profiles/
-
-server
 
 .history
 npminstall-debug.log

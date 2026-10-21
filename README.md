@@ -2,15 +2,58 @@
 
 Screeps Leviathan 是一个使用 TypeScript 开发、能长期无人值守运营的 Screeps AI。
 
-**当前状态**：工程已初始化，构建与测试工具链待建立。开发阶段与里程碑见[设计文档](./docs/design/README.md)。
+开发阶段与里程碑见[设计文档](./docs/design/README.md)，各阶段的交付与验证记录见[审计报告与里程碑审查](./docs/audit/README.md)。
 
 ## 开发命令
 
 环境要求：Node.js 24 及以上、npm 12 及以上，以 `package.json` 的 `engines` 为准。
 
-构建、测试与部署命令随工具链建立后在本节和[验证与发布](#validation)中补充，并以 `package.json` 的 `scripts` 为准。
+```bash
+npm ci                # 安装依赖
+npm run typecheck     # 类型检查（游戏代码与测试代码分别检查）
+npm test              # 单元测试
+npm run build         # 构建 dist/main.js 与 source map
+npm run check         # 依次运行以上三项
+npm run test:scenarios  # 私服场景测试（需要 Docker；-- --only <场景名> 只运行单个场景）
+```
 
-部署凭据保存在不会提交到仓库的 `.secret.json` 中；建立部署工具时同时提供只含占位值的 `.secret.json.example`。
+命令以 `package.json` 的 `scripts` 为准。
+
+### 部署
+
+部署凭据保存在不会提交到仓库的 `.secret.json` 中，以账户名为键，可以配置多个账户，格式见只含占位值的 `.secret.json.example`。部署工具不设默认账户：除 `accounts` 外，每条命令都必须用 `--account` 指定目标账户。
+
+```bash
+npm run deploy -- accounts                                    # 列出已配置的账户与服务器（不显示令牌）
+npm run deploy -- branches --account <账户>                   # 列出该账户的代码分支与生效分支
+npm run deploy -- upload   --account <账户> [--branch <分支>]  # 构建、上传并回读校验
+npm run deploy -- upload   --account <账户> --activate         # 上传后把生效分支切换到该分支
+npm run deploy -- activate --account <账户> --branch <分支>    # 切换生效分支
+npm run deploy -- rollback --account <账户>                   # 把生效分支切回上一个生效分支
+npm run deploy -- delete   --account <账户> --branch <分支>    # 删除不再需要的分支
+```
+
+- 未指定 `--branch` 时上传到版本分支 `v<版本号>`。版本分支是回滚的依据，只能在工作区干净且 HEAD 带同名标签（即 `master` 上的发布提交）时上传；开发调试用 `--branch` 指定其他分支名。
+- 覆盖当前生效分支会立即改变线上运行的代码，只在同时给出 `--activate` 时允许。
+- 每次切换生效分支成功后，工具把切换前后的分支追加到本机的 `.deploy-history.json`（按账户分开，不提交到仓库）。`rollback` 据此切回上一个生效分支，它可以是首次切换前账户原有的分支；本机没有记录，或记录与服务器上的生效分支不一致时拒绝，须用 `activate` 指定。
+- 服务器限制每个账户的分支数（私服 backend 为 30 个），版本分支需要定期清理。`delete` 不能删除生效分支、模拟分支与当前的回滚目标，删除后回读确认。
+- 上传、切换生效分支、回滚与删除分支都是外部操作，需单独发起（见[验证与发布](#validation)）。
+
+### 查看线上数据
+
+inspector 经网页接口只读地查看账户的 Memory 与 segment，不写入任何数据，也不依赖游戏内的 kernel，kernel 拒绝加载 Memory 时同样可用。账户配置与部署工具共用 `.secret.json`，每条命令都必须用 `--account` 指定账户；官服的多 shard 账户用 `--shard` 指定 shard。
+
+```bash
+npm run inspect -- marker  --account <账户> [--shard <shard>]       # 项目标记与 Memory 状态
+npm run inspect -- sizes   --account <账户> [--shard <shard>]       # Memory 重新序列化后的总长度与各单元的长度
+npm run inspect -- get <点分路径> --account <账户> [--shard <shard>] # 某个路径下的值，例如 leviathan.part.boot.control
+npm run inspect -- segment <页号> --account <账户> [--shard <shard>] # 一页 segment 的页头与正文（0–99）
+```
+
+- 服务器先解析存储的 Memory 文本再返回，文本本身不是合法 JSON 时读不到原文，此时只能从 segment 备份区（第 80–89 页）查看清空前的备份。
+- 同样的原因，`sizes` 给出的是重新序列化后的长度：本项目写入的 Memory 与原文相同，外来或手工编辑过的 Memory 原文可能更长。
+- 键本身含 `.` 的路径无法用 `get` 表达。
+- 每条命令都会向服务器发起读取请求，属于外部操作，需单独发起。
 
 ## 文档
 
@@ -51,6 +94,18 @@ Screeps Leviathan 是一个使用 TypeScript 开发、能长期无人值守运�
 - Screeps API 的运行时限制、CPU 或 Memory 成本及跨 tick 影响；
 - 其他有助于理解、测试、排错和后续修改的非直观信息。
 
+**方法注释遵循 JSDoc。** `src/`、`scripts/` 及测试辅助模块中所有具名函数与方法（含导出的箭头函数、对象字面量方法、类方法，以及接口与类型中的方法签名）都要写 JSDoc 块注释；传给 `map`、`test` 等的内联匿名回调除外。
+
+- **必备字段**：
+  - `@description`：方法的职责与关键行为；
+  - `@param`：每个参数一条，名称与签名一致，说明含义、取值约束与默认值；对象参数用 `@param opts.字段` 逐项说明；
+  - `@returns`：返回值的含义；无返回值时写明"无返回值"，并说明产生的副作用。
+- **复杂方法补充字段**：会抛错、带泛型、修改状态或存在非直观调用约定的方法，按需补充，使读者不读实现也能正确调用：
+  - `@throws`：每类异常及其触发条件；
+  - `@template`：泛型参数的含义与约束；
+  - `@example`：调用方式不直观时给出示例；
+  - `@see`：对应的设计文档或架构章节。
+
 定义 Map 变量时，在定义旁的注释中明确写出 key 与 value 的具体含义，采用类似 `{ [key含义]: value含义 }` 的映射形式。复合 key 必须说明组成字段、顺序与分隔符；value 为 Set、数组或嵌套 Map 时，继续说明集合元素或内层 key/value 的含义，不能只重复 `string`、`Set<string>` 等类型。实例状态和函数内临时 Map 均遵守此规则。
 
 注释解释"为什么"和"如何工作"，不逐句复述代码。新增或修改源文件时，使涉及的文件满足本节。
@@ -59,6 +114,13 @@ Screeps Leviathan 是一个使用 TypeScript 开发、能长期无人值守运�
 ### 实现与状态
 
 代码写法遵循设计文档的代码范式。
+
+**模块引用**：`@/` 是 `src/` 的别名（`tsconfig.json` 的 `paths`）。跨模块导入一律写成 `@/<路径>`，不使用相对路径；相对路径只用于同一模块内部的文件之间。测试代码引用 `src/` 时同样使用 `@/`。模块的划分如下，由边界测试检查：
+
+- `src/` 根目录的文件各自为一个模块；
+- `contracts/` 整体为一个模块；
+- 领域模块为 `domains/<分组>/<领域>/`；
+- 其余为 `<层>/<模块>/`，层目录下的单个文件以文件名为模块。
 
 单个文件的有效内容（不计空行和纯注释行）如非必要不超过 300 行。这是建议项，不作为阻断条件：超出时优先按职责拆分，确有必要保持在同一文件时可以保留。
 
@@ -102,7 +164,7 @@ Logger 只承载纯文本日志，作用域名和正文在统一出口转义；�
 <a id="validation"></a>
 ### 验证与发布
 
-完成代码或构建系统修改后，按顺序运行与变更相符的检查：类型检查、单元与边界测试、构建；涉及引擎行为、跨 tick 状态或运营闭环的变更，再运行相应的私服场景测试；最后运行 `git diff --check`。其余检查的具体命令随工具链建立后补充。
+完成代码或构建系统修改后，按顺序运行与变更相符的检查：类型检查、单元与边界测试、构建；涉及引擎行为、跨 tick 状态或运营闭环的变更，再运行相应的私服场景测试；最后运行 `git diff --check`。对应的命令为 `npm run typecheck`、`npm test`、`npm run build`（或合并为 `npm run check`）与 `git diff --check`；私服场景测试为 `npm run test:scenarios`（需要 Docker，`-- --only <场景名>` 只运行单个场景）。
 
 纯文档修改至少检查差异空白，并核对改动文档的链接与章节引用。交付说明应列明未通过或未运行的检查、原因和影响。
 
@@ -125,13 +187,28 @@ Logger 只承载纯文本日志，作用域名和正文在统一出口转义；�
 
 **版本号：**
 
-- 每次提交（包括合并提交）都更新 `package.json` 的 `version`。
-- 格式为 `MAJOR.MINOR.PATCH`：
-  - PATCH：每次提交加 1；
-  - MINOR：完成一个里程碑时加 1，PATCH 归零；
-  - MAJOR：首个可长期在线上运行的版本定为 1.0.0，此前保持为 0；之后只在持久化数据或运维方式出现不兼容变更时加 1。
-- 并行分支合并时若 `version` 冲突，取双方中较大的版本号再按上述规则加 1。
-- 初始版本为 `0.1.0`。
+版本号为 `a.b.c`，记录在 `package.json` 的 `version` 中，初始版本为 `0.1.0`。
+
+| 部分 | 何时变化 |
+| --- | --- |
+| `a` | 全部里程碑完成前为 0；全部完成后为 1；之后只在持久化数据或运维方式出现不兼容变更时加 1 |
+| `b` | 取当前里程碑的编号；进入下一个里程碑时加 1，`c` 归零 |
+| `c` | 每个改变构建产物的任务合并进 `dev` 时加 1；紧急修复在同一 `a.b` 下取 `dev` 与 `master` 中最大的 `c` 再加 1 |
+
+- **何时改版本号**：只在合并提交中修改。任务分支上的普通提交、发布到 `master` 的合并、不改变构建产物的合并（例如只改文档或测试）都不改版本号。发布到 `master` 时直接为当前版本打标签。
+- **构建产物**：`src/`、构建配置（`rollup.config.mjs`、`tsconfig.json`）与 `package.json` 中的依赖声明（`dependencies`、`devDependencies` 与 `overrides`）发生变化，即视为改变了构建产物。
+- **工具**：`npm run version:bump [task|milestone|hotfix]` 按规则写入下一个版本号（默认 `task`）；`npm run check:version` 校验工作区中的版本号是否符合规则。合并时按方向校验：`dev` 合并进 `master`（发布）要求版本号等于 `dev` 的版本；合并进 `dev` 的任务与合并进 `master` 的紧急修复按上表递增；合并进其他分支（同步）取两边较大的版本。
+
+合并任务分支到 `dev` 的步骤：
+
+```bash
+git switch dev
+git merge --no-ff --no-commit <任务分支>
+npm run version:bump        # 改变了构建产物时执行
+npm run check:version
+git add package.json package-lock.json
+git commit
+```
 
 <a id="secrets"></a>
 ### 密钥与敏感信息

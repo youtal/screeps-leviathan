@@ -2,9 +2,9 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 版本 | 3.0 |
-| 日期 | 2026-10-16 |
-| 状态 | 设计定稿，待实施 |
+| 版本 | 3.1 |
+| 日期 | 2026-10-19 |
+| 状态 | 定稿 |
 | 适用环境 | Screeps World 官方服务器（多 shard）与私有服务器（单 shard） |
 
 **阅读顺序**：第 1–3 章是总览；第 4 章是总体架构；第 5–9 章自底向上逐层设计（内核 → 持久化 → 世界模型 → 服务 → 运营层）；第 10 章是 M2 起线上闭环所依赖的基础运营规则；第 11 章是启动判定与特殊模式；第 12 章是实现规范；第 13 章是工程与运维；第 14 章是开发阶段与里程碑；第 15 章是风险与待补设计。
@@ -55,7 +55,8 @@
 
 | 模块设计文档 | 内容 |
 | --- | --- |
-| `kernel/memory.md` | Memory 块级标脏与分级序列化缓存（候选） |
+| [app/config.md](./app/config.md) | 劳动力配置、身体模板、孵化优先级与运营参数 |
+| `kernel/memory.md` | Memory v1，以及候选的块级标脏与分级序列化缓存 |
 | `colony/inventory.md` | 库存控制器的设定值表、控制律、分配器与整定 |
 | `world/market.md` | 物价模型的数据来源与价格估计 |
 | `domains/industry/economics.md` | 产业规划的 v1 规则与 v2 风险调整优化 |
@@ -87,12 +88,13 @@
 | InterShardMemory | 官服每个 shard 一份，可读其他 shard；私服不提供 | 跨 shard 协议先做特性检测 |
 | creep 生命周期 | 寿命 1500 tick；每个身体部件孵化 3 tick；单个 creep 最多 50 个部件 | 提前孵化接替者 |
 | creep 动作 | transfer 与 withdraw 可在同一 tick 执行，withdraw 按 tick 开始时的空余容量检查；相邻 spawn 可以续命，续命后寿命不超过 1500 | 中央枢纽 creep 按交替模式搬运，以续命代替换代（9.7） |
-| 工作效率 | 每个 WORK 每 tick：采集 2 能量、升级消耗 1 能量、建造消耗 5 能量、维修 100 hits（每 hit 0.01 能量） | 劳动力按预算直接换算（10.2） |
+| 工作效率 | 每个 WORK 每 tick：采集 2 能量、升级消耗 1 能量、建造消耗 5 能量、维修 100 hits（每 hit 0.01 能量） | 劳动力按预算换算，规则见 [app.config](./app/config.md#workforce) |
 | terminal 与存储 | terminal 每次发送至少 100，发送后冷却 10 tick；storage、terminal、factory 容量分别为 1,000,000、300,000、50,000 | 跨殖民地调运用补货策略；库存设定值之和受容量约束（9.3.4） |
 | 跨 shard | creep 名称保持不变，对象 id 不保证保持 | 跨 shard 识别以名称为准 |
 | 市场 | 每种资源提供近 14 天的每日成交统计；挂单收 5% 手续费；terminal 运输消耗 `ceil(数量 × (1 − e^(−距离/30)))` 能量 | 物价模型以历史为主、挂单簿为辅，运输成本计入价格 |
 | NPC 入侵者 | 房间 source 的累计采集量达到阈值后出现；自有房间 RCL ≥ 4 时为大型入侵者 | 防御基线从 M2 起就必须具备（10.7） |
 | 代码分支 | 官服支持多个代码分支，可切换生效分支 | 发布与回滚以分支切换完成 |
+| JS 运行环境 | 官服运行在 Node 24 上 | 编译目标为 ES2024，可直接使用 ES2024 的语法与内置 API |
 | 运行时依赖 | 只有原生 API | 寻路只用原生 `PathFinder`；运行时零 npm 依赖 |
 
 ---
@@ -120,7 +122,8 @@
 
 ```mermaid
 flowchart TB
-    main["main.ts<br/>入口 + 保底循环"] --> kernel
+    main["main.ts<br/>入口 · 循环切换"] --> kernel
+    main --> fallback["fallback.ts<br/>独立保底循环"]
     app["app<br/>装配 · 配置 · 启动判定 · 运维"] --> kernel
     domains["domains<br/>运营：目标、任务、资产驱动、结果核验"] --> services
     domains --> colony
@@ -160,11 +163,15 @@ services 每 tick 主动运行，对阶段顺序敏感，这是"意图收集后�
 
 以上规则由静态边界测试检查（13.2）。
 
+`fallback.ts` 是独立的应急执行入口，不导入其他项目模块（包括 `lib`），不读写持久化状态；只有 `main.ts` 负责选择正常循环或保底循环。保底直接使用游戏 API，不经正常服务仲裁，边界与预算限制见 5.7。
+
 ### 4.3 代码组织
 
 ```text
 src/
-├── main.ts          入口 + 保底循环
+├── main.ts          入口与正常 / 保底循环切换
+├── fallback.ts      独立保底循环
+├── settings.ts      使用者设置：经常手动切换的运行开关（日志级别默认值等）
 ├── kernel/          lifecycle、process、cpu、context、memory、segments、intershard、
 │                    logger、profiler、errorMapper、stats、console、bootPort
 ├── lib/             grid、geometry、body、naming、combat、layout、tables、collections、hash
@@ -179,6 +186,8 @@ src/
 ├── contracts/       注入接口与跨模块协议
 └── app/             assembly、config、profiles、boot、ops、policy
 ```
+
+`settings.ts` 集中存放使用者经常手动切换的运行开关，例如日志各级别的默认开关；调参用的配置表（身体模板、阈值等）仍在 `app.config`。它只导入 contracts 的类型，只被 `app.assembly` 与 `main.ts` 导入；其他层不直接读取它，由装配方把其中的值作为参数注入（4.2 的显式注入）。
 
 **代码按领域组织，运行时按殖民地实例化。** 多数领域同时跨越房间范围和 shard 范围（例如物流同时负责房内运输和终端跨房平衡）。按作用域拆分代码，会让本该在模块内部直接协作的逻辑被迫改走公共协议。因此一个领域目录同时包含殖民地实例部分和全局单例部分，运行时由 kernel 为每个殖民地或站点派生实例。
 
@@ -254,7 +263,7 @@ move 必须在 act 之后：搬运类 creep 要先拿到 arbitrate 的分配结�
 | | governor | 可调能量预算的分配与关系预留 |
 | | relations | 殖民地间关系（扶持、前线基地、补给基地） |
 | app | assembly | 模块清单与装配 |
-| | config | 优先级、身体模板、阈值等配置表 |
+| | config | 劳动力配置、优先级、身体模板、阈值等配置表 |
 | | profiles | 官服与私服的特性开关 |
 | | boot | 启动判定、特殊模式、不可逆操作闸门 |
 | | ops | 运维命令（启停、恢复、强制模式、诊断） |
@@ -268,7 +277,7 @@ move 必须在 act 之后：搬运类 creep 要先拿到 arbitrate 的分配结�
 
 ### 5.1 进程表
 
-- **静态模块**：构建期清单 `{id, requires, optional, tier, priority}`，启动时做一次稳定拓扑排序。
+- **静态模块**：构建期清单 `{id, requires, optional, tier, priority, startPaused}`，启动时做一次稳定拓扑排序。`startPaused` 表示没有运维覆盖时是否暂停，用于新领域以默认暂停上线（5.5、13.3）；生存层模块不能暂停。
 - **动态实例**：身份由稳定键派生，例如 `mining:W1N1:<sourceId>`，global reset 后不变；随房间集合和站点集合变化而创建或退役；继承所属模块的层级和顺序，在桶内按优先级排列，不参与拓扑排序。
 - **钩子**：进程按需实现 `plan`、`act` 等阶段钩子，每个钩子在独立的错误边界中执行。
 - **熔断**：连续失败达到阈值后熔断该进程，可通过运维命令 `recover(id)` 恢复。静态模块熔断时，依赖它的模块及其全部实例一起暂停。
@@ -278,12 +287,14 @@ move 必须在 act 之后：搬运类 creep 要先拿到 arbitrate 的分配结�
 | 层 | 准入条件（默认） | 内容 |
 | --- | --- | --- |
 | 生存 | 总是准入，但不越过收尾预留 | boot、孵化、tower、bootstrap、移动结算 |
-| 经济 | bucket ≥ 300，或本 tick 预算有剩余 | 采集、物流、升级 |
-| 维护 | bucket ≥ 2000；每 N tick 一次，按 `hash(id) % N` 错峰 | 建造、修复、Lab、Factory、库存控制 |
-| 规划 | bucket ≥ 5000；事件触发或低频执行 | 布局、扩张评估、产业规划 |
+| 经济 | 本 tick 预算有剩余（bucket 低于目标时预算已经收缩，5.3） | 采集、物流、升级 |
+| 维护 | 本 tick 预算有剩余；每 N tick 一次，按 `hash(id) % N` 错峰 | 建造、修复、Lab、Factory、库存控制 |
+| 规划 | bucket ≥ 1500 且本 tick 预算有剩余；事件触发或低频执行 | 布局、扩张评估、产业规划 |
 
 - **实例准入过滤**：app 向 kernel 注册通用过滤函数 `admit(instanceKey) → {run, tierOverride?}`，kernel 每 tick 准入时调用。殖民地的运行姿态通过它生效（9.3.3）；kernel 不理解姿态的语义。
 - 降级顺序是先按层、再按殖民地：先保证所有殖民地的生存层，再依次加入其他层；同一层内按殖民地姿态的优先级排列（9.3.3）。
+- **剩余预算**：只使用扣除收尾预留后的可分配份额；维护层的执行周期与错峰不因取消 bucket 门槛而取消。`BUCKET_TARGET` 仍为 5000，规划准入门槛不改变回补目标。
+- **预计耗用预检**：除生存层外，实例进入运行前比较"平滑耗用 ≤ 所属殖民地本层剩余份额"，放不下的本 tick 不进入、下一 tick 优先（5.3）。避免昂贵实例在预算将尽时开始运行，挤占收尾预留。
 - 长计算由调用方自行分片并保存游标，每 tick 检查剩余预算。
 
 ### 5.3 CPU 预算
@@ -305,7 +316,7 @@ bucket 高于目标时允许透支，使 bucket 在 `BUCKET_DRAIN` tick 内回�
 2. 生存层：不设份额上限，按实际消耗；
 3. 其余各层：按层依次分配，同一层内按殖民地份额分配。殖民地份额按"姿态优先级 × 殖民地价值"归一化；实例超出所属殖民地的份额时本 tick 让出，下一 tick 优先。
 
-**计量**：每个实例的 CPU 用指数平滑记录，写入统计，用于份额计算和发现异常的高消耗实例。
+**计量**：每个实例的 CPU 用指数平滑记录，写入统计，用于准入预检、份额计算和发现异常的高消耗实例。
 
 **初始目标**（M2 实测后校准，作为后续版本的回归基准）：
 
@@ -349,13 +360,22 @@ interface ModuleContext {
 
 ### 5.7 保底循环
 
-入口最外层用 try/catch 包住整个 kernel。kernel 抛错，或连续 N tick 进入安全模式时，转而运行一段不足百行、不依赖任何模块的保底脚本：
+`main.ts` 最外层用 try/catch 包住正常循环的初始化与执行。kernel 抛出可捕获异常，或连续 N tick 进入安全模式时，调用独立的 `src/fallback.ts`。保底有效代码不超过 400 行（不计空行和纯注释行），不导入其他项目模块，不读写 `Memory`、`RawMemory`、`InterShardMemory` 或原生 `*.memory`，不使用 `spawnCreep` 的 `memory` 选项。接管计数可由入口在 heap 保存，reset 后重新判定。
 
-1. 每座 tower 攻击最近的敌方 creep；
-2. 某房间没有采集者时，用当前能量孵化最小采集者；
-3. 控制器剩余降级时间低于阈值时，派最近的 creep 去升级。
+**最小闭环：**
 
-保底循环是线上闭环的最后一道防线：即使新版本有缺陷，在回滚完成之前房间也不会丢失。
+1. 每座可用 tower 攻击最近的敌方 creep；没有攻击目标且预算、能量允许时，治疗受伤的己方 creep。
+2. 本房缺少可用采集者且没有正在孵化的应急接替者时，用当前能量孵化最小采集者；角色从有效身体部件、位置和能量判断，不要求正常系统的角色记录。
+3. 执行简单的本房能量物流：可移动的 CARRY creep 从 storage、container、掉落能量、墓碑或废墟取能，给 spawn、extension 与应急 tower 补能；没有可取能量时，由具备采集能力且可到达 source 的 creep 采集。固定工作 creep 仅执行当前位置可完成的动作。
+4. 控制器剩余降级时间低于应急阈值时，优先为防降级保留能量，并安排可到达升级范围、具备有效 WORK 且有能量的 creep 升级；空载时先取能，不把刚提交的取能当作已经完成。
+
+**运行约束：**
+
+- 每房间每 tick 只收集一次所需对象，使用当 tick 的目标分配和数量预留避免重复孵化、多人争抢同一小额供给或重复补满同一目标；不建立持久任务队列。
+- 依据 `Game.cpu.getUsed()` 与 `tickLimit` 限制接管后的工作量，预留退出余量；先保障防御、紧急防降级与补能链，预算不足时跳过次要工作。寻路只在本房进行，限制调用次数与 `maxOps`，允许直接调用 `PathFinder.search` 和 `creep.move`；不依赖正常 movement，也不使用隐式写入 Memory 的移动缓存。
+- 按房间及单个资产隔离异常；接管发生在正常循环部分执行之后时，不能假定此前没有提交 intent，不对同一动作反复提交重试。
+- 应急 creep 使用独立名称 `fb-<来源 shard>-<完整 tick 的 base36>-<同 tick 序号>`，不依赖 `lib.naming`；生成前检查当前及正在孵化的名称，并保留本 tick 已分配名称。正常循环恢复后按事实纳入遗留池并认领（9.1、11.6），应急前缀不作为清空 Memory 的签名证据。
+- CPU 硬终止无法由 catch 接管；保底只能在仍有 CPU 时运行，或在后续 tick 根据可用故障证据提前接管。它用于回滚前尽量维持生存闭环，不对能量耗尽、资产被摧毁或 CPU 已耗尽的情形承诺保住房间。
 
 ### 5.8 可观测性
 
@@ -416,7 +436,7 @@ interface Accessor<T> {
 - **`set`**：写入前校验值是否为合法 JSON（普通对象、数组、有限数字、字符串、布尔、null），写入副本。中间容器缺失时默认报错，`create: true` 时自动创建普通对象；数组不自动扩容。
 - **`update`**：回调内允许任意原地修改，标脏所在单元，该单元在 commit 时完整校验。回调抛错不回滚。
 - **`delete`**：删除成功才标脏。数组元素在 `update` 中用 `splice` 删除。
-- **只读约定**：`get` 返回的引用不得直接修改，否则不会标脏。开发构建在 commit 时对未标脏的单元做抽样哈希比对，以发现违规修改。
+- **只读约定**：`get` 返回的引用不得直接修改，否则不会标脏。开发期在使用者设置（`src/settings.ts` 的 `memorySettings.auditUnits`，默认关闭）中开启抽查后，commit 时对未标脏的单元轮转做编码比对，以发现违规修改；私服调试与场景测试时开启。
 
 ### 6.4 实体空间（room / creep / flag）
 
@@ -476,7 +496,7 @@ ctx.flags.of(flagName)  /  ctx.flags.core(flagName)
 | `epoch` | 纪元号，每次开局或清空重建时加 1 | 开局、清空时 |
 | `lastRun` | 最近一次运行的 tick | 每 tick |
 | `release` | 当前运行的版本号 | 每次 global reset |
-| `fp` | 世界指纹 `{rooms, spawnIds, creepCount}` | 每 100 tick，以及资产变化时 |
+| `fp` | 世界指纹 `{rooms, spawnIds, creepCount}` | 每 100 tick，以及完整判定之后 |
 | `mode` | 启动判定结果 `{mode, strength, since, evidence}` | 每次完整判定后 |
 
 ### 6.8 Segment 冷存储
@@ -558,15 +578,39 @@ world 只提供事实，不做决策。
 
 > 成熟度：定稿 · M2
 
-- 每个房间最多 3 个变体：标准（平原 2、沼泽 10、道路 1）、忽略道路、忽略沼泽。共享矩阵不允许修改，只在需要叠加 creep 或威胁时 clone。
-- 失效分两级：
+world.costMatrix 维护可复用的房间通行事实与成本缓存；movement 负责按移动需求选择变体、寻路、路径缓存和交通结算。结构变化由 world 提供给 costMatrix 与 hub，world 不依赖 services。固定对象的位置是事实，厌恶权重是显式配置，不由 world 根据角色或任务自行改变。
+
+**四种变体**（下表为未加厌恶的基础成本）：
+
+| 变体 | 平原 | 沼泽 | 道路 |
+| --- | --- | --- | --- |
+| 标准 | 2 | 10 | 1 |
+| 忽略道路 | 2 | 10 | 按所在格地形 |
+| 忽略沼泽 | 2 | 2 | 1 |
+| 忽略道路和沼泽 | 2 | 2 | 2 |
+
+**三层数据与合成：**
+
+| 层 | 内容 | 生命周期 |
+| --- | --- | --- |
+| A 固定事实 | 地形、source/mineral 等固定不可通行对象；source/mineral 周围的有限附加厌恶成本 | 首次取得完整事实时预计算，无时间有效期；配置改变时失效，heap 丢失后重建。尚未观测到固定对象的房间不能将不完整数据永久标为完整 |
+| B 建筑 | road 的基础成本覆盖、不可进入建筑的阻挡，以及 rampart 等建筑的通行权限 | 设有效期；观测到结构或通行权限变化时立即失效，过期按需核验，失去视野不等于建筑被毁 |
+| C 当前占位 | Creep/PowerCreep 的占位 | 仅在卡住纠错、逃离等需要避让当前单位的场景，由 movement 在当 tick 临时叠加；不缓存合成的 C 层矩阵，使用后丢弃 |
+
+- A 层分别预计算普通地形与忽略沼泽的基础成本，并保留固定障碍、附加厌恶信息。A+B 按需合成为最多四张完整矩阵，普通可通行格也显式填入成本，不以 0 回退到地形。共享结果只读；B 层变化后从有效的 A 层重建，不重新计算固定事实。
+- 合成顺序：固定障碍或不可进入建筑使结果为 255；其余格先按变体取地形成本，启用道路时由 road 将基础成本覆盖为 1，再加固定厌恶，软成本封顶 254。道路不能覆盖硬障碍，也不消除周边厌恶；source/mineral 周边工作格仍可进入。
+- 需要 C 层时 clone 对应 A+B 结果，再按该次寻路的占位过滤规则覆盖；不修改共享矩阵。威胁成本由 world.threat 提供、由 movement 按场景另行叠加，不与单位占位混为同一语义。
+- 所有矩阵位于 heap，按房间及配置版本维护；无人使用的房间可以回收。无时间有效期不表示永不回收或必须持久化。仅命中 A+B 缓存时直接复用，不在每次寻路前逐格重做静态合成。
+- CostMatrix 非零值是最终成本，不是增量；0 会在原生寻路中读取地形而不写回矩阵（附录 A，F20）。附加厌恶须与各变体的基础成本预先合成。四张完整矩阵避免零值回退读取，代价是首次填充与失效重建；具体 CPU 收益以游戏内测量为准。
+
+**失效分两级：**
 
 | 变化 | 处理 |
 | --- | --- |
-| 原可通行格变为障碍 | 更新矩阵，并通知 movement 清除依赖该房间的路径 |
-| 道路建成或被毁、障碍消失 | 只更新矩阵，保留路径 |
+| 原可通行格变为障碍，包括通行权限收紧 | 更新矩阵版本及障碍版本，movement 据此清除依赖该房间的路径 |
+| 道路建成或被毁、障碍消失、仅软成本改变 | 更新矩阵版本，保留仍可通行的已有路径 |
 
-- 变化来源：自有房间由 build 领域在确认结构变化后调用 `invalidate(room, kind)`；非自有房间每 tick 核对结构与工地数量，并以 movement 的卡住纠错兜底。
+- 变化来源：自有房间由 build 领域在确认结构变化后调用 `invalidate(room, kind)`；非自有房间每 tick 核对结构与工地数量。数量检查不能发现数量相同的位置或权限变化，由有效期核验与 movement 的卡住纠错兜底；有效期只触发核验，不能代替观测事实。
 
 ### 7.4 hub（中央枢纽）
 
@@ -628,7 +672,7 @@ move.stay(creep, anchor, range);                // 工作中：可被推挤，�
 move.flee(creep, threats, { range, priority }); // 逃离
 ```
 
-业务代码不直接调用 `creep.move`。
+正常运营的业务代码不直接调用 `creep.move`；独立保底循环按 5.7 直接调用游戏 API。
 
 #### 8.1.2 路径与缓存
 
@@ -637,7 +681,7 @@ move.flee(creep, threats, { range, priority }); // 逃离
 - 只用原生 `PathFinder.search` 和 `Game.map.findRoute`。跨房时先按 world.map 的权重求房间路线，PathFinder 只在路线覆盖的房间内搜索。
 - **单 creep 路径**：heap 中保存"方向串 + 游标"；creep 不在预期位置时重算；global reset 后直接重算，不持久化。
 - **预算**：每 tick 限制寻路次数和 ops 总量，按优先级分配；超出预算的 creep 本 tick 沿旧路径走或等待。
-- 收到 costMatrix 的障碍变化通知时，清除依赖该房间的路径。
+- movement 校验路径依赖房间的 costMatrix 障碍版本；版本变化时清除相关路径，不要求 world 导入或调用 movement 的实现。
 - **热点方向场（候选）**：当寻路 CPU 成为瓶颈时，对热点目标（storage、spawn、controller、外矿 source）每个目标、每个房间维护一张 4 bit/格的方向表（1250 字节），懒填充并复用后缀，供多个 creep 共享。
 
 #### 8.1.3 交通结算
@@ -685,10 +729,10 @@ move 阶段按房间结算：
 
 > 成熟度：定稿 · M2（续命在 M3 随中央枢纽接入）
 
-- **请求**：孵化请求 `{owner, priority, bodyFn, minEnergy, deadline}` 与续命请求 `{creep, spawn, priority}`，每 tick 重新提交。优先级数值见 10.4。
-- **身体组成**：`bodyFn(能量上限, 当前可用能量, 紧急程度) → body` 是纯函数，模板与规则见 10.3。
+- **请求**：孵化请求 `{owner, priority, bodyFn, minEnergy, deadline}` 与空闲续命请求 `{creep, spawn}`，每 tick 重新提交。孵化优先级数值见 [app.config 的孵化优先级](./app/config.md#spawn-priorities)；续命不参加孵化优先级竞争。
+- **身体组成**：`bodyFn(能量上限, 当前可用能量, 紧急程度) → body` 是纯函数，模板与规则见 [app.config 的身体模板](./app/config.md#body-templates)。
 - **提前孵化**：`ticksToLive ≤ body.length × 3 + 路程 + 余量` 时提交接替者的请求。
-- **续命**：只在指定 spawn 空闲时执行 `renewCreep`，用于无法提前孵化接替者的固定位置 creep，例如中央枢纽 creep（9.7）。
+- **续命**：先处理可执行的孵化请求；指定 spawn 仍空闲、本 tick 未开始孵化、能量足够且目标可完整容纳一次寿命增量时，才执行 `renewCreep`。不按寿命提高优先级、不为续命保留窗口，也不推迟可执行的孵化；繁忙期间死亡时按补位请求处理（9.7）。同一 creep 本 tick 至多由一个相邻 spawn 续命。
 - **执行**：按优先级出队，同优先级按 deadline 先后；出队后调用 `spawnCreep`，名称按命名规范生成（9.2），用 `directions` 避开拥堵方向，并且除孵化中央枢纽 creep 外一律排除枢纽格；返回 `OK` 时写入 creep 空间的 core 切片。
 - **指标**：spawn 繁忙率，长期超过警戒线意味着需要增加 spawn 或减少 creep。
 
@@ -737,15 +781,20 @@ M2–M3 的房内运输由 logistics 领域自行调度（10.5）。出现外矿
 
 > 成熟度：定稿 · M1
 
-creep 与 spawn 统一命名：
+正常流程创建的 creep 使用统一的身份格式：
 
 ```text
-<前缀>-<来源 shard>-<用途>-<目标 shard>-<序号>-<校验位>
-例：XX-s2-pio-s3-k3f9-7
+<前缀>-<来源 shard>-<出生用途>-<目标 shard>-<完整出生 tick 的 base36>.<同 tick 序号的 base36>-<校验位>
 ```
 
 - shard 未知时（私服）写 `x`；校验位 = `hash(其余部分 + salt) mod 36`，salt 写在配置中。
 - 名称跨 shard 不变，因此命名规范同时用于：跨 shard 识别、Memory 丢失后的自我认领、区分本系统资产与外来资产。
+- creep 名称由 spawnQueue 统一分配；同 tick 序号在该 shard 的全部 spawn 间共享，不限制为单字符、不对 `Game.time` 取模。生成前检查 `Game.creeps`、正在孵化的名称与本 tick 已预留名称；失败重试不复用已预留的序号。分配器在 heap 持有当 tick 状态，`lib.naming` 只做无状态格式化、解析和校验。
+- 唯一性来自来源 shard、完整出生 tick 和同 tick 序号的组合，校验位不承担唯一性。普通 global reset 不重置世界时间，不需要持久化跨 tick 计数器；保证范围为同一账户、同一世界正常时间线。服务器时间回滚或重建不在此保证内。
+- 出生用途是简短的恢复与观察提示，不能代替 core 中的当前角色与任务；转岗不改名称，不新增等级字段。
+- spawn 名称不使用签名格式，从 `lib.naming` 的词库（约 1000 个英文单词，主题与项目名呼应）中随机抽取，同一 shard 的同一局内不重复。建造 spawn 的流程在创建工地之前抽取，排除已用、现存 spawn 与 spawn 工地、本 tick 已预留的名称；已用记录保存在本系统 Memory 中，丢失后从现存 spawn 与 spawn 工地重建，词库用尽时清空记录、只排除现存名称。每局第一个 spawn 由玩家放置（F1），建议从词库中选名，不作强制，也不影响任何判定。词库公开，名称在词库中只是 spawn 归属的弱证据（11.6）。
+- 生成发生在创建时，解析与校验发生在初次发现、启动判定或恢复认领时；正常运行按 core 分组，解析结果在 heap 按名称复用，随实体退出而清理。目标 shard 与来源 shard 按 11.5 用作跨 shard 判定证据，出生用途只作辅助线索。
+- 保底名称采用 5.7 的独立格式，不要求正常签名；恢复后按事实认领，不能将应急前缀作为清空持久化数据的依据。
 
 ### 9.3 殖民地（colony）
 
@@ -761,7 +810,7 @@ creep 与 spawn 统一命名：
 
 > 成熟度：定稿 · M2
 
-发展阶段由事实计算，并带滞回。各阶段的劳动力配置见 10.2。
+发展阶段由事实计算，并带滞回。各阶段的劳动力配置见 [app.config](./app/config.md#workforce)。
 
 | 阶段 | 进入条件 | 主要特征 |
 | --- | --- | --- |
@@ -861,7 +910,7 @@ creep 与 spawn 统一命名：
 
 > 成熟度：定稿 · M2
 
-不下达命令，只输出数字：本 tick 建造、升级、维修各可用多少能量，以及为关系（扶持、战役）预留的 spawn 产能与能量。可调能量的总量由库存控制的能量回路给出（9.3.4）：能量高于目标时增加升级等可调投入，低于目标时削减。governor 只负责在此总量内，按姿态配置的预算权重与关系预留进行分配，不再自行根据 storage 余量估算。各站点据此决定自身规模，换算规则见 10.2。
+不下达命令，只输出数字：本 tick 建造、升级、维修各可用多少能量，以及为关系（扶持、战役）预留的 spawn 产能与能量。可调能量的总量由库存控制的能量回路给出（9.3.4）：能量高于目标时增加升级等可调投入，低于目标时削减。governor 只负责在此总量内，按姿态配置的预算权重与关系预留进行分配，不再自行根据 storage 余量估算。各站点据此决定自身规模，换算规则见 [app.config](./app/config.md#workforce)。
 
 #### 9.3.6 殖民地间关系
 
@@ -938,19 +987,21 @@ creep 与 spawn 统一命名：
 
 | 方面 | 规则 |
 | --- | --- |
-| 身体 | 只有 CARRY，没有 MOVE；部件数默认 `HUB_CARRY` |
+| 身体 | 只有 CARRY，没有 MOVE；按需求确定部件数，上限 `HUB_CARRY_MAX = 20`，未 boost 时最多 1000 容量 |
 | 孵化 | 由与枢纽相邻的 spawn 孵化，`directions` 只指向枢纽格；其他 spawn 的 `directions` 一律排除枢纽格 |
-| 续命 | 枢纽格被占用，无法提前孵化接替者，因此用相邻 spawn 的 `renewCreep` 续命：寿命低于 `T_RENEW` 且 spawn 空闲时，由 spawnQueue 执行续命请求（8.2） |
-| 丢失 | 立即以高优先级重新孵化；空档期间核心转运由搬运工承接 |
+| 续命 | 相邻 spawn 处理可执行孵化请求后仍有空闲，且寿命 ≤ `1500 − floor(600 / 部件数)` 时，由 spawnQueue 机会性续命（8.2）；20 CARRY 对应寿命 ≤ 1470，不设置额外的提前续命阈值 |
+| 丢失 | 立即提出补位孵化请求，按配置优先级排队；接受繁忙导致死亡及随后补位的空档，期间核心转运由搬运工承接 |
 | 交通 | 枢纽格被核心建筑围住，正常行走无法到达，中央 creep 不参与推挤 |
 
-续命每次增加 `floor(600 / 部件数)` tick，耗能 `ceil(0.4 × 身体成本 / 部件数)`，纯 CARRY 固定为 20（附录 A，F14）。以默认 16 CARRY 为例，每次 +37 tick，维持一个完整寿命约耗能 810，与重新孵化（800 能量加 48 tick 孵化时间）基本持平，但没有空档。
+续命每次增加 `floor(600 / 部件数)` tick，耗能 `ceil(0.4 × 身体成本 / 部件数)`，纯 CARRY 每次固定耗能 20（附录 A，F14）。20 CARRY 每次 +30 tick，长期维持每 1500 tick 约需 50 次续命、1000 能量与 10 CPU 固定 intent 成本，另有调度、API 检查与补能成本。重新孵化同体型需 1000 能量、60 tick 孵化时间和一次孵化 intent；续命用于减少换代空档，不为其改变正常孵化顺序，也不保证连续存活。
 
 **搬运节奏：**
 
 - 同一 tick 内 transfer 与 withdraw 都会执行，但 withdraw 按 tick 开始时的空余容量检查（附录 A，F13），因此稳定吞吐上限是每 tick 半个容量。
 - 默认使用**交替模式**：一个 tick 装满，下一个 tick 卸空，平均每 tick 1 个 intent（0.2 CPU）。需要低延迟时（例如紧急给 spawn 补能）才在同一 tick 内一取一放。
 - 没有任务时不提交任何动作。
+
+20 CARRY 在满载交替模式下的平均吞吐上限为 500 资源/tick；多资源、小额任务仍受动作次数限制。体型上限不是所有负载都无积压的保证，按任务积压与补料时限验证容量是否足够。
 
 **任务来源**：核心建筑之间的转运需求，例如 core link → storage、storage 与 terminal 的库存平衡、factory 的原料与产物、powerSpawn 与 nuker 的补料、核心 spawn 的补能。两端都是枢纽伙伴的请求优先分配给中央 creep。
 
@@ -1046,71 +1097,22 @@ creep 与 spawn 统一命名：
 
 ### 10.2 劳动力配置
 
-**按发展阶段的角色：**
+各领域按 colony 的发展阶段、运行姿态与预算，结合世界事实确定劳动力需求。角色清单、数量换算和补能时限统一维护在 [app.config 的劳动力配置](./app/config.md#workforce)，新增角色不要求改动总体架构。
 
-| 阶段 | 角色与数量 |
-| --- | --- |
-| 紧急 | 1–2 个最小采集者，按当前可用能量孵化；采集后直接给 spawn 补能 |
-| 早期（RCL 1–3，无 container） | 通用工人。每个 source 分配的 WORK 总数约为 5 × 1.5（含往返损耗），且人数不超过 source 周围可站格数。工作顺序：采集 → 补能 → 建造 → 升级 |
-| 静态采矿 | 每个 source 1 个矿工；搬运工按运力公式配置；升级者与建造者按预算配置 |
-| storage 经济（RCL 4+） | 同上；搬运工把能量送进 storage；增加 1–2 个补能者，从 storage 给 spawn、extension、tower 补能 |
-| link（RCL 5+） | 矿工增加 CARRY，把能量转入 source link；接入 link 的 source 不再配搬运工；升级者从 controller link 取能 |
-| 后期（RCL 7–8） | 核心转运由中央枢纽承担（9.7）；RCL8 升级者 WORK 总数不超过 15 |
+### 10.3 身体生成
 
-**数量换算**（依据附录 A 的 F16）：
+`lib.body` 以纯函数展开身体并计算成本与能力；各领域提供需求，spawnQueue 在能量约束内取得可执行体型。单个 creep 不超过平台规定的 50 部件。具体模板、移动比例、角色上限与紧急体型规则见 [app.config 的身体模板](./app/config.md#body-templates)。
 
-| 角色 | 规模 |
-| --- | --- |
-| 矿工 | 每个 source 5 个 WORK（产能 10 能量/tick ÷ 每 WORK 采集 2） |
-| 搬运工 | CARRY 总数 = `ceil(2 × 路径长度 × 10 / 50)` / 每个 source（12.3） |
-| 升级者 | WORK 总数 = 升级预算（能量/tick）÷ 1；RCL8 不超过 15 |
-| 建造者 | WORK 总数 = 建造预算（能量/tick）÷ 5；没有工地时为 0 |
-| 补能者 | CARRY 总数满足在 `T_REFILL` tick 内补满全部 spawn 与 extension |
+### 10.4 孵化仲裁
 
-### 10.3 身体模板
-
-| 角色 | 重复单元 | 规模规则 |
-| --- | --- | --- |
-| 最小采集者 | `[WORK, CARRY, MOVE]` | 固定 1 个单元（200 能量） |
-| 通用工人 | `[WORK, CARRY, MOVE]` | 能量上限可负担的最多单元，单元数不超过 5 |
-| 矿工 | `[WORK×5]` + MOVE；link 阶段加 1 CARRY | MOVE 数取 1–3，按到达时限与能量上限决定；能量上限不足 550 时用可负担的最大 WORK 数 |
-| 搬运工 | `[CARRY, CARRY, MOVE]` | 单个不超过所需 CARRY 总数的一半，便于两个分担；上限 32 CARRY |
-| 补能者 | `[CARRY, CARRY, MOVE]` | 按补能需求 |
-| 升级者 | `[WORK×k, CARRY, MOVE×⌈k/2⌉]` | k 由预算决定，单个不超过 15 WORK |
-| 建造者 | `[WORK, CARRY, MOVE]` | 按预算 |
-| 近战防御者 | `[ATTACK, MOVE]` | 按威胁（10.7） |
-| 远程防御者 | `[RANGED_ATTACK, MOVE]` | 按威胁（10.7） |
-
-- 单个 creep 不超过 50 个部件。
-- MOVE 比例：主要在道路上活动的角色按 1:2，否则按 1:1。
-- 平时按能量上限生成满配体型；紧急时按当前可用能量生成最小可用体型。
-- 体型展开由 `lib.body` 的纯函数完成，模板与上限写在 `app.config`。
-
-### 10.4 孵化优先级
-
-| 优先级 | 请求 |
-| --- | --- |
-| 100 | 紧急采集者（殖民地没有采集者） |
-| 95 | 防御者（安全轴为战时） |
-| 90 | 补能链断裂时的首个搬运工或补能者 |
-| 85 | 矿工（含提前孵化的接替者） |
-| 80 | 搬运工 |
-| 75 | 中央枢纽 creep 的补位与续命 |
-| 70 | 防降级升级者（控制器剩余降级时间低于 `CONTROLLER_DOWNGRADE` 的 50%） |
-| 60 | 建造者 |
-| 50 | 升级者 |
-| 40 | 外矿相关（M4） |
-| 30 | 扶持与扩张（M5） |
-| 20 | 侦察 |
-
-同优先级按 deadline 先后。姿态配置可以整体调整某类请求的优先级（例如战时降低升级者）。
+spawnQueue 统一仲裁各领域提出的孵化需求，同优先级按 deadline 先后，姿态配置可以调整类别优先级。生存恢复、防御与补能链需求优先于普通发展需求；具体角色优先级见 [app.config 的孵化优先级](./app/config.md#spawn-priorities)。中央枢纽续命只使用正常孵化处理后的空闲机会，不参与该优先级队列（8.2、9.7）。
 
 ### 10.5 采集、搬运、补能与升级
 
 - **采集**：矿工站在 source 旁的 container 上采集。container 已满且没有 link 可存时停止采集，不提交无效动作。link 阶段矿工把能量转入 source link，logistics 在 source link 的能量达到阈值且目标 link 有空间时执行 `transferEnergy`。
 - **搬运**（M2–M3 由 logistics 自行调度，M4 起改用 logisticsBroker）：搬运工每次持有一个"取 → 送"任务，完成后再领取下一个。取货点为能量超过阈值的 container、地上的能量、墓碑与废墟。送货点按优先级：spawn 与 extension（没有补能者时）> 能量低于 50% 的 tower > 升级用 container > storage。
 - **补能**：补能者按布局给出的 extension 顺序补能，减少往返；核心 spawn 在 M3 起由中央枢纽补能。
-- **升级**：升级者停在 controller 旁的 container 或 link 附近持续升级（`move.stay`）。预算削减时升级者数量随之减少，但控制器剩余降级时间低于阈值时，无论预算多少都保留防降级升级（10.4）。
+- **升级**：升级者停在 controller 旁的 container 或 link 附近持续升级（`move.stay`）。预算削减时升级者数量随之减少，但控制器剩余降级时间低于 [app.config 的防降级阈值](./app/config.md#parameters)时，无论预算多少都保留防降级升级。
 
 ### 10.6 建造与维修
 
@@ -1204,7 +1206,7 @@ creep 与 spawn 统一命名：
 启动判定位于 `app.boot`，在每 tick 的 boot 阶段运行，根据事实判断当前局面，输出运营模式，并在证据与闸门允许的范围内执行不可逆操作。判定逻辑是纯函数 `assess(facts) → {mode, strength, evidence[]}`。
 
 - 每次 global reset 运行完整判定。
-- 平时每 tick 只检查廉价不变量：spawn 数、`Game.structures` 数量、`Game.creeps` 数量、项目标记是否存在；任何一项突变都触发完整判定。
+- 平时每 tick 只检查廉价不变量：spawn 数、`Game.structures` 数量、`Game.creeps` 数量、项目标记是否存在，以及 tick 是否连续；任何一项突变或 tick 断档都触发完整判定。没有对象的玩家不被调度（附录 A，F6），同一 global 中的重生必然经过不运行代码的 tick，而重新放置后的三个数量可能与重生前相同。
 - 开局第一 tick 不一定伴随 global reset（附录 A，F6），所以判定不能只在 reset 时运行。
 
 ### 11.2 模式集合
@@ -1234,8 +1236,8 @@ const nonCore = structs.filter(s => s.structureType !== 'spawn' && s.structureTy
 const sites   = Object.keys(Game.constructionSites).length;
 const creeps  = Object.values(Game.creeps);               // 仅本 shard
 const pcHere  = Object.values(Game.powerCreeps).filter(pc => pc.room !== undefined);
-const here    = Game.shard?.name ?? 'x';
 const hasISM  = typeof InterShardMemory !== 'undefined';
+const here    = hasISM ? Game.shard.name : 'x';            // 身份用的 shard 名；私服的 Game.shard 是主机名（F7）
 ```
 
 **Memory 状态 `memState`**（由原始 Memory 文本判断）：
@@ -1358,7 +1360,7 @@ const σ = named.length ? named.filter(x => sig(x.name)).length / named.length :
 **接手流程**（持久化状态机 `stabilize → adopt → converge → normal`）：
 
 1. **stabilize**：立即开始，无破坏性。只运行生存层，tower 照常开火，spawn 能量不断。外来 Memory 备份到 segment 备份区后只读保留，不解读外来结构。身份不明的 creep 进入**遗留池**，执行通用工人行为（采集、填充 spawn、升级），保证控制器不降级，用到寿命结束。
-2. **adopt**：连续两次判定一致后开始。各领域调用 `adopt(facts)` 认领资产：mining 认领 source 旁 WORK 多的 creep，logistics 认领 CARRY 多的 creep 及 link、terminal，defense 认领 tower 与带攻击部件的 creep；用途由 `lib.body` 的分类器从身体组成与位置推断。外来工地符合规划的保留、否则移除；外来市场订单默认保留并记录；外来 flag 忽略。
+2. **adopt**：连续两次判定一致后开始。各领域调用 `adopt(facts)` 认领资产：mining 认领 source 旁 WORK 多的 creep，logistics 认领 CARRY 多的 creep 及 link、terminal，defense 认领 tower 与带攻击部件的 creep；用途由 `lib.body` 的分类器从身体组成与位置推断。名称中的出生用途只作辅助线索，不能覆盖当前能力核验；保底创建的 creep 同样按事实认领。外来工地符合规划的保留、否则移除；外来市场订单默认保留并记录；外来 flag 忽略。
 3. **converge**（可选）：planner 把现有建筑作为输入，以复用为目标生成迁移计划。排序约束：任何一步都不让 spawn 能力或能量容量低于阈值；达到 RCL 数量上限时"先拆一个、再建一个"；装有资源的 storage 或 terminal 先清空再拆；spawn 最后处理；有威胁时暂停。迁移由 build 在维护层执行，受预算约束；自动拆除默认关闭（`takeover.autoDemolish = false`）。复用现有布局的收益损失很小时不迁移。creep 身体无需迁移，遗留 creep 老死后按本系统模板补充。
 4. **normal**：收敛完成 `T_KEEP` tick 后删除外来根键，释放备份区。
 
@@ -1391,7 +1393,7 @@ W、S1∧S2、T0∧T2 三组条件互不相交。"资产大幅减少"指本方�
 
 | 操作 | 必要条件 |
 | --- | --- |
-| 清空 Memory | 强证据 1 次，或中证据连续 2 次一致；已完成备份；配置允许（`boot.autoClear`） |
+| 清空 Memory | 强证据 1 次，或中证据连续 2 次一致；已完成备份；自动清空须配置允许（`boot.autoClear`），人工确认（`boot.force`）不受此约束；Memory 版本高于代码（11.4 e）时一律禁止，人工确认也不例外 |
 | 拆除建筑 | TAKEOVER 的 converge 阶段；迁移计划校验通过；配置允许 |
 | 撤销市场订单 | 人工确认 |
 | 让 creep 自杀 | 人工确认，或由 spawn 腾位规则触发 |
@@ -1472,7 +1474,7 @@ tower 伤害：   距离 ≤ 5 → 600；距离 ≥ 20 → 150；其间 600 − 
 | | boundary | 依赖规则静态检查 |
 | | bench | 热路径基准测试 |
 | 工具 | snapshot | 从游戏导出世界事实，生成测试数据；录制资源流量，用于控制器离线回放整定 |
-| | inspector | Memory 与 segment 查看、迁移工具 |
+| | inspector | Memory 与 segment 查看（本机脚本，经网页接口只读）；迁移工具随第一次改变持久结构的发布交付 |
 | | layoutLab | 布局规划可视化与调参 |
 | 可观测性 | exporter | 读取统计 segment 写入外部存储 |
 | | dashboard | 运营指标看板与告警 |
@@ -1496,7 +1498,7 @@ tower 伤害：   距离 ≤ 5 → 600；距离 ≥ 20 → 150；其间 600 − 
 **发布流程**（每个发布版本）：
 
 1. **私服回归**：13.2 全部通过，包括"上一版本 → 新版本 → 回滚到上一版本"的升级回滚场景。
-2. **部署到新分支**：每个版本部署到独立的代码分支，生效分支切换到新版本；上一版本的分支保留。
+2. **部署到新分支**：每个版本部署到以版本号命名的独立代码分支，生效分支切换到新版本；上一版本的分支保留。版本分支的内容必须与该版本的发布提交一致，开发调试使用其他名称的分支。
 3. **新领域默认暂停**：本次新增的领域或能力以暂停状态上线（5.5），由运维命令逐个启用。
 4. **观察期**：启用后观察 `T_OBSERVE`，闭环运行基线（14.2）不劣化即转为默认启用。
 5. **回滚**：基线被破坏时，把生效分支切回上一版本（一步完成）。回滚期间由保底循环与生存层兜底。
@@ -1510,7 +1512,7 @@ tower 伤害：   距离 ≤ 5 → 600；距离 ≥ 20 → 150；其间 600 − 
 
 新版本首次运行且存在待执行迁移时，先把原始 Memory 备份到 segment 备份区，再迁移。
 
-**密钥**：部署凭据只保存在本地环境变量中，不进入仓库或构建产物。
+**密钥**：部署凭据只保存在不纳入版本控制的本地配置中，按账户区分，不进入仓库或构建产物。
 
 ### 13.4 线上监控与告警
 
@@ -1566,12 +1568,12 @@ tower 伤害：   距离 ≤ 5 → 600；距离 ≥ 20 → 150；其间 600 − 
 
 | 里程碑 | 环境 | 目标 | 交付模块 | 验收标准 |
 | --- | --- | --- | --- | --- |
-| **M1 基础平台** | 私服；官服非生效分支演练 | 可运行、可观测、可发布的基座 | kernel：lifecycle、process、cpu（分层准入与预算）、context、memory（长路径接口、实体空间、单元级标脏、迁移）、segments（整页覆盖：备份区与统计）、logger、profiler、errorMapper、stats、console、bootPort；lib：geometry、hash、collections、tables、naming、body；app：assembly、config、profiles、boot（FRESH_START、RECOVERY、DORMANT、AMBIGUOUS）、ops；保底循环；工程：build、deploy、unit、platformFakes、scenarios、chaos、boundary、inspector | 私服上放置 spawn 后正确判定开局；混沌测试中保底循环能接管；Memory 测试通过；部署、分支切换与回滚在私服完成演练；官服完成非生效分支的上传与命令验证 |
-| **M2 线上最小闭环** | 官服 | 单房从开局（或接手）自动发展到 RCL4，并持续闭环运行（第 10 章） | world：roomCache、costMatrix、threat（本房识别）；services：movement（路径、意图、快速路径、卡住纠错）、spawnQueue；colony：registry、stage、posture（发展、维持、平时、战时）、inventory（能量回路 v1）、governor；kernel 实例准入过滤；domains：bootstrap、mining、upgrade、build、logistics（房内自行调度）、defense（防御基线）、planner（固定模板）；app.boot：TAKEOVER 与 SELF_ADOPT 的 stabilize、adopt；lib：combat；工程：exporter、dashboard、snapshot；runbook（部署、回滚、接手、恢复） | **闭环运行基线成立**；RCL1→4 无人工干预；接手账户时 stabilize 阶段无资产损失；成功击退 NPC 入侵；10.8 的指标达标或已建立基准；CPU 实测并校准 5.3 的目标值；告警链路验证可用 |
+| **M1 基础平台** | 私服；官服非生效分支演练 | 可运行、可观测、可发布的基座 | kernel：lifecycle、process、cpu（分层准入与预算）、context、memory（长路径接口、实体空间、单元级标脏、迁移）、segments（整页覆盖：备份区与统计）、intershard（特性检测与本 shard 清空）、logger、profiler、errorMapper、stats、console、bootPort；lib：geometry、hash、naming；app：assembly、boot（FRESH_START、RECOVERY、DORMANT、AMBIGUOUS）、ops；保底循环；工程：build、deploy、unit、platformFakes（Memory、segment）、scenarios、chaos、boundary、inspector（只读查看） | 私服上放置 spawn 后正确判定开局；混沌测试中保底循环能接管；Memory 测试通过；部署、分支切换与回滚在私服完成演练；官服完成非生效分支的上传与命令验证 |
+| **M2 线上最小闭环** | 官服 | 单房从开局（或接手）自动发展到 RCL4，并持续闭环运行（第 10 章） | world：roomCache、costMatrix、threat（本房识别）；services：movement（路径、意图、快速路径、卡住纠错）、spawnQueue；colony：registry、stage、posture（发展、维持、平时、战时）、inventory（能量回路 v1）、governor；kernel 实例准入过滤；domains：bootstrap、mining、upgrade、build、logistics（房内自行调度）、defense（防御基线）、planner（固定模板）；app.boot：TAKEOVER 与 SELF_ADOPT 的 stabilize、adopt；app.config（RCL 1–4）；lib：combat、collections、tables（RCL 建筑上限）、body；工程：exporter、dashboard、snapshot；runbook（部署、回滚、接手、恢复） | **闭环运行基线成立**；RCL1→4 无人工干预；接手账户时 stabilize 阶段无资产损失；成功击退 NPC 入侵；10.8 的指标达标或已建立基准；CPU 实测并校准 5.3 的目标值；告警链路验证可用 |
 | **M3 单房成熟** | 官服 | 单房到 RCL8，移动、布局与物流成熟 | movement：交通冲突结算、PathFinder 逃离；lib：grid、layout；world.hub；planner：道路生长与最小割；接手流程的 converge；mineral；logistics 的 link 与中央枢纽；spawnQueue 续命；inventory：storage 与 terminal 的能量分配、本房矿物；运行姿态：冲刺；app.policy；工程：bench、layoutLab | 基线保持；单房 RCL8；受阻浪费的 creep·tick 有统计并持续下降；中央枢纽启用后核心区域的受阻浪费下降；"能源 ÷ CPU"指标可观测 |
 | **M4 外矿与区域经济** | 官服 | 外矿开发与区域运输 | remote；logisticsBroker、ledger（库存位置接入已承诺量）；world：intel、threat（威胁场与跨房追踪）、map；vision；movement 的跨房路线；defense 对外矿的防护；运行姿态：警戒；外矿安全（15.2） | 基线保持；外矿"能源 ÷ CPU"可观测且高于阈值才开启；不出现重复承诺 |
-| **M5 多殖民地与跨 shard** | 官服 | 扩张到多殖民地，支持跨 shard | segments 的读调度与分片 store；intershard；scouting、expansion、interShard、decommission；colony.relations（扶持）；运行姿态：撤离；logistics 终端网络（跨殖民地库存平衡，库存位置接入在途量）；app.boot：SHARD_SEED、STRANDED；多 shard CPU 分配（15.2）；runbook（跨 shard） | 基线在 ≥ 2 个殖民地上保持；官服完成跨 shard 派出与开拓；撤离流程在私服完成端到端演练 |
-| **M6 产业经济** | 官服 | 依据物价模型自主经营产业 | world.market；economics（v1）、labs、factory、power、highway、market；boostBroker；inventory：化合物、boost 与商品原料的设定值 | 基线保持；Lab 反应链与 boost 供给闭环；产业规划的预测毛利与实际收益持续对账 |
+| **M5 多殖民地与跨 shard** | 官服 | 扩张到多殖民地，支持跨 shard | segments 的读调度与分片 store；intershard（跨 shard 协议）；scouting、expansion、interShard、decommission；colony.relations（扶持）；运行姿态：撤离；logistics 终端网络（跨殖民地库存平衡，库存位置接入在途量）；app.boot：SHARD_SEED、STRANDED；多 shard CPU 分配（15.2）；platformFakes：InterShardMemory；runbook（跨 shard） | 基线在 ≥ 2 个殖民地上保持；官服完成跨 shard 派出与开拓；撤离流程在私服完成端到端演练 |
+| **M6 产业经济** | 官服 | 依据物价模型自主经营产业 | world.market；economics（v1）、labs、factory、power、highway、market；boostBroker；inventory：化合物、boost 与商品原料的设定值；lib.tables：反应与商品配方；platformFakes：市场 | 基线保持；Lab 反应链与 boost 供给闭环；产业规划的预测毛利与实际收益持续对账 |
 | **M7 战争与外交** | 官服 | 主动作战与协作 | military（战役）、nuke、diplomacy（交战事实）；colony.relations（前线基地、补给基地）；运行姿态：动员；defense 跨房支援 | 基线保持；作战目标另行设定 |
 
 文档类交付物随各里程碑同步产出：本文档与附录 B 的参数持续维护；模块设计文档随对应模块交付；提案在设计变更时编写；运维手册在 M2（部署、回滚、接手、恢复）与 M5（跨 shard）分两次完成；每个里程碑结束时完成一次审查（13.5）。
@@ -1607,10 +1609,10 @@ tower 伤害：   距离 ≤ 5 → 600；距离 ≥ 20 → 150；其间 600 − 
 | 控制回路振荡或响应过慢 | 库存偏离目标 | 死区、设定值限速、补货策略的滞回；离线回放整定 |
 | 市场薄、价格被操纵、历史与挂单背离 | 产业规划误判 | 薄市排除、异常挂单剔除、流动性上限、成交时再校验价格；v2 需对账达标才启用 |
 | `getAllOrders` 的 CPU 消耗 | 规划层预算 | 只采样候选资源，轮转限频 |
-| 通过只读引用直接修改 Memory | 修改未标脏而丢失 | 开发构建抽样哈希比对 |
+| 通过只读引用直接修改 Memory | 修改未标脏而丢失 | 开发期设置开启的未标脏单元抽查比对（6.3） |
 | 实体空间随规模增长 | Memory 体积 | 按单元统计体积，回收无主记录，长期情报放 segment |
 | 线上回滚时遇到已迁移的 Memory | 旧版本进入 AMBIGUOUS | 两步迁移（13.3） |
-| 核心 spawn 被摧毁或长期繁忙 | 中央枢纽 creep 无法续命或补位 | 枢纽事实随之失效，转运由搬运工承接；续命请求优先级高于经济类孵化 |
+| 核心 spawn 被摧毁或长期繁忙 | 中央枢纽 creep 无法续命或补位 | 建筑被毁导致枢纽条件不满足时事实失效；单纯繁忙不使枢纽失效。续命不改变孵化顺序，死亡后提交补位请求，空档由搬运工承接 |
 
 ### 15.2 待补设计
 
@@ -1620,6 +1622,7 @@ tower 伤害：   距离 ≤ 5 → 600；距离 ≥ 20 → 150；其间 600 − 
 | --- | --- | --- |
 | 外矿安全 | 入侵者据点对预定的争夺、SK 房间策略、外矿的撤退与恢复规则 | M3 结束前（M4 实施） |
 | 多 shard CPU 分配 | 用 `Game.cpu.setShardLimits` 在各 shard 间分配 CPU；跨 shard 的资源与 creep 往返 | M3 结束前（M5 实施） |
+| app.profiles 是否需要 | 官服与私服差异中无法以特性检测区分的部分；没有时从架构中删除该模块 | M2 结束前 |
 | PowerCreep 运营 | 能力选择、升级路线、与殖民地的协作 | M6 实施前 |
 | 军事战术 | 编队组成、进攻与撤退规则、boost 使用 | M7 实施前 |
 | 核弹防御 | 落点评估、rampart 加固、建筑转移 | M7 实施前 |
@@ -1638,7 +1641,7 @@ F1–F7、F10–F18 依据公开发布的 Screeps 服务端组件：`@screeps/en
 | F4 | `Game.structures` 只含本方 `OwnedStructure`，包括 controller | engine `src/game/game.js` |
 | F5 | 重生删除玩家的 creep、PowerCreep、工地和 flag，建筑转为 ruin，控制器重置；不清除 Memory 与 segment | backend `lib/utils.js`（`respawnUser`） |
 | F6 | 只调度活跃玩家；玩家没有对象时被标记为非活跃，代码不执行。VM 只在代码更新、isolate 销毁或闲置超过 3 分钟时回收，因此开局第一 tick 不一定伴随 global reset | driver `lib/index.js`、`lib/runtime/data.js`、`lib/runtime/user-vm.js` |
-| F7 | 私有服务器不提供 `InterShardMemory`、`Game.shard`、`Game.cpu.shardLimits`；portal 只在同一 shard 内转移对象 | engine `src/game/`、`src/processor/global.js` |
+| F7 | 私有服务器不提供 `InterShardMemory`、`Game.cpu.shardLimits`；`Game.shard` 由 driver 注入，`name` 为服务器主机名（Docker 中默认为容器 ID，重建即变化），不代表多 shard 环境；portal 只在同一 shard 内转移对象 | engine `src/game/`、`src/processor/global.js`；driver `lib/index.js`（`playerSandbox` 事件） |
 | F8 | creep 跨 shard 后名称保持不变，对象 id 不保证保持 | 官服运行行为 |
 | F9 | 每个返回 `OK` 的状态变更动作约 0.2 CPU；Segment 100 页 × 100 KB、同时最多激活 10 页、下一 tick 可用；bucket 上限 10000；市场历史保留近 14 天；全局 `Memory` 在本 tick 首次访问时解析并在 tick 末写回；官服支持多个代码分支并可切换生效分支 | Screeps 官方文档 |
 | F10 | 市场历史按资源、按日汇总，字段为 `transactions`、`volume`、`avgPrice`（量加权）、`stddevPrice`（量加权） | backend `lib/cronjobs.js` |
@@ -1650,17 +1653,20 @@ F1–F7、F10–F18 依据公开发布的 Screeps 服务端组件：`@screeps/en
 | F16 | 每个 WORK 每 tick：`HARVEST_POWER = 2`、`UPGRADE_CONTROLLER_POWER = 1`、`BUILD_POWER = 5`、`REPAIR_POWER = 100`；`REPAIR_COST = 0.01`；`CONTROLLER_MAX_UPGRADE_PER_TICK = 15`；`MAX_CREEP_SIZE = 50`；`MAX_CONSTRUCTION_SITES = 100`；各 RCL 的 extension 数量为 0、0、5、10、20、30、40、50、60（RCL 0–8），容量 RCL 1–6 为 50、RCL 7 为 100、RCL 8 为 200 | common `lib/constants.js` |
 | F17 | rampart 每 100 tick 衰减 300 hits，各 RCL 上限为 300k、1M、3M、10M、30M、100M、300M（RCL 2–8）；道路每 1000 tick 衰减 100 hits；container 每 100 tick 衰减 5000 hits，自有房间为每 500 tick；tower 维修 800 hits、治疗 400、攻击 600（5 格内），每次耗能 10；`CONTROLLER_DOWNGRADE` 为 20000、10000、20000、40000、80000、120000、150000、200000（RCL 1–8）；`SAFE_MODE_COOLDOWN = 50000` | common `lib/constants.js` |
 | F18 | NPC 入侵：source 每次被采集时累计 `invaderHarvested`；房间累计量达到阈值（基准 `INVADERS_ENERGY_GOAL = 100000`）后生成袭击，并把阈值重置为基准的 0.7–1.3 倍，10% 概率再翻倍或减半；自有房间 RCL ≥ 4 时为大型入侵者；九成情况为 1 个，其余为 2–5 个，可能带 boost；由近战、远程、治疗组成；私服还要求同扇区存在入侵者据点。在别人占有或预定的房间里无法采集 | engine `src/processor/intents/creeps/harvest.js`；backend `lib/cronjobs.js` |
+| F19 | 官服的 JS 运行环境为 Node 24 | 项目确认的官服运行环境 |
+| F20 | CostMatrix 非零值替代地形成本，255 不可通行，0 回退到地形；公开 driver 在寻路访问格子时读取地形位图与成本表，不把成本写回矩阵。预填成本可省去零值回退，具体 CPU 收益须实测 | [官方 CostMatrix 文档](https://docs.screeps.com/api/#PathFinder.CostMatrix)；driver [pf.cc 的 look](https://github.com/screeps/driver/blob/master/native/src/pf.cc#L98)、[pf.h 的 room_info_t](https://github.com/screeps/driver/blob/master/native/src/pf.h#L198)（2026-10-19 核实的公开实现） |
+| F21 | 引擎每 tick 在 `require.cache.main` 无效或代码时间戳变化时新建 `require` 与模块缓存，沿用同一个全局对象重新执行 main；官服的代码时间戳为 `Date` 对象，以 `!=` 比较时每 tick 判为变化，于是每 tick 在同一 global 中重新执行 main，模块作用域的状态不能跨 tick 保留 | engine 4.3.2 `src/game/game.js`；2026-10-21 官服测试账户诊断（330 tick 新建 331 个 `require`，`timestamp` 为 `Date`；官服对应部分未开源，比较方式为推断） |
 
 ---
 
 ## 附录 B　参数默认值
 
-模块内部的参数见各模块设计文档（1.5）。
+模块内部的参数见各模块设计文档（1.5）；中央枢纽体型上限、补能时限与防降级阈值统一见 [app.config 的相关参数](./app/config.md#parameters)。
 
 | 范围 | 参数 | 默认值 | 章节 |
 | --- | --- | --- | --- |
 | 内核 | 熔断阈值 | 连续 3 次失败 | 5.1 |
-| | 经济 / 维护 / 规划层 bucket 阈值 | 300 / 2000 / 5000 | 5.2 |
+| | 规划层 bucket 阈值 | 1500；经济与维护层无 bucket 门槛 | 5.2 |
 | | 收尾预留 | 本 tick 预算的 10%，至少 2 CPU | 5.3 |
 | | `BUCKET_TARGET` | 5000 | 5.3 |
 | | `BUCKET_DRAIN`（透支回落时长） | 1000 tick | 5.3 |
@@ -1680,11 +1686,7 @@ F1–F7、F10–F18 依据公开发布的 Screeps 服务端组件：`@screeps/en
 | | 警戒衰减 `T_ALERT` | 1500 tick | 9.3.3 |
 | | 战时衰减 `T_SIEGE` | 300 tick | 9.3.3 |
 | | 扶持解除 `T_SUPPORT` | 1500 tick | 9.3.6 |
-| | 中央枢纽 creep 部件数 `HUB_CARRY` | 16 CARRY | 9.7 |
-| | 续命阈值 `T_RENEW` | 寿命低于 1200 tick | 9.7 |
-| 基础运营 | 补能时限 `T_REFILL` | 50 tick | 10.2 |
-| | 防降级阈值 | `CONTROLLER_DOWNGRADE` 的 50% | 10.4 |
-| | 每殖民地工地上限 `SITE_CAP` | 5 | 10.6 |
+| 基础运营 | 每殖民地工地上限 `SITE_CAP` | 5 | 10.6 |
 | | 道路与 container 维修阈值 | 50% | 10.6 |
 | | `T_BREACH`（safe mode 判断的突破时限） | 50 tick | 10.7 |
 | 启动判定 | `T_FRESH` | 1500 | 11.4 |
