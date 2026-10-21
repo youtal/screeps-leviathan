@@ -26,7 +26,7 @@ contracts 是各层共同依赖的接口层。kernel 通过上下文向模块注
 | `context.ts` | `ModuleId`、阶段钩子、实例钩子、`ProcessTable`、`ModuleContext`、`InstanceContext` | console、log、cpu、memory、mode |
 | `module.ts` | `ModuleManifest`、`ModuleDefinition` | context、cpu |
 | `boot.ts` | 项目标记、`BootPort`、`BootContext`、`BootDefinition` | context、memory、mode |
-| `settings.ts` | 各模块的使用者设置类型，命名为 `<模块名>Settings`：`LoggerSettings`、`MemorySettings`（提交抽查数）、`ProfilerSettings`（实例计时） | log |
+| `settings.ts` | 各模块的使用者设置类型，命名为 `<模块名>Settings`：`LoggerSettings`、`MemorySettings`（提交抽查数）、`ProfilerSettings`（实例计时）、`BootSettings`（自动清空与 dryRun） | log |
 
 **使用者设置**：`src/settings.ts`（架构 4.3）为每个需要使用者设置的模块导出一个常量 `<模块名>Settings`，类型定义在 `contracts/settings.ts` 的同名接口中；装配方读取后作为参数注入对应模块，模块自身不导入设置文件。新增模块的设置时，两处同时增加。
 

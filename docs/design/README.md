@@ -20,6 +20,7 @@
 | — | [architecture.md](./architecture.md) | 总体架构 |
 | — | [fallback.md](./fallback.md) | 独立保底循环（`src/fallback.ts`） |
 | app | [app/assembly.md](./app/assembly.md) | 装配：模块清单、boot、Memory 身份、平台注入与使用者设置 |
+| app | [app/boot.md](./app/boot.md) | 启动判定：事实、Memory 状态、判定顺序、闸门与项目标记维护 |
 | app | [app/config.md](./app/config.md) | 劳动力配置、身体模板、孵化优先级与运营参数 |
 | app | [app/ops.md](./app/ops.md) | 运维命令与模块启停标志 |
 | contracts | [contracts/README.md](./contracts/README.md) | 注入接口与跨模块协议 |

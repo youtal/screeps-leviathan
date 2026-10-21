@@ -26,7 +26,7 @@ M1 的使用方都在 kernel 内部：
 | 100 页 × 100 KB（字符数），页号 0–99 | 体积检查以字符串长度计 |
 | 同时最多激活 10 页，激活在下一 tick 生效并保持到再次调用；激活集中的页每 tick 都被载入 | 只有本模块调用 `setActiveSegments`；每 tick 至多调用一次；读过的页在下一次提交时退出激活集（第 5 节） |
 | tick 结束时 `RawMemory.segments` 中的每个键都被保存，**包括本 tick 读到的激活页**；键超过 10 个、页号非法、值不是字符串或超过单页上限时，driver 在收尾阶段抛错，**整个 tick 的结果被丢弃**：intent、Memory 文本、segment 写入与激活请求全部丢失 | 读完激活页后从 `RawMemory.segments` 删除这些键；写出页数加上残留的键数不超过上限（第 5 节的不变量） |
-| 写入不要求该页处于激活状态：driver 在用户代码结束后遍历 `RawMemory.segments` 的全部键保存，不检查激活集；tick 开始时载入的激活页也是这些键 | 已在严格平台模拟中建模；官服确认列在架构 15.1，M1 第 6 步的私服场景复核 |
+| 写入不要求该页处于激活状态：driver 在用户代码结束后遍历 `RawMemory.segments` 的全部键保存，不检查激活集；tick 开始时载入的激活页也是这些键 | 已在严格平台模拟中建模；私服中由场景 boot-judgment 的备份写出与回读覆盖，官服确认列在架构 15.1 |
 
 平台依据：driver 的 [runtime.js](https://github.com/screeps/driver/blob/master/lib/runtime/runtime.js)（segment 载入与收尾保存）、[make.js](https://github.com/screeps/driver/blob/master/lib/runtime/make.js)（激活集只在本 tick 调用过 `setActiveSegments` 时更新）、[data.js](https://github.com/screeps/driver/blob/master/lib/runtime/data.js)（每 tick 按激活集载入页面）。
 
@@ -113,4 +113,4 @@ interface PageReader {
 
 ## 9. 验证
 
-单元测试用严格平台模拟（`test/platform/memory.ts`）覆盖：页头与正文格式、owner 与 epoch 校验、同 tick 清空后写出页使用新 epoch、超限返回值、每 tick 写出上限与“已读页 + 写出页 ≤ 10”、残留键时减少写出页数且平台不报错、优先级与变脏时长排序、bucket 推迟、激活请求在下一 tick 可读、读后删除激活键、读过的页在下一次提交时退出激活集（撤销的 tick 被丢弃时下一 tick 重新撤销）、激活集不变时不调用 `setActiveSegments`。真实引擎中的写入语义与回读在 M1 第 6 步随 app.boot 的备份流程做私服场景验证。
+单元测试用严格平台模拟（`test/platform/memory.ts`）覆盖：页头与正文格式、owner 与 epoch 校验、同 tick 清空后写出页使用新 epoch、超限返回值、每 tick 写出上限与“已读页 + 写出页 ≤ 10”、残留键时减少写出页数且平台不报错、优先级与变脏时长排序、bucket 推迟、激活请求在下一 tick 可读、读后删除激活键、读过的页在下一次提交时退出激活集（撤销的 tick 被丢弃时下一 tick 重新撤销）、激活集不变时不调用 `setActiveSegments`。真实引擎中的写入语义与回读由私服场景 boot-judgment 的备份流程验证。
