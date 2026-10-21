@@ -4,7 +4,7 @@
 | --- | --- |
 | 源码 | `src/kernel/segments/` |
 | 架构章节 | 6.8 Segment 冷存储；附录 A F9 |
-| 成熟度 | 整页覆盖写入定稿 · M1；读调度与分片 store 定稿 · M5（不在本文范围） |
+| 成熟度 | 整页覆盖写入定稿 · M1；读调度与 `SegmentStore` 定稿 · M2，实施时补充本文；分片 store 定稿 · M5（不在本文范围） |
 
 ## 1. 职责与范围
 
@@ -17,7 +17,7 @@ M1 的使用方都在 kernel 内部：
 | `backup` | 80–89 | bootPort（Memory 备份，见 [bootPort](./bootPort.md)） | 高 |
 | `stats` | 50 | kernel.stats（[stats](./stats.md)） | 低 |
 
-本文的接口是 kernel 内部接口，不进入 contracts。`ModuleContext.segments`（`SegmentStore`、`PENDING`，6.8）随第一个使用 segment 的业务模块加入（[contracts](../contracts/README.md#7-待加入的接口)），届时在 M5 的读调度上实现。
+本文的接口是 kernel 内部接口，不进入 contracts。`ModuleContext.segments`（`SegmentStore`、`PENDING`，6.8）随第一个使用 segment 的业务模块（M2 的 planner 布局计划）加入（[contracts](../contracts/README.md#7-待加入的接口)），在 M2 的读调度上实现。
 
 ## 2. 平台事实
 

@@ -48,7 +48,7 @@ initialize(): void;
 - **备份区容量**：10 页约 1,000,000 字符，小于 Memory 的 2 MB 上限。超出时返回 `failed`，boot 按闸门不清空（11.8 要求已完成备份）。压缩备份不在 M1 范围。
 - **清空与软重置**：11.4 规定若判定发生时本 global 已运行过，先软重置。kernel 以“本 kernel 实例的普通模块是否已 setup”作为可检查的条件强制这一顺序：普通模块持有的访问器在清空后全部失效，必须重建。
 - **暂停 tick**：备份进行中与登记软重置的 tick，kernel 跳过普通模块 setup 与业务阶段（[内核设计](./README.md#2-tick-流水线)）。所以 Memory 已就绪时（11.4 c），软重置后的新实例在备份完成前不会 setup，备份完成的 tick 仍能清空；判定与清空之间也没有业务模块或保底循环的动作改变开局世界。
-- **epoch 的起点**：`initialize()` 与无可读标记的 `clearMemory()` 都从 1 开始，无法得知账号上旧 segment 页使用过的 epoch。Memory 被人工清空或中间运行过其他代码后，上一段生涯中 epoch 同为 1 的页会被当作有效页。M1 的 store 不受影响：备份回读比较正文，统计只写不读。第一个读取 segment 的业务 store（M5 的读调度）设计时须处理这一点。
+- **epoch 的起点**：`initialize()` 与无可读标记的 `clearMemory()` 都从 1 开始，无法得知账号上旧 segment 页使用过的 epoch。Memory 被人工清空或中间运行过其他代码后，上一段生涯中 epoch 同为 1 的页会被当作有效页。M1 的 store 不受影响：备份回读比较正文，统计只写不读。第一个读取 segment 的业务 store（M2 的 planner 布局计划）设计时须处理这一点。
 - **epoch 只增不减**：`clearMemory()` 的原 epoch 取以下三者中的最大值，每项不是非负整数时按 0 计：加载时标记中的 `epoch`、本实例已签发的 epoch（`initialize()` 或之前的 `clearMemory()`）、当前 `sys` 中的 `epoch`。`sys` 的结构校验发生在提交时，boot 写入的非法值在提交前仍留在 heap 中，所以不能只读当前值，否则 epoch 会回退为 1，使上一段生涯中的页被当作当前页（6.8 安全规则 2）。
 
 ## 4. 项目标记
