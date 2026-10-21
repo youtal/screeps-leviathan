@@ -7,7 +7,8 @@
  *   并在 main 末尾追加调用计数探针（只写 global heap，不写 Memory）；
  * - withWorld：创建世界、执行场景体，失败时附上最近的控制台输出，始终 dispose；
  * - assertRuntimeClean：框架的错误分类之外，再扫描抛错首行与 logger 的 ERROR 级别行；
- * - loopRuns：读取探针计数，证明 loop 被引擎逐 tick 调用。
+ * - loopRuns：读取探针计数，证明 loop 被引擎逐 tick 调用；
+ * - botModules：未加探针的模块表，供场景核对 bot 实际运行的产物与 source map。
  * 状态：模块表在首次装载后缓存于本模块；不读写宿主文件、不访问网络与凭据。
  */
 'use strict';
@@ -38,12 +39,21 @@ const LOGGER_ERROR = /\[\d+\] ERROR(?:<\/span>)? /;
 let cached;
 
 /**
+ * @description 读取宿主端生成的模块表，不加探针；探针只追加在 main 末尾，不改变已有代码的行列。
+ * @returns {Record<string, string>} 模块表的副本：{ [模块名]: 源码 }，source map 模块为 main.js.map。
+ */
+const botModules = () => {
+  cached ??= JSON.parse(fs.readFileSync(MODULES_FILE, 'utf8'));
+  return { ...cached };
+};
+
+/**
  * @description 读取模块表并在 main 末尾追加调用计数探针。
  * @returns {Record<string, string>} 模块表的副本。
  */
 const loadModules = () => {
-  cached ??= JSON.parse(fs.readFileSync(MODULES_FILE, 'utf8'));
-  return { ...cached, main: `${cached.main}\n${PROBE}` };
+  const modules = botModules();
+  return { ...modules, main: `${modules.main}\n${PROBE}` };
 };
 
 /**
@@ -159,4 +169,4 @@ const withoutSys = (memory) => {
  */
 const initialMemory = (bot, memory) => ({ memoryOverrides: { [bot]: memory } });
 
-module.exports = { assertRuntimeClean, initialMemory, leviathanBot, loopRuns, projectNamespace, withRuntimePartitions, withWorld, withoutSys };
+module.exports = { assertRuntimeClean, botModules, initialMemory, leviathanBot, loopRuns, projectNamespace, withRuntimePartitions, withWorld, withoutSys };
