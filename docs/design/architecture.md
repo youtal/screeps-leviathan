@@ -496,7 +496,7 @@ ctx.flags.of(flagName)  /  ctx.flags.core(flagName)
 | `epoch` | 纪元号，每次开局或清空重建时加 1 | 开局、清空时 |
 | `lastRun` | 最近一次运行的 tick | 每 tick |
 | `release` | 当前运行的版本号 | 每次 global reset |
-| `fp` | 世界指纹 `{rooms, spawnIds, creepCount}` | 每 100 tick，以及资产变化时 |
+| `fp` | 世界指纹 `{rooms, spawnIds, creepCount}` | 每 100 tick，以及完整判定之后 |
 | `mode` | 启动判定结果 `{mode, strength, since, evidence}` | 每次完整判定后 |
 
 ### 6.8 Segment 冷存储

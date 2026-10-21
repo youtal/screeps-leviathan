@@ -98,4 +98,4 @@ boot 每次 global reset 时更新 `sys.release`（6.7），也需要当前版�
 
 - 单元测试用严格平台模拟覆盖：端口只在 boot 期间有效；`summary` 对空、引擎默认空对象形状、外来、损坏、同签名同 schema、同签名不同 schema 的文本，以及标记合法而命名空间其余结构不合法时概要给出标记、访问 `sys` 抛错；`initialize` 与 `clearMemory` 的前置条件、标记初值与 epoch；清空后旧访问器失效、`sys` 仍可用；备份的分页、跨 tick 写出、回读校验、超容量与不一致；备份进行中与登记软重置的 tick 不 setup、不运行业务阶段、返回 `paused`；Memory 已就绪时“软重置 → 备份 → 清空”能在新实例中完成；软重置在下一 tick 生效且不计为抛错；boot 抛错时本 tick 的软重置登记作废；连续暂停超过 `PAUSE_LIMIT` 后计为 degraded；`sys` 写入非法标记时的隔离，以及隔离期间备份页头仍取已持久化的 epoch。
 - 构建：`npm run build` 的产物包含 `package.json` 的版本号；边界测试覆盖 `virtual:release` 的放行与拒绝。
-- 私服场景在 M1 第 6 步随 app.boot 交付：开局时的备份、清空与初始化，以及运行中清空 Memory（13.2）。
+- 私服场景：开局时的初始化（kernel-smoke）；外来 Memory 经人工确认后的软重置、备份、回读与清空，以及有资产而 Memory 为空时的初始化（boot-judgment）。Memory 丢失后的认领属于 M2 的接手流程（[app.boot](../app/boot.md#43-m1-尚未交付的分支)）。

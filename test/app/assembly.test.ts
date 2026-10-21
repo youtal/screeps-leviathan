@@ -1,7 +1,7 @@
 /**
  * 文件摘要：真实入口与装配的冒烟测试：以最小全局 Game 与 Memory 平台替身运行 src/main.ts 的 loop。
- * 验证 Memory 接管、createGamePlatform、kernel 与临时 boot 的整条链路连续多个 tick 不报错：
- * 空存储保持不变（临时 boot 不初始化），已初始化的存储内容不变，控制台没有错误输出。
+ * 验证 Memory 接管、createGamePlatform、kernel 与 app.boot 的整条链路连续多个 tick 不报错：
+ * 没有任何资产时判为 DORMANT、空存储保持不变；已初始化的存储判为 NORMAL，只有项目标记按 6.7 更新；控制台没有错误输出。
  * 另测日志输出端的选择：存在 console.logUnsafe 时经它输出彩色前缀，否则经 console.log 输出纯文本；
  * 以及 Memory 抽查数与实例计时取自使用者设置（审计 PA-04）。
  */
@@ -18,18 +18,38 @@ const marker = {
 };
 
 /**
- * @description 安装最小的全局 Game：时间、CPU、空的 creep/flag/房间表。
+ * @description 安装最小的全局 Game：时间、CPU、空的对象表，以及记录通知的 notify。
  * @param time 当前 tick。
  * @returns 无返回值。
  */
 const installGame = (time: number): void => {
   (globalThis as Record<string, unknown>).Game = {
-    time, creeps: {}, flags: {}, rooms: {}, shard: { name: 'shard0' },
+    time, creeps: {}, flags: {}, rooms: {}, spawns: {}, structures: {}, constructionSites: {}, powerCreeps: {},
+    shard: { name: 'shard0' },
     cpu: { limit: 20, tickLimit: 500, bucket: 10000, getUsed: () => 0 },
+    /**
+     * @description 记录游戏通知。
+     * @param message 通知正文。
+     * @returns 无返回值。
+     */
+    notify: (message: string) => { notices.push(message); },
   };
 };
 
-test('真实 loop 连续运行：空存储不被初始化，已初始化存储内容不变，无错误输出', () => {
+/** 本文件中 Game.notify 收到的通知。 */
+const notices: string[] = [];
+
+/**
+ * @description 加载一份全新的入口模块：入口在模块级 heap 中持有 kernel，隔离加载才能模拟一次新的 global。
+ * @returns 新入口的 loop。
+ */
+const freshLoop = (): (() => void) => {
+  let fresh: (() => void) | undefined;
+  jest.isolateModules(() => { fresh = (require('@/main') as typeof import('@/main')).loop; });
+  return fresh!;
+};
+
+test('真实 loop 连续运行：没有资产时判为 DORMANT 且不初始化；已初始化的存储判为 NORMAL，只更新项目标记；无错误输出', () => {
   const lines: string[] = [];
   jest.spyOn(console, 'log').mockImplementation((line: unknown) => { lines.push(String(line)); });
   const empty = createMemoryPlatform({ target: globalThis });
@@ -38,14 +58,23 @@ test('真实 loop 连续运行：空存储不被初始化，已初始化存储�
     expect(empty.tick(() => loop()).error).toBeUndefined();
   }
   expect(empty.memory).toBe('');
+  expect(notices.some((n) => n.includes('DORMANT'))).toBe(true);
 
+  // 新的 global：入口重新装配 kernel，从这份存储加载 Memory。
   const text = JSON.stringify({ leviathan: { sys: marker, part: {}, rooms: {}, creeps: {}, flags: {} } });
   const ready = createMemoryPlatform({ target: globalThis, memory: text });
+  // 新 global 的全局作用域中没有上一段安装的控制台命名空间；测试进程共用 globalThis，手动移除。
+  for (const name of ['boot', 'ops']) delete (globalThis as Record<string, unknown>)[name];
+  const second = freshLoop();
   for (let t = 4; t <= 6; t += 1) {
     installGame(t);
-    expect(ready.tick(() => loop()).error).toBeUndefined();
+    expect(ready.tick(() => second()).error).toBeUndefined();
   }
-  expect(JSON.parse(ready.memory)).toEqual(JSON.parse(text));
+  const saved = JSON.parse(ready.memory).leviathan;
+  // 除项目标记与 kernel、boot 自己的分区外，存储内容不变。
+  expect({ ...saved, sys: undefined, part: undefined }).toEqual({ ...JSON.parse(text).leviathan, sys: undefined, part: undefined });
+  expect(saved.sys).toMatchObject({ lastRun: 6, release: '0.0.0-test', mode: { mode: 'NORMAL', strength: 'strong', since: 4 } });
+  expect(notices.some((n) => n.includes('NORMAL'))).toBe(true);
   expect(lines.filter((l) => l.includes('ERROR'))).toEqual([]);
   jest.restoreAllMocks();
 });

@@ -24,6 +24,17 @@ export interface MemorySettings {
   readonly auditUnits: number;
 }
 
+/** app.boot 的使用者设置（架构 11.8、11.9，设计见 docs/design/app/boot.md 第 8 节）。 */
+export interface BootSettings {
+  /** 11.8 的 boot.autoClear：证据与备份满足时是否允许自动清空 Memory；关闭时改判 AMBIGUOUS 并通知人工。 */
+  readonly autoClear: boolean;
+  /**
+   * 只判定、发布模式，不执行初始化、备份、清空与软重置，也不写项目标记（11.9 的 boot.dryRun）。
+   * 部署到新环境前先设为 true 观察判定结果；运行中可由控制台 boot.dryRun 临时覆盖。
+   */
+  readonly dryRun: boolean;
+}
+
 /** kernel.profiler 的使用者设置。 */
 export interface ProfilerSettings {
   /** 是否对动态实例的钩子单独计时；默认关闭，只按模块计时。开启后每次实例钩子调用多一次计时记录。 */

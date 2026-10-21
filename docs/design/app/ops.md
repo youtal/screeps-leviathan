@@ -5,7 +5,7 @@
 | 源码 | `src/app/ops/`；启停标志的存储与生效在 kernel（本文第 3 节） |
 | 架构章节 | 5.1 熔断与 `recover(id)`、5.5 启停、5.8 控制台、13.3 新领域默认暂停 |
 | 契约 | [contracts](../contracts/README.md) 第 2 节的 `ModuleManifest`：新增 `startPaused`，变更见本文第 3 节 |
-| 成熟度 | 定稿 · M1。11.9 的启动判定命令（`boot.assess`、`boot.force`、`boot.dryRun`）属于 app.boot，在第 6 步交付 |
+| 成熟度 | 定稿 · M1。11.9 的启动判定命令（`boot.assess`、`boot.force`、`boot.dryRun`）属于 app.boot（[boot](./boot.md#8-设置与控制台119)） |
 
 ## 1. 职责
 

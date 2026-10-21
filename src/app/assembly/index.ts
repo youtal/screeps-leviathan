@@ -7,12 +7,12 @@
  * 版本号来自构建时注入的虚拟模块 virtual:release（rollup 内联插件，docs/design/kernel/bootPort.md 第 6 节）。
  * 控制台命名空间安装在 globalThis 上（kernel.console）；每次装配 kernel 后以 createOps 注册 ops 运维命令，
  * 入口状态的读取函数由 main.ts 传入，供 kernel 不可用时的 ops.status（docs/design/app/ops.md 第 4 节）。
- * 第 2 步的临时内容：模块清单为空；临时 boot 只发布 AMBIGUOUS/medium，不执行任何不可逆操作，也不初始化 Memory，
- * 在 M1 第 6 步由 app.boot 替换。Memory 身份常量暂存于此，app.config 建立后迁入。
+ * 模块清单在 M2 起加入业务模块；boot 由 app.boot 的 createBoot 创建，事实读取、通知与设置在此注入。
+ * Memory 身份是本项目固定的常量。
  * 状态：无模块级可变状态；createGameServices 每次调用创建新的服务对象，由入口在 heap 中缓存。
  */
+import { createBoot, readGameCounts, readGameFacts } from '@/app/boot';
 import { type EntryStatus, createOps } from '@/app/ops';
-import type { BootDefinition } from '@/contracts/boot';
 import type { ModuleDefinition } from '@/contracts/module';
 import { RESERVE_MIN, RESERVE_RATIO } from '@/kernel/cpu';
 import { createErrorMapper } from '@/kernel/errorMapper';
@@ -22,37 +22,14 @@ import { type LogRoot, type LogSink, createLogRoot } from '@/kernel/logger';
 import { createGamePlatform } from '@/kernel/memory';
 import { createProfiler } from '@/kernel/profiler';
 import { createGameSegmentsPlatform } from '@/kernel/segments';
-import { loggerSettings, memorySettings, profilerSettings } from '@/settings';
+import { bootSettings, loggerSettings, memorySettings, profilerSettings } from '@/settings';
 import { release } from 'virtual:release';
 
 /** 本项目在 Memory 中的命名空间、签名与根 schema。 */
 export const MEMORY_IDENTITY = { namespace: 'leviathan', signature: 'leviathan', schema: 1 } as const;
 
-/** 模块清单：第 2 步为空，业务模块从 M2 开始加入。 */
+/** 模块清单：业务模块从 M2 开始加入。 */
 export const MODULES: readonly ModuleDefinition[] = [];
-
-/** 临时 boot：每个 global 只发布一次 AMBIGUOUS/medium；不执行不可逆操作，不初始化 Memory。 */
-export const PROVISIONAL_BOOT: BootDefinition = {
-  /**
-   * @description 取得 boot 钩子。
-   * @param ctx boot 上下文。
-   * @returns 含 boot 钩子的对象。
-   */
-  setup(ctx) {
-    let published = false;
-    return {
-      /**
-       * @description 首次调用时发布 AMBIGUOUS/medium，之后什么也不做。
-       * @returns 无返回值。
-       */
-      boot() {
-        if (published) return;
-        ctx.setMode({ mode: 'AMBIGUOUS', strength: 'medium', since: Game.time });
-        published = true;
-      },
-    };
-  },
-};
 
 /** 游戏环境的共享服务：入口与 kernel 共用同一个日志根对象。 */
 export interface GameServices {
@@ -173,7 +150,7 @@ export const createGameServices = (): GameServices => {
 };
 
 /**
- * @description 用游戏服务装配 kernel（模块清单、临时 boot、Memory 配置、计时器、版本号、持久化平台端口与控制台目标；
+ * @description 用游戏服务装配 kernel（模块清单、app.boot、Memory 配置、计时器、版本号、持久化平台端口与控制台目标；
  * Memory 抽查数与实例计时取自使用者设置），
  * 并为它创建 app.ops 的运维命令。
  * @param services 游戏服务。
@@ -184,7 +161,18 @@ export const assemble = (services: GameServices, entryStatus: () => EntryStatus)
   const memoryLog = services.logRoot.scope('memory');
   const kernel = createKernel({
     modules: MODULES,
-    boot: PROVISIONAL_BOOT,
+    boot: createBoot({
+      identity: MEMORY_IDENTITY, release, settings: bootSettings,
+      time: services.game.time,
+      facts: readGameFacts,
+      counts: readGameCounts,
+      /**
+       * @description 模式变化时发出游戏通知。
+       * @param message 纯文本通知。
+       * @returns 无返回值。
+       */
+      notify: (message) => Game.notify(message),
+    }),
     memory: { ...MEMORY_IDENTITY, auditUnits: memorySettings.auditUnits,
       platform: createGamePlatform((message) => memoryLog.warn(message)) },
     game: services.game,
