@@ -9,6 +9,7 @@
  * 状态（heap，随 kernel 实例存在，软重置与 global reset 后从头开始）：加载时的概要、上一 tick 的不变量、
  * 是否需要在下一 tick 重新判定、连续判定的情形与次数（中证据清空要求两次一致）、本实例是否有过非暂停的就绪 tick
  * （此后普通模块可能已 setup，清空前须软重置）、本 Memory 的清空被闸门拦下后是否冻结 lastRun 与 fp、
+ * 开局世界中本 Memory 判为 AMBIGUOUS 后是否冻结 fp、
  * 人工指定的模式（同时持久化在 part.boot.control）与 dryRun 覆盖值。
  */
 import type { BootDefinition, ProjectMarker, RawMemorySummary } from '@/contracts/boot';
@@ -146,6 +147,10 @@ export const createBoot = (options: BootOptions): BootDefinition => ({
     // 本系统 Memory 的清空被闸门拦下（autoClear 关闭或备份失败）后为 true：不写 lastRun 与 fp，保留重生证据，
     // 直到下一次完整判定重新得出结论；global reset 后首个 tick 必然完整判定，届时按事实重新设定。
     let frozen = false;
+    // 开局世界中本系统 Memory 判为 AMBIGUOUS（11.4 c′ 证据不足）后为 true：不写 fp，lastRun 照常写（ultrareview 第 2 项）。
+    // 写入 fp 会把当前 spawn 记进指纹，下一次完整判定即按 11.4 d 判为 NORMAL，未经确认就认领上一局的 Memory；
+    // lastRun 不能冻结：系统实际在运行，冻结会伪造"停运超过 GAP"的证据，使 c′ 改判开局并清空。生命周期同 frozen。
+    let fpFrozen = false;
     let releaseWritten = false;
     // 人工指定的模式；forceSynced 为 false 时尚未与 control 分区同步（Memory 就绪后同步）。
     let forced: BootMode | null = null;
@@ -318,6 +323,7 @@ export const createBoot = (options: BootOptions): BootDefinition => ({
       rejudge = false;
       frozen = false;
       const outcome = execute(v, mem);
+      fpFrozen = mem.state === 'OURS' && outcome.verdict.mode === 'AMBIGUOUS' && v.case.startsWith('11.4');
       publish(outcome.verdict, time, outcome.hold, before);
       return { facts, paused: outcome.paused, hold: outcome.hold };
     };
@@ -327,7 +333,8 @@ export const createBoot = (options: BootOptions): BootDefinition => ({
      * 模式为 RECOVERY 时不更新，保留损失前的资产作为恢复的比较基准。dryRun 与 Memory 不可用时不写。
      * 清空尚待执行（中证据等待确认、软重置、备份进行中）时也不写：重生的证据正是"spawn 不在指纹中、lastRun 早于放置"，
      * 在新实例或下一次判定读到之前更新它们，会使判定改为 NORMAL（附录 C 用例 15）。调用方据此跳过本函数；
-     * 本系统 Memory 的清空被闸门拦下后（frozen）同样跳过，理由相同。
+     * 本系统 Memory 的清空被闸门拦下后（frozen）同样跳过，理由相同。开局世界中本系统 Memory 判为 AMBIGUOUS 后（fpFrozen）
+     * 只跳过 fp，lastRun 照常写。
      * @param time 当前 tick。
      * @param facts 本 tick 完整判定读取的事实；没有完整判定时为 undefined。
      * @returns 无返回值。
@@ -337,7 +344,7 @@ export const createBoot = (options: BootOptions): BootDefinition => ({
       if (!current || dryRun()) return;
       ctx.sys.set(['lastRun'], time);
       if (!releaseWritten) { ctx.sys.set(['release'], options.release); releaseWritten = true; }
-      if (current.mode.mode !== 'RECOVERY' && (facts || time % FP_INTERVAL === 0)) {
+      if (current.mode.mode !== 'RECOVERY' && !fpFrozen && (facts || time % FP_INTERVAL === 0)) {
         ctx.sys.set(['fp'], fingerprint(facts ?? options.facts()));
       }
     };

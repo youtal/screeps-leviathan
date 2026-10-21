@@ -84,7 +84,7 @@ judge(p)：
 - **依赖的含义**：依赖方被阻挡，只在依赖本 tick 因预算或其自身的依赖"落选"时发生。依赖"空闲"时不阻挡：维护层的模块与它的实例、同层的两个模块都按各自的进程键错峰，相位一般不同，若要求依赖必须在同一 tick 运行，依赖方只会在相位重合的 tick 运行。`requires` 关于熔断、初始化失败与运维暂停的传递（[内核设计](./README.md#33-错误边界与熔断)）不变，这些进程本来就不参与准入。
 - **落选时衰减预计值**：按剩余预算自适应的长计算（一直运行到 `shouldYield()`）的样本，反映的是运行时还剩多少预算，而不是它至少需要多少。预算收缩后，它的预计值可能永远放不下；而不运行就不会产生新样本。因此每次因预算落选都把预计值乘以 `1 − CPU_EMA_ALPHA`，连续落选数 tick 后必然放得下，运行后再由实际样本校正。昂贵的进程因此会周期性地重试，重试时仍受 `shouldYield` 与紧急刹车约束。因依赖落选时不衰减：此时放不下的不是它自己。
 - **准入在整个 tick 内有效**：被准入的进程运行全部五个阶段。阶段之间不重新准入，否则会出现 plan 已经登记、act 却不执行的半途状态。
-- **紧急刹车**：阶段执行中读数到达 `hardEnd` 时，本 tick 剩余的非生存层钩子全部跳过，保证收尾阶段的预留。只有预计值严重偏低（例如 global reset 后的首次运行）才会触发；被跳过的进程不计失败。
+- **紧急刹车**：阶段执行中读数到达 `hardEnd` 时，本 tick 剩余的非生存层钩子全部跳过，保证收尾阶段的预留。只有预计值严重偏低（例如 global reset 后的首次运行）才会触发；被跳过的进程不计失败，改记为落选：本 tick 不记样本、不计准入，连续落选次数加 1，下一 tick 优先判定；预计值不衰减，放不下的是本 tick 的整体读数而不是它自己。被跳过前已运行的阶段的耗用仍计入层耗用。若把被跳过的进程当作以 0 为样本的准入，它的预计值会一路下降、每 tick 被准入又被刹车，连续落选次数却始终为 0，可以无限期不运行。
 - **预热**：没有平滑耗用的进程（global reset 后或新添加）预计值按 0 计，总是准入，首次运行即得到样本。长计算本身受 `shouldYield` 约束，不会因为预计值偏低而越过上限。
 - **暂停与熔断**：运维暂停（[ops](../app/ops.md)）、熔断与初始化失败的进程不参与准入，也不累计落选次数。
 
@@ -114,14 +114,14 @@ Memory 维护不归入维护层：维护层的定义是"每 N tick 一次，按�
 
 - **样本**：进程在本 tick 所有阶段钩子耗用之和。每个阶段开始时读一次 `Game.cpu.getUsed()`，之后相邻两次钩子调用之间只读一次：前一个钩子的结束读数就是后一个的开始读数，差值计入前一个进程的 `spent`。
 - **与 profiler 共用开始读数**：模块钩子仍按标签计时（[profiler](./profiler.md)），但只调用 `end(op, start)`，开始读数复用上一条的读数；profiler 的 `end` 自己再读一次。所以每次模块钩子调用共两次读数，实例钩子在不单独计时（`profileInstances` 为 false，默认）时一次。
-- **平滑**：`cost ← cost + CPU_EMA_ALPHA × (样本 − cost)`，首个样本直接作为初值。`cost` 就是准入时的预计耗用。本 tick 没有运行的进程没有样本；其中因预算落选的，按第 3.2 节衰减 `cost`。
+- **平滑**：`cost ← cost + CPU_EMA_ALPHA × (样本 − cost)`，首个样本直接作为初值。`cost` 就是准入时的预计耗用。本 tick 没有运行的进程没有样本；其中因预算落选的，按第 3.2 节衰减 `cost`；被紧急刹车跳过的同样没有样本，`cost` 不变。
 - **用途**：准入预检的预计值；stats 写出各层耗用与耗用最高的进程（[stats](./stats.md)）；`ops.status()` 显示。
 - profiler 仍按标签聚合计时，用于诊断；cpu 的计量独立于它，关闭 profiler 不影响准入。
 
 ## 6. 状态与成本
 
 - 每个进程的运行记录增加以下字段：可运行状态 `runnable`（准入前由 lifecycle 计算）、平滑耗用 `cost` 与是否已有样本 `sampled`、连续落选次数 `starve`、本 tick 的判定结果 `verdict`（未判定、准入、空闲、落选）、本 tick 已计量的耗用 `spent`。只存于 heap，global reset 与软重置后从预热开始。
-- 每 tick 的固定成本：准入遍历一次可运行进程，为 O(进程数)；维护层每个候选多一次 `hashString`（对进程键长度线性）。阶段执行中每个阶段一次、每次钩子调用一次 `getUsed()`（模块钩子另有 profiler 的一次，第 5 节）。准入每 tick 重建一次进程列表，数组跨 tick 复用。
+- 每 tick 的固定成本：准入遍历一次可运行进程，为 O(进程数)；维护层的错峰相位 `hashString(进程键) % MAINTENANCE_PERIOD` 在进程记录创建时算一次（`maintenancePhase`），准入时只做一次加法与取模。阶段执行中每个阶段一次、每次钩子调用一次 `getUsed()`（模块钩子另有 profiler 的一次，第 5 节）。准入每 tick 重建一次进程列表，数组跨 tick 复用。
 - 每 tick 一次的预算计算读取 `limit`、`tickLimit` 与 `bucket`。
 
 ## 7. 参数
@@ -157,16 +157,17 @@ interface CpuHost {
   readonly budgets: Record<Tier, CpuBudget>; // 按层级的预算视图，注入到进程上下文
   beginTick(): void;                         // tick 起点：计算 B、R、poolEnd、hardEnd
   admit(nodes: readonly CpuNode[]): void;    // 判定全部进程；nodes 为执行顺序，不可运行的进程判为空闲
+  brake(node: CpuNode): void;                // 紧急刹车跳过的进程改记为落选，连续落选次数加 1
   settle(nodes: readonly CpuNode[]): void;   // 以 spent 更新平滑耗用，汇总各层耗用
   hardEnd(): number;                         // 紧急刹车的读数上限
   summary(): CpuTickSummary;                 // 预算、预留、各层耗用、准入与落选数
 }
 ```
 
-- `CpuNode` 由 `ModuleRuntime` 与 `InstanceRecord` 实现：`key`、`tier`、`owner`、`deps`、`runnable`，以及计量字段 `cost`、`sampled`、`starve`、`verdict`、`spent`。lifecycle 在 admit 前计算 `runnable`，在阶段循环中累加 `spent`。
+- `CpuNode` 由 `ModuleRuntime` 与 `InstanceRecord` 实现：`key`、`phase`（维护层错峰相位，构造时由 `maintenancePhase(key)` 算出）、`tier`、`owner`、`deps`、`runnable`，以及计量字段 `cost`、`sampled`、`starve`、`verdict`、`spent`。lifecycle 在 admit 前计算 `runnable`，在阶段循环中累加 `spent`，并对被紧急刹车跳过的进程调用 `brake`。
 - 判定结果为常量 `VERDICT_NONE`、`VERDICT_ADMIT`、`VERDICT_IDLE`、`VERDICT_REJECT`。本 tick 新增的实例为 `VERDICT_NONE`，lifecycle 按预热规则让它运行。
 - 业务模块只经 `ctx.cpu`（`CpuBudget`）使用本模块：长计算每处理一批调用一次 `shouldYield()`，为 true 时保存游标并返回。
 
 ## 10. 验证
 
-单元测试以假 `GamePort` 驱动：B 与透支额的边界（bucket 高、低、等于目标）；收尾预留的下限；四层的层条件（维护层错峰、规划层 bucket 阈值）；预计耗用预检与"下一 tick 优先"；落选者排在所属模块或同层依赖之前时，依赖先被判定，依赖准入时落选者可以准入（防止永久落选）；依赖空闲不阻挡、落选则阻挡；每个进程每 tick 只判定一次；因预算落选时衰减预计值、因依赖落选时不衰减，预算收缩后自适应长计算能重新准入；预热；紧急刹车只跳过非生存层；计量在钩子之间只读一次 `getUsed()`（以调用次数确认）；`remaining()` 与 `shouldYield()` 按层计算。kernel 的集成测试确认 Memory 维护每 tick 作为收尾任务运行，不受准入影响。
+单元测试以假 `GamePort` 驱动：B 与透支额的边界（bucket 高、低、等于目标）；收尾预留的下限；四层的层条件（维护层错峰、规划层 bucket 阈值）；预计耗用预检与"下一 tick 优先"；落选者排在所属模块或同层依赖之前时，依赖先被判定，依赖准入时落选者可以准入（防止永久落选）；依赖空闲不阻挡、落选则阻挡；每个进程每 tick 只判定一次；因预算落选时衰减预计值、因依赖落选时不衰减，预算收缩后自适应长计算能重新准入；预热；紧急刹车只跳过非生存层，被跳过的进程不记样本、按落选计数，层耗用仍计入已运行的部分；维护层准入不逐 tick 计算哈希（以调用次数确认）；计量在钩子之间只读一次 `getUsed()`（以调用次数确认）；`remaining()` 与 `shouldYield()` 按层计算。kernel 的集成测试确认 Memory 维护每 tick 作为收尾任务运行，不受准入影响。

@@ -44,9 +44,17 @@ export interface Verdict {
   readonly action: Action;
 }
 
-/** 合法的运营模式，供 boot.force 校验参数。 */
-export const BOOT_MODES: readonly BootMode[] = ['NORMAL', 'RECOVERY', 'FRESH_START', 'TAKEOVER', 'SELF_ADOPT',
-  'SHARD_SEED', 'STRANDED', 'DORMANT', 'AMBIGUOUS'];
+/**
+ * 合法运营模式的表：以 BootMode 为键加 satisfies 约束，contracts 增删模式而此处未同步时编译失败
+ * （与 kernel/memory/marker.ts 的 MODE_TABLE 同一做法，ultrareview 第 9 项）。
+ */
+const MODE_TABLE = {
+  NORMAL: true, RECOVERY: true, FRESH_START: true, TAKEOVER: true, SELF_ADOPT: true,
+  SHARD_SEED: true, STRANDED: true, DORMANT: true, AMBIGUOUS: true,
+} as const satisfies Record<BootMode, true>;
+
+/** 合法的运营模式，供 boot.force 校验参数；由 MODE_TABLE 的键生成。 */
+export const BOOT_MODES: readonly BootMode[] = Object.keys(MODE_TABLE) as BootMode[];
 
 /**
  * @description 由原始 Memory 的概要与当前项目标记得出 Memory 视图（11.3 与第 3 节的表）。

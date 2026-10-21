@@ -106,13 +106,22 @@ export const createEntry = (deps: EntryDeps): (() => void) => {
   };
 
   /**
-   * @description 记录最近一次失败。
+   * @description 记录最近一次失败。它在入口最外层的 catch 中调用，自身不得抛错：抛出值可能是无原型对象、
+   * toString 抛错的对象，或 message 读取抛错、不是字符串的 Error，转文本失败时以固定文本代替（ultrareview 第 6 项），
+   * 否则 catch 的其余步骤（清理实例、计数、转保底）会被跳过，异常逃出 loop。
    * @param message 说明。
    * @param error 可选的抛出值，取其消息的第一行。
    * @returns 无返回值。
    */
   const recordFailure = (message: string, error?: unknown): void => {
-    const detail = error === undefined ? '' : `：${(error instanceof Error ? error.message : String(error)).split('\n')[0]}`;
+    let detail = '';
+    if (error !== undefined) {
+      try {
+        detail = `：${String(error instanceof Error ? error.message : error).split('\n')[0]}`;
+      } catch {
+        detail = '：（无法转为文本的抛出值）';
+      }
+    }
     lastFailure = { tick: deps.time(), message: `${message}${detail}`.slice(0, FAILURE_TEXT_LIMIT) };
   };
 

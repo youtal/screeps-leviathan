@@ -17,7 +17,7 @@ import type { CpuBudget, Tier } from '@/contracts/cpu';
 import type { Logger, Measure } from '@/contracts/log';
 import type { ModuleDefinition } from '@/contracts/module';
 import type { ConsoleHost } from '@/kernel/console';
-import { type CpuNode, VERDICT_NONE, type Verdict } from '@/kernel/cpu';
+import { type CpuNode, VERDICT_NONE, type Verdict, maintenancePhase } from '@/kernel/cpu';
 import type { LogRoot } from '@/kernel/logger';
 import type { createMemory } from '@/kernel/memory';
 import type { Profiler } from '@/kernel/profiler';
@@ -102,6 +102,8 @@ const NO_DEPS: readonly CpuNode[] = Object.freeze([]);
 /** 一个动态实例的运行记录；同时是 kernel.cpu 的准入节点。 */
 export class InstanceRecord implements Breakable, CpuNode {
   readonly key: string;
+  /** 维护层的错峰相位，构造时由进程键算出。 */
+  readonly phase: number;
   readonly hooks: InstanceHooks;
   /** 添加时的阶段序号；只在之后的阶段参与调度。 */
   readonly since: number;
@@ -131,6 +133,7 @@ export class InstanceRecord implements Breakable, CpuNode {
    */
   constructor(key: string, hooks: InstanceHooks, since: number, owner: ModuleRuntime) {
     this.key = key;
+    this.phase = maintenancePhase(key);
     this.hooks = hooks;
     this.since = since;
     this.tier = owner.tier;
@@ -201,6 +204,8 @@ export class ModuleRuntime implements Breakable, CpuNode {
   private readonly contexts: Map<string, InstanceContextImpl>;
   /** 进程键，即模块 id。 */
   readonly key: string;
+  /** 维护层的错峰相位，构造时由进程键算出。 */
+  readonly phase: number;
   readonly tier: Tier;
   readonly owner: undefined;
   /** requires 指向的模块运行记录；由 lifecycle 在全部运行记录创建后填入。 */
@@ -235,6 +240,7 @@ export class ModuleRuntime implements Breakable, CpuNode {
     this.disposers = [];
     this.contexts = new Map();
     this.key = def.id;
+    this.phase = maintenancePhase(def.id);
     this.tier = def.tier;
     this.owner = undefined;
     this.deps = [];

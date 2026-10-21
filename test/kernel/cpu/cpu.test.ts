@@ -2,13 +2,22 @@
  * 文件摘要：kernel.cpu 的单元测试，以假 CPU 端口与普通对象节点驱动，不经 lifecycle。
  * 覆盖：预算 B、透支额与收尾预留；预算视图按层计算；生存层总是准入；预计耗用预检；四层的层条件；
  * 先判定所属模块与依赖、防止永久落选（审计 LC-02）；依赖空闲不阻挡、落选则阻挡；
- * 因预算落选时衰减预计值、因依赖落选时不衰减（审计 LC-03）；平滑耗用与摘要；准入时清零 spent。
+ * 因预算落选时衰减预计值、因依赖落选时不衰减（审计 LC-03）；平滑耗用与摘要；准入时清零 spent；
+ * 维护层相位在构造时确定、准入不逐 tick 计算哈希（ultrareview 第 8 项，以调用次数确认）。
  */
 import type { Tier } from '@/contracts/cpu';
 import {
-  CPU_EMA_ALPHA, type CpuNode, MAINTENANCE_PERIOD, VERDICT_ADMIT, VERDICT_IDLE, VERDICT_NONE, VERDICT_REJECT, createCpu,
+  CPU_EMA_ALPHA, type CpuNode, MAINTENANCE_PERIOD, maintenancePhase, VERDICT_ADMIT, VERDICT_IDLE, VERDICT_NONE, VERDICT_REJECT, createCpu,
 } from '@/kernel/cpu';
 import { hashString } from '@/lib/hash';
+
+// hashString 的调用计数（ultrareview 第 8 项的验证依据）；包装后的函数行为与原函数相同。
+// jest.mock 的工厂会被提升到文件顶部，只能引用以 mock 开头的变量。
+const mockHashCalls = { n: 0 };
+jest.mock('@/lib/hash', () => {
+  const actual = jest.requireActual<typeof import('@/lib/hash')>('@/lib/hash');
+  return { ...actual, hashString: (text: string) => { mockHashCalls.n += 1; return actual.hashString(text); } };
+});
 
 /** 可调的 CPU 端口。 */
 const port = { time: 100, used: 0, limit: 20, tickLimit: 500, bucket: 5000 };
@@ -53,7 +62,7 @@ beforeEach(() => Object.assign(port, { time: 100, used: 0, limit: 20, tickLimit:
  * @returns 节点。
  */
 const node = (key: string, tier: Tier, cost?: number, extra: { owner?: CpuNode; deps?: CpuNode[] } = {}): CpuNode => ({
-  key, tier, owner: extra.owner, deps: extra.deps ?? [], runnable: true, cost: cost ?? 0, sampled: cost !== undefined,
+  key, phase: maintenancePhase(key), tier, owner: extra.owner, deps: extra.deps ?? [], runnable: true, cost: cost ?? 0, sampled: cost !== undefined,
   starve: 0, verdict: VERDICT_NONE, spent: 0,
 });
 
@@ -208,4 +217,34 @@ describe('计量', () => {
     cpu.settle([s, a]);
     expect(a.cost).toBeCloseTo(4 + CPU_EMA_ALPHA * 5);
   });
+});
+
+test('ultrareview 第 8 项：维护层的错峰相位在构造时确定，准入不再逐 tick 计算哈希；每个进程每周期仍恰好准入一次', () => {
+  const nodes = [node('m', 'maintenance', 1), node('m:a', 'maintenance', 1), node('m:b', 'maintenance', 1)];
+  const cpu = createCpu(fake);
+  const admitted = new Map(nodes.map((n) => [n.key, 0]));
+  mockHashCalls.n = 0;
+  for (let t = 0; t < MAINTENANCE_PERIOD * 2; t += 1) {
+    port.time = 100 + t;
+    cpu.beginTick();
+    cpu.admit(nodes);
+    for (const n of nodes) if (n.verdict === VERDICT_ADMIT) admitted.set(n.key, admitted.get(n.key)! + 1);
+    cpu.settle(nodes);
+  }
+  expect(mockHashCalls.n).toBe(0);
+  expect([...admitted.values()]).toEqual([2, 2, 2]);
+});
+
+test('ultrareview 第 3 项：被紧急刹车跳过的进程不记样本、不计准入，连续落选次数加 1，预计值不衰减；层耗用仍计入已花掉的部分', () => {
+  const job = node('job', 'economy', 5);
+  const cpu = createCpu(fake);
+  cpu.beginTick();
+  cpu.admit([job]);
+  expect(job.verdict).toBe(VERDICT_ADMIT);
+  job.spent = 1; // 已运行前面的阶段，之后被刹车跳过
+  cpu.brake(job);
+  cpu.brake(job); // 同一 tick 只计一次
+  cpu.settle([job]);
+  expect([job.verdict, job.starve, job.cost]).toEqual([VERDICT_REJECT, 1, 5]);
+  expect(cpu.summary()).toMatchObject({ admitted: 0, rejected: 1, tiers: { economy: 1 } });
 });

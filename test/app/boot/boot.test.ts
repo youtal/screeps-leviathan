@@ -179,6 +179,30 @@ test('autoClear 关闭：本系统 Memory 遇到重生 → AMBIGUOUS，冻结 la
   expect(b.notices).toHaveLength(1);
 });
 
+test("ultrareview 第 2 项：11.4 c′ 因房间在指纹中判为 AMBIGUOUS 后不写指纹，lastRun 照常前进；重建后仍为 AMBIGUOUS", () => {
+  const memory = READY_MEMORY.replace('"rooms":[]', '"rooms":["W1N1"]').replace('"spawnIds":[]', '"spawnIds":["s0"]');
+  const b = bootHarness({ memory, world: opening(undefined, 's9', 'W1N1') });
+  b.state.t = 1000;
+  b.step(); b.step();
+  expect(b.sys()).toMatchObject({ lastRun: 1002, fp: { spawnIds: ['s0'] }, mode: { mode: 'AMBIGUOUS', strength: 'medium' } });
+  b.h.rebuild();
+  b.step();
+  expect(b.sys()).toMatchObject({ lastRun: 1003, fp: { spawnIds: ['s0'] }, mode: { mode: 'AMBIGUOUS' } });
+  expect(b.notices).toHaveLength(1);
+});
+
+test("ultrareview 第 2 项：11.4 c′ 因停运不足 GAP 判为 AMBIGUOUS 后，运行超过 GAP 再重建仍为 AMBIGUOUS，不伪造停运证据", () => {
+  const memory = READY_MEMORY.replace('"rooms":[]', '"rooms":["W9N9"]').replace('"spawnIds":[]', '"spawnIds":["s0"]');
+  const b = bootHarness({ memory, world: opening(undefined, 's9', 'W1N1') });
+  b.state.t = 50;
+  b.step();
+  expect(b.sys().mode).toMatchObject({ mode: 'AMBIGUOUS', evidence: expect.arrayContaining(['时钟不可用，且房间在指纹中或停运时间不足']) });
+  for (let i = 0; i < 150; i += 1) b.step();
+  b.h.rebuild();
+  b.step();
+  expect(b.sys()).toMatchObject({ epoch: 0, fp: { spawnIds: ['s0'] }, mode: { mode: 'AMBIGUOUS' } });
+});
+
 test('control 分区申请失败：异常传播为 boot 失败，boot.force 返回错误而不是静默丢失人工指定', () => {
   const b = bootHarness({ world: RUNNING, wrap: (def) => ({
     /**

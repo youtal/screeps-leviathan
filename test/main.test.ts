@@ -16,9 +16,11 @@ import { FALLBACK_NOTIFY_GAP, KERNEL_COOLDOWN, KERNEL_CRASH_LIMIT, PAUSE_LIMIT, 
  * @param options.takeoverFails 接管是否抛错。
  * @param options.fallbackFails 保底循环是否抛错。
  * @param options.assembleFails 装配是否抛错。
+ * @param options.thrown 'throw' 时 kernel 抛出的值，默认为 Error('kernel 崩溃')。
  * @returns 入口 loop 与观测数据。
  */
-const setup = (script: (KernelHealth | 'throw' | 'reset')[], options: { takeoverFails?: boolean; fallbackFails?: boolean; assembleFails?: boolean } = {}) => {
+const setup = (script: (KernelHealth | 'throw' | 'reset')[],
+  options: { takeoverFails?: boolean; fallbackFails?: boolean; assembleFails?: boolean; thrown?: unknown } = {}) => {
   let time = 0;
   const seen = { assembled: 0, ticks: 0, disposed: 0, fallbacks: [] as number[], reports: [] as string[], notices: [] as string[],
     entry: undefined as (() => EntryStatus) | undefined };
@@ -33,7 +35,7 @@ const setup = (script: (KernelHealth | 'throw' | 'reset')[], options: { takeover
         tick: () => {
           seen.ticks += 1;
           const next = script.shift() ?? 'ok';
-          if (next === 'throw') throw new Error('kernel 崩溃');
+          if (next === 'throw') throw 'thrown' in options ? options.thrown : new Error('kernel 崩溃');
           if (next === 'reset') { reset = true; return 'paused'; }
           return next;
         },
@@ -192,4 +194,19 @@ test('LC-04：入口状态包含连续失败、冷却剩余与最近一次失败
   expect(seen.entry!()).toMatchObject({ time: 4, cooldown: KERNEL_COOLDOWN + 1, crashes: 0 });
   run(10);
   expect(seen.entry!().cooldown).toBe(KERNEL_COOLDOWN + 1 - 10);
+});
+
+test('ultrareview 第 6 项：kernel 抛出无法转为文本的值时，入口不抛错，照常清理实例、计数并当 tick 转保底', () => {
+  const unreadable = new Error('e');
+  Object.defineProperty(unreadable, 'message', { get: () => { throw new Error('message 读取失败'); } });
+  const values: unknown[] = [Object.create(null), { toString: () => { throw new Error('toString 失败'); } }, unreadable];
+  for (const thrown of values) {
+    const { run, seen } = setup(['throw'], { thrown });
+    expect(() => run(1)).not.toThrow();
+    expect(seen.fallbacks).toEqual([1]);
+    expect(seen.disposed).toBe(1);
+    expect(seen.entry!()).toMatchObject({ crashes: 1, lastFailure: { tick: 1, message: '正常循环抛错：（无法转为文本的抛出值）' } });
+    run(1);
+    expect(seen.assembled).toBe(2);
+  }
 });

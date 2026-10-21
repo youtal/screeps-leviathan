@@ -180,6 +180,17 @@ describe('CPU', () => {
     expect(h.lines.filter((l) => l.includes('跳过剩余的非生存层钩子'))).toHaveLength(1);
   });
 
+  test('ultrareview 第 3 项：被紧急刹车跳过的模块改记为落选，连续落选次数加 1，它的实例同样跳过', () => {
+    const calls: string[] = [];
+    let used = 0;
+    const greedy: ModuleDefinition = { id: 'greedy', tier: 'economy', priority: 0,
+      setup: () => ({ plan: () => { calls.push('greedy'); used = 10000; } }) };
+    const h = kernelHarness({ modules: [greedy, mod('later', calls, { instances: ['x'] })], game: { cpuUsed: () => used } });
+    h.tick();
+    expect(calls).toEqual(['greedy']);
+    expect(h.kernel.ops.status().modules.find((m) => m.id === 'later')).toMatchObject({ starve: 1 });
+  });
+
   test('预算放不下的模块落选，不运行，连续落选次数可见', () => {
     const calls: string[] = [];
     let used = 0;

@@ -86,7 +86,7 @@ W、safe mode 时钟、`placementTick` 与情形 a–e 完全按 11.4 计算，`
 | d：OURS，`S.id ∈ fp.spawnIds` 或 `lastRun ≥ placementTick` | NORMAL | 无 |
 | e：OURS_NEWER | AMBIGUOUS | 禁止清空 |
 
-c′ 的其余条件不满足时（例如 `r ∈ fp.rooms`），证据不足以判为开局，判为 AMBIGUOUS（中）。
+c′ 的其余条件不满足时（例如 `r ∈ fp.rooms`），证据不足以判为开局，判为 AMBIGUOUS（中）。此后到下一次完整判定之前不写 `fp`，`lastRun` 照常写：写入 `fp` 会把 S 记进指纹，下一次判定即落入 d 判为 NORMAL，未经确认就认领上一局的 Memory；`lastRun` 不能冻结，系统实际在运行，冻结会伪造"停运超过 `GAP`"的证据，使之后的判定改为 c′ 的开局并清空。
 
 ### 4.3 M1 尚未交付的分支
 
@@ -149,7 +149,7 @@ interface Verdict {
 
 - 模式为 RECOVERY 时不更新 `fp`：指纹保留损失前的资产，作为恢复的比较基准；资产恢复到指纹的一半以上后判为 NORMAL，再恢复更新。
 - `fp` 在每次完整判定之后更新，资产逐步减少时基准随之下调，RECOVERY 只识别相对上一次判定的大幅损失。
-- 清空尚待执行时不写任何字段；本系统 Memory 的清空被闸门拦下后不写 `lastRun` 与 `fp`（第 6.1 节）。
+- 清空尚待执行时不写任何字段；本系统 Memory 的清空被闸门拦下后不写 `lastRun` 与 `fp`（第 6.1 节）；开局世界中本系统 Memory 判为 AMBIGUOUS 后不写 `fp`（第 4.2 节）。
 - `lastRun` 每 tick 写入使 `sys` 每 tick 变脏，每 tick 编码一次项目标记（约 200 个字符）并拼接根文本。M2 起业务数据本来就几乎每 tick 变化，额外成本只有标记的编码。
 - `fp.rooms` 为本方 controller 所在的房间名，`fp.spawnIds` 为本方 spawn 的 id，`fp.creepCount` 为 creep 数。
 
@@ -190,7 +190,7 @@ app.assembly 以 `createBoot({ identity, release, settings, time, facts, counts,
 
 ## 11. 验证
 
-- **单元测试**：附录 C 用例 1–6、14–16 按原期望；用例 7–13 在 M1 按第 4.3 节期望 AMBIGUOUS；第 3.1 节的两种情形；闸门的每个前置条件（中证据一次不清空、备份 pending 与 failed、`autoClear` 关闭、dryRun、已 setup 时先软重置）；本系统 Memory 的清空被拦下后冻结 `lastRun` 与 `fp`、重建后仍判为 AMBIGUOUS；廉价不变量的突变阈值；项目标记各字段的写入时机；模式变化的通知只发一次；控制台命令。
+- **单元测试**：附录 C 用例 1–6、14–16 按原期望；用例 7–13 在 M1 按第 4.3 节期望 AMBIGUOUS；第 3.1 节的两种情形；闸门的每个前置条件（中证据一次不清空、备份 pending 与 failed、`autoClear` 关闭、dryRun、已 setup 时先软重置）；本系统 Memory 的清空被拦下后冻结 `lastRun` 与 `fp`、重建后仍判为 AMBIGUOUS；c′ 判为 AMBIGUOUS 后不写 `fp`、`lastRun` 照常前进，重建后仍为 AMBIGUOUS；廉价不变量的突变阈值；项目标记各字段的写入时机；模式变化的通知只发一次；控制台命令。
 - **私服场景**（bootPort 设计第 7 节、13.2）：
   - kernel-smoke：放置 spawn 后判为 FRESH_START 并初始化（M1 验收标准第 1 条）；已初始化存储在证据不足时判为 AMBIGUOUS、不清空；
   - boot-judgment：外来 Memory 的开局判为 b′ 并初始化，经 `boot.force('FRESH_START')` 确认后软重置、备份、回读并清空；有资产而 Memory 为空时判为 AMBIGUOUS 并初始化；

@@ -383,6 +383,11 @@ export const appendActivation = (history: readonly Activation[], record: Activat
 /**
  * @description 回放切换历史，得到"生效栈"：普通切换把新分支压栈，回滚出栈。某次普通切换的起点与栈顶不同，
  * 说明期间在工具之外切换过，此时栈从这次切换重新开始。
+ * 两类记录不按普通切换处理（ultrareview 第 1、5 项）：
+ * - 起点与终点相同（覆盖生效分支时 upload 必须带 --activate）：生效分支没有变化，跳过；否则栈中出现重复项，
+ *   rollback 会"回滚"到当前分支本身，delete 的回滚目标保护也随之错位；
+ * - 无法与栈顶配对的回滚：与之配对的切换已被 HISTORY_LIMIT 截断，或期间在工具之外切换过。更早的历史不可知，
+ *   栈从回滚的终点重新开始，不能把被回滚掉的分支当作下一次回滚的目标。
  * @param history 切换记录，按时间先后排列。
  * @returns 生效栈，最后一项是工具记录的当前生效分支；没有记录时为空数组。
  * @example activeStack([{from:'default',to:'v0.2.0'}, {from:'v0.2.0',to:'v0.2.1'}]) → ['default','v0.2.0','v0.2.1']
@@ -390,8 +395,14 @@ export const appendActivation = (history: readonly Activation[], record: Activat
 export const activeStack = (history: readonly Activation[]): string[] => {
   const stack: string[] = [];
   for (const { from, to, rollback } of history) {
-    if (rollback && stack.length >= 2 && stack[stack.length - 1] === from && stack[stack.length - 2] === to) {
-      stack.pop();
+    if (from === to) continue;
+    if (rollback) {
+      if (stack.length >= 2 && stack[stack.length - 1] === from && stack[stack.length - 2] === to) {
+        stack.pop();
+      } else {
+        stack.length = 0;
+        stack.push(to);
+      }
       continue;
     }
     if (stack[stack.length - 1] !== from) {
