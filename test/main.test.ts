@@ -7,7 +7,9 @@
  */
 import type { EntryStatus } from '@/app/ops';
 import type { Kernel, KernelHealth } from '@/kernel/lifecycle';
-import { FALLBACK_NOTIFY_GAP, KERNEL_COOLDOWN, KERNEL_CRASH_LIMIT, PAUSE_LIMIT, SAFE_MODE_TICKS, createEntry } from '@/main';
+import {
+  ENTRY_KEY, type EntryLoop, FALLBACK_NOTIFY_GAP, KERNEL_COOLDOWN, KERNEL_CRASH_LIMIT, PAUSE_LIMIT, SAFE_MODE_TICKS, createEntry, resolveEntry,
+} from '@/main';
 
 /**
  * @description 创建可编排的入口：每次 kernel.tick 依次取 script 中的结果（'throw' 表示抛错，'reset' 表示登记软重置的暂停 tick）。
@@ -23,7 +25,7 @@ const setup = (script: (KernelHealth | 'throw' | 'reset')[],
   options: { takeoverFails?: boolean; fallbackFails?: boolean; assembleFails?: boolean; thrown?: unknown } = {}) => {
   let time = 0;
   const seen = { assembled: 0, ticks: 0, disposed: 0, fallbacks: [] as number[], reports: [] as string[], notices: [] as string[],
-    entry: undefined as (() => EntryStatus) | undefined };
+    infos: [] as string[], entry: undefined as (() => EntryStatus) | undefined };
   const loop = createEntry({
     takeover: () => { if (options.takeoverFails) throw new Error('late'); },
     assemble: (entryStatus): Kernel => {
@@ -49,6 +51,7 @@ const setup = (script: (KernelHealth | 'throw' | 'reset')[],
     notify: (message) => { seen.notices.push(message); },
     time: () => time,
     report: (message) => { seen.reports.push(message); },
+    notice: (message) => { seen.infos.push(message); },
   });
   /**
    * @description 推进 n 个 tick。
@@ -56,7 +59,7 @@ const setup = (script: (KernelHealth | 'throw' | 'reset')[],
    * @returns 无返回值。
    */
   const run = (n = 1) => { for (let i = 0; i < n; i += 1) { time += 1; loop(); } };
-  return { run, seen };
+  return { run, seen, loop };
 };
 
 test('正常运行只装配一次，不运行保底循环', () => {
@@ -178,6 +181,7 @@ test('LC-07：两次接管间隔不足 FALLBACK_NOTIFY_GAP 时只通知一次；
     notify: () => { throw new Error('平台拒绝'); },
     time: () => time,
     report: (message) => { reports.push(message); },
+    notice: () => undefined,
   });
   time = 1;
   loop();
@@ -209,4 +213,57 @@ test('ultrareview 第 6 项：kernel 抛出无法转为文本的值时，入口�
     run(1);
     expect(seen.assembled).toBe(2);
   }
+});
+
+describe('模块重新执行（内核设计第 6 节）', () => {
+  /**
+   * @description 构造只记录调用的入口替身。
+   * @param log 调用记录。
+   * @param name 入口名。
+   * @returns 入口。
+   */
+  const fake = (log: string[], name: string): EntryLoop => Object.assign(() => { log.push(`${name}.loop`); }, {
+    reevaluated: () => { log.push(`${name}.reevaluated`); },
+    dispose: () => { log.push(`${name}.dispose`); },
+  });
+
+  test('同一 global 中同一构建的重新执行沿用已登记的入口；构建不同时销毁旧入口再新建；登记不可枚举', () => {
+    const target = {};
+    const log: string[] = [];
+    let created = 0;
+    const create = (name: string) => () => { created += 1; return fake(log, name); };
+    const first = resolveEntry(target, 'b1', create('a'));
+    expect(resolveEntry(target, 'b1', create('x'))).toBe(first);
+    expect(created).toBe(1);
+    const next = resolveEntry(target, 'b2', create('b'));
+    expect(next).not.toBe(first);
+    expect(log).toEqual(['a.reevaluated', 'a.dispose']);
+    expect(Object.keys(target)).toEqual([]);
+    expect((target as Record<symbol, unknown>)[ENTRY_KEY]).toMatchObject({ build: 'b2' });
+  });
+
+  test('注册表中的值不完整时当作没有，直接新建', () => {
+    const target = { [ENTRY_KEY]: { build: 'b1' } };
+    const log: string[] = [];
+    resolveEntry(target, 'b1', () => fake(log, 'a'));
+    expect((target as Record<symbol, { build: string }>)[ENTRY_KEY].build).toBe('b1');
+    expect(log).toEqual([]);
+  });
+
+  test('沿用入口时 kernel 不重新装配；重新执行的次数在 1、10、100 次时各记录一条 info', () => {
+    const { run, seen, loop } = setup([]);
+    run(1);
+    for (let i = 0; i < 120; i += 1) { loop.reevaluated(); run(1); }
+    expect(seen.assembled).toBe(1);
+    expect(seen.infos.map((m) => /累计 (\d+) 次/.exec(m)?.[1])).toEqual(['1', '10', '100']);
+  });
+
+  test('dispose 销毁 kernel，之后 loop 不再运行', () => {
+    const { run, seen, loop } = setup([]);
+    run(2);
+    loop.dispose();
+    run(3);
+    expect(seen.disposed).toBe(1);
+    expect(seen.ticks).toBe(2);
+  });
 });

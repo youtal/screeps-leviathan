@@ -212,6 +212,11 @@ const runChaos = (seed: number) => {
      * @returns 无返回值。
      */
     report: (message) => { seen.reports.push(message); },
+    /**
+     * @description 入口的 info 在混沌测试中丢弃。
+     * @returns 无返回值。
+     */
+    notice: () => undefined,
   });
 
   let loop = newEntry();
