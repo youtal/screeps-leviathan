@@ -39,6 +39,21 @@ npm run deploy -- delete   --account <账户> --branch <分支>    # 删除不�
 - 服务器限制每个账户的分支数（私服 backend 为 30 个），版本分支需要定期清理。`delete` 不能删除生效分支、模拟分支与当前的回滚目标，删除后回读确认。
 - 上传、切换生效分支、回滚与删除分支都是外部操作，需单独发起（见[验证与发布](#validation)）。
 
+### 查看线上数据
+
+inspector 经网页接口只读地查看账户的 Memory 与 segment，不写入任何数据，也不依赖游戏内的 kernel，kernel 拒绝加载 Memory 时同样可用。账户配置与部署工具共用 `.secret.json`，每条命令都必须用 `--account` 指定账户；官服的多 shard 账户用 `--shard` 指定 shard。
+
+```bash
+npm run inspect -- marker  --account <账户> [--shard <shard>]       # 项目标记与 Memory 状态
+npm run inspect -- sizes   --account <账户> [--shard <shard>]       # Memory 总长度与各单元的序列化长度
+npm run inspect -- get <点分路径> --account <账户> [--shard <shard>] # 某个路径下的值，例如 leviathan.part.boot.control
+npm run inspect -- segment <页号> --account <账户> [--shard <shard>] # 一页 segment 的页头与正文（0–99）
+```
+
+- 服务器先解析存储的 Memory 文本再返回，文本本身不是合法 JSON 时读不到原文，此时只能从 segment 备份区（第 80–89 页）查看清空前的备份。
+- 键本身含 `.` 的路径无法用 `get` 表达。
+- 每条命令都会向服务器发起读取请求，属于外部操作，需单独发起。
+
 ## 文档
 
 | 部分 | 内容 |

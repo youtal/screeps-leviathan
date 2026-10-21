@@ -17,6 +17,7 @@
     "version:bump": "node scripts/version/cli.ts bump",
     "check:version": "node scripts/version/cli.ts check",
     "deploy": "node scripts/deploy/cli.ts",
+    "inspect": "node scripts/inspector/cli.ts",
     "test:scenarios": "node scripts/scenarios/cli.ts"
   },
   "devDependencies": {
