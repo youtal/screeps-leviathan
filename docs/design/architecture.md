@@ -501,7 +501,7 @@ ctx.flags.of(flagName)  /  ctx.flags.core(flagName)
 
 ### 6.8 Segment 冷存储
 
-> 成熟度：整页覆盖写入定稿 · M1；读调度与分片 store 定稿 · M5
+> 成熟度：整页覆盖写入定稿 · M1；读调度与 `SegmentStore` 定稿 · M2；分片 store 定稿 · M5
 
 **定位**：显式异步的冷存储。heap 是工作副本，segment 是后备存储，正常运行时每页在一个 global 生命周期内只需读取一次。
 
@@ -614,7 +614,7 @@ world.costMatrix 维护可复用的房间通行事实与成本缓存；movement 
 
 ### 7.4 hub（中央枢纽）
 
-> 成熟度：定稿 · M3
+> 成熟度：定稿 · M2
 
 中央枢纽是布局核心里的一个格子：周围的核心建筑都与它相邻，站在上面的 creep 不需要移动就能在这些建筑之间搬运资源。world 依据**实际建筑坐标**检测枢纽，只报告事实，不关心它由谁建造。
 
@@ -686,7 +686,7 @@ move.flee(creep, threats, { range, priority }); // 逃离
 
 #### 8.1.3 交通结算
 
-> 成熟度：无冲突快速路径定稿 · M2；冲突结算定稿 · M3
+> 成熟度：定稿 · M2
 
 每条意图带一组按偏好排序的可接受格：
 
@@ -717,7 +717,7 @@ move 阶段按房间结算：
 
 #### 8.1.5 逃离
 
-> 成熟度：PathFinder 逃离定稿 · M3；距离场逃离候选
+> 成熟度：PathFinder 逃离定稿 · M2；距离场逃离候选
 
 - 使用 `PathFinder.search(..., {flee: true})`，静态矩阵上叠加当前 creep 占位。
 - **滞回**：与威胁距离小于 r 时进入逃离，大于 r+2 时退出，退出后再保持 2 tick。
@@ -904,13 +904,13 @@ M2–M3 的房内运输由 logistics 领域自行调度（10.5）。出现外矿
 | 买卖需求 | economics、market |
 | 设定值、库存位置、控制量 | 统计（5.8） |
 
-**分阶段接入**：M2 只接入能量回路，库存位置仅含现存量；M3 加入 storage 与 terminal 的能量分配和本房矿物；已承诺量随 ledger 在 M4 接入；在途量与跨殖民地平衡随终端网络在 M5 接入；化合物、boost 与商品原料在 M6 接入（14.3）。
+**分阶段接入**：M2 只接入能量回路，库存位置仅含现存量；storage 建成前没有能量设定值，能量回路不启用（9.3.5）；M3 加入 storage 与 terminal 的能量分配和本房矿物；已承诺量随 ledger 在 M4 接入；在途量与跨殖民地平衡随终端网络在 M5 接入；化合物、boost 与商品原料在 M6 接入（14.3）。
 
 #### 9.3.5 governor
 
 > 成熟度：定稿 · M2
 
-不下达命令，只输出数字：本 tick 建造、升级、维修各可用多少能量，以及为关系（扶持、战役）预留的 spawn 产能与能量。可调能量的总量由库存控制的能量回路给出（9.3.4）：能量高于目标时增加升级等可调投入，低于目标时削减。governor 只负责在此总量内，按姿态配置的预算权重与关系预留进行分配，不再自行根据 storage 余量估算。各站点据此决定自身规模，换算规则见 [app.config](./app/config.md#workforce)。
+不下达命令，只输出数字：本 tick 建造、升级、维修各可用多少能量，以及为关系（扶持、战役）预留的 spawn 产能与能量。可调能量的总量由库存控制的能量回路给出（9.3.4）：能量高于目标时增加升级等可调投入，低于目标时削减。governor 只负责在此总量内，按姿态配置的预算权重与关系预留进行分配，不再自行根据 storage 余量估算。storage 建成前能量回路不启用，可调能量的总量取扣除 spawn、extension 与 tower 补能后的剩余采集收入。各站点据此决定自身规模，换算规则见 [app.config](./app/config.md#workforce)。
 
 #### 9.3.6 殖民地间关系
 
@@ -966,13 +966,13 @@ M2–M3 的房内运输由 logistics 领域自行调度（10.5）。出现外矿
 
 ### 9.6 布局规划（planner）
 
-> 成熟度：固定模板定稿 · M2；道路生长与最小割定稿 · M3
+> 成熟度：定稿 · M2
 
 - **核心**：以距离变换选出核心区域，放置 3×3 核心模板：中心格留给中央枢纽 creep；正方向放 storage、terminal、factory、link，storage 朝向基地重心；斜角放 2 个 spawn、powerSpawn、nuker；外圈是 12 格道路（5×5 去掉四角）。两个核心 spawn 分别在 RCL 1 与 RCL 7 建造。核心模板满足 `lib.layout.hubPattern`（7.4），建成后由 logistics 启用中央枢纽（9.7）。
 - **道路生长**：从核心出发，按通往 source、controller、mineral、出口的路径逐格生长道路，扩展区建筑沿道路两侧放置。
 - **rampart**：在核心与所有出口之间求 K 层连续 rampart 的最小割，用最少的 rampart 封闭基地。
 - **输出**：每个建筑带解锁 RCL 和放置顺序，build 按此生成工地（10.6）。
-- **执行**：一次完整规划可分 tick 执行，结果编码后存入 segment；在占领新房间或 RCL 升级时运行。M2 使用固定模板（核心 + 预设扩展区），生长算法在 M3 替换。
+- **执行**：一次完整规划可分 tick 执行，结果编码后存入 segment；在占领新房间或 RCL 升级时运行。
 - **接手**：现有建筑作为输入约束，规划目标加入"最大化复用现有建筑"，并生成带排序约束的迁移计划（11.6）。
 
 ### 9.7 中央物流枢纽（logistics）
@@ -1569,10 +1569,10 @@ tower 伤害：   距离 ≤ 5 → 600；距离 ≥ 20 → 150；其间 600 − 
 | 里程碑 | 环境 | 目标 | 交付模块 | 验收标准 |
 | --- | --- | --- | --- | --- |
 | **M1 基础平台** | 私服；官服非生效分支演练 | 可运行、可观测、可发布的基座 | kernel：lifecycle、process、cpu（分层准入与预算）、context、memory（长路径接口、实体空间、单元级标脏、迁移）、segments（整页覆盖：备份区与统计）、intershard（特性检测与本 shard 清空）、logger、profiler、errorMapper、stats、console、bootPort；lib：geometry、hash、naming；app：assembly、boot（FRESH_START、RECOVERY、DORMANT、AMBIGUOUS）、ops；保底循环；工程：build、deploy、unit、platformFakes（Memory、segment）、scenarios、chaos、boundary、inspector（只读查看） | 私服上放置 spawn 后正确判定开局；混沌测试中保底循环能接管；Memory 测试通过；部署、分支切换与回滚在私服完成演练；官服完成非生效分支的上传与命令验证 |
-| **M2 线上最小闭环** | 官服 | 单房从开局（或接手）自动发展到 RCL4，并持续闭环运行（第 10 章） | world：roomCache、costMatrix、threat（本房识别）；services：movement（路径、意图、快速路径、卡住纠错）、spawnQueue；colony：registry、stage、posture（发展、维持、平时、战时）、inventory（能量回路 v1）、governor；kernel 实例准入过滤；domains：bootstrap、mining、upgrade、build、logistics（房内自行调度）、defense（防御基线）、planner（固定模板）；app.boot：TAKEOVER 与 SELF_ADOPT 的 stabilize、adopt；app.config（RCL 1–4）；lib：combat、collections、tables（RCL 建筑上限）、body；工程：exporter、dashboard、snapshot；runbook（部署、回滚、接手、恢复） | **闭环运行基线成立**；RCL1→4 无人工干预；接手账户时 stabilize 阶段无资产损失；成功击退 NPC 入侵；10.8 的指标达标或已建立基准；CPU 实测并校准 5.3 的目标值；告警链路验证可用 |
-| **M3 单房成熟** | 官服 | 单房到 RCL8，移动、布局与物流成熟 | movement：交通冲突结算、PathFinder 逃离；lib：grid、layout；world.hub；planner：道路生长与最小割；接手流程的 converge；mineral；logistics 的 link 与中央枢纽；spawnQueue 续命；inventory：storage 与 terminal 的能量分配、本房矿物；运行姿态：冲刺；app.policy；工程：bench、layoutLab | 基线保持；单房 RCL8；受阻浪费的 creep·tick 有统计并持续下降；中央枢纽启用后核心区域的受阻浪费下降；"能源 ÷ CPU"指标可观测 |
+| **M2 线上最小闭环** | 官服 | 单房从开局（或接手）自动发展到 RCL4，并持续闭环运行（第 10 章） | world：roomCache、costMatrix、threat（本房识别）、hub；services：movement（路径、意图、交通结算、卡住纠错、PathFinder 逃离）、spawnQueue；colony：registry、stage、posture（发展、维持、平时、战时）、inventory（能量回路 v1）、governor；kernel：实例准入过滤，segments 的读调度与 `SegmentStore`；domains：bootstrap、mining、upgrade、build、logistics（房内自行调度）、defense（防御基线）、planner（核心模板、道路生长与 rampart 最小割）；app.boot：TAKEOVER 与 SELF_ADOPT 的 stabilize、adopt；app.config（RCL 1–4）；lib：combat、collections、tables（RCL 建筑上限）、body、grid、layout；工程：exporter、dashboard、snapshot；runbook（部署、回滚、接手、恢复） | **闭环运行基线成立**；RCL1→4 无人工干预；接手账户时 stabilize 阶段无资产损失；成功击退 NPC 入侵；10.8 的指标达标或已建立基准；CPU 实测并校准 5.3 的目标值；告警链路验证可用 |
+| **M3 单房成熟** | 官服 | 单房到 RCL8，移动、布局与物流成熟 | 接手流程的 converge；mineral；logistics 的 link 与中央枢纽；spawnQueue 续命；inventory：storage 与 terminal 的能量分配、本房矿物；运行姿态：冲刺；app.policy；工程：bench、layoutLab | 基线保持；单房 RCL8；受阻浪费的 creep·tick 有统计并持续下降；中央枢纽启用后核心区域的受阻浪费下降；"能源 ÷ CPU"指标可观测 |
 | **M4 外矿与区域经济** | 官服 | 外矿开发与区域运输 | remote；logisticsBroker、ledger（库存位置接入已承诺量）；world：intel、threat（威胁场与跨房追踪）、map；vision；movement 的跨房路线；defense 对外矿的防护；运行姿态：警戒；外矿安全（15.2） | 基线保持；外矿"能源 ÷ CPU"可观测且高于阈值才开启；不出现重复承诺 |
-| **M5 多殖民地与跨 shard** | 官服 | 扩张到多殖民地，支持跨 shard | segments 的读调度与分片 store；intershard（跨 shard 协议）；scouting、expansion、interShard、decommission；colony.relations（扶持）；运行姿态：撤离；logistics 终端网络（跨殖民地库存平衡，库存位置接入在途量）；app.boot：SHARD_SEED、STRANDED；多 shard CPU 分配（15.2）；platformFakes：InterShardMemory；runbook（跨 shard） | 基线在 ≥ 2 个殖民地上保持；官服完成跨 shard 派出与开拓；撤离流程在私服完成端到端演练 |
+| **M5 多殖民地与跨 shard** | 官服 | 扩张到多殖民地，支持跨 shard | segments 的分片 store；intershard（跨 shard 协议）；scouting、expansion、interShard、decommission；colony.relations（扶持）；运行姿态：撤离；logistics 终端网络（跨殖民地库存平衡，库存位置接入在途量）；app.boot：SHARD_SEED、STRANDED；多 shard CPU 分配（15.2）；platformFakes：InterShardMemory；runbook（跨 shard） | 基线在 ≥ 2 个殖民地上保持；官服完成跨 shard 派出与开拓；撤离流程在私服完成端到端演练 |
 | **M6 产业经济** | 官服 | 依据物价模型自主经营产业 | world.market；economics（v1）、labs、factory、power、highway、market；boostBroker；inventory：化合物、boost 与商品原料的设定值；lib.tables：反应与商品配方；platformFakes：市场 | 基线保持；Lab 反应链与 boost 供给闭环；产业规划的预测毛利与实际收益持续对账 |
 | **M7 战争与外交** | 官服 | 主动作战与协作 | military（战役）、nuke、diplomacy（交战事实）；colony.relations（前线基地、补给基地）；运行姿态：动员；defense 跨房支援 | 基线保持；作战目标另行设定 |
 
