@@ -1,7 +1,8 @@
 /**
  * 文件摘要：Memory 与 segment 平台模拟（test/platform/memory.ts）的单元测试。
  * 逐条核对模拟与引擎、驱动源码一致的语义：Memory 惰性解析与 tick 末写回、RawMemory.set 的优先级与上限、
- * 用户代码抛错时仍然持久化、segment 激活延迟一 tick 且请求持续生效、保存数量与长度上限。
+ * 用户代码抛错时仍然持久化、segment 激活延迟一 tick 且请求持续生效、保存数量与长度上限、
+ * Game.cpu.halt() 使本 tick 的运行结果整体作废。
  */
 import { PlatformError, SEGMENT_LIMIT, createMemoryPlatform } from './memory';
 import type { MemoryPlatform } from './memory';
@@ -175,5 +176,25 @@ describe('segment', () => {
       }),
     ).toThrow('not a string');
     expect(platform.segment(1)).toBeUndefined();
+  });
+});
+
+describe('Game.cpu.halt()', () => {
+  test('halt 的 tick 不保存 Memory、segment 与激活请求，下一 tick 看到的是 halt 之前的状态', () => {
+    const target = scope();
+    const platform = createMemoryPlatform({ memory: '{"a":1}', target });
+    const { error } = platform.tick(() => {
+      target.Memory.a = 2;
+      target.RawMemory.segments[3] = 'page';
+      target.RawMemory.setActiveSegments([3]);
+    }, { halt: true });
+    expect(error).toBeUndefined();
+    expect(platform.memory).toBe('{"a":1}');
+    expect(platform.segment(3)).toBeUndefined();
+    expect(platform.activeSegments).toEqual([]);
+    tickWithoutError(platform, () => {
+      expect(target.Memory.a).toBe(1);
+      expect(Object.keys(target.RawMemory.segments)).toEqual([]);
+    });
   });
 });

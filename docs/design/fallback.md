@@ -81,4 +81,5 @@
   - 保底代码自身不触碰 Memory，以及 spawnCreep 对入口接管的依赖。
 - 边界测试保证不导入项目模块。
 - 有效代码行数由测试统计，不超过 400 行。
-- 真实行为在私服混沌测试中复核（M1 第 7 步）。
+- 真实行为在私服场景中复核：fallback-takeover 从开局起 Memory 不可用时接管；chaos 在运行中经 `Game.cpu.halt()` 强制 reset、压低 CPU 额度后使 Memory 失效，验证保底接管并孵化应急采集者，恢复 Memory 后正常循环接回、连续 degraded 归零。
+- 入口切换规则的扰动测试（`test/chaos/`）：真实的入口、kernel 与 app.boot 在随机的 reset、halt、模块故障与压低 CPU 下运行，保底循环恰好在生存层熔断后第 `SAFE_MODE_TICKS` 个 degraded tick 起接管，已提交的数据不丢失也不重复。
