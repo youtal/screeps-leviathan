@@ -157,7 +157,10 @@ describe('准入', () => {
     expect([mod.verdict, inst.verdict, inst.starve]).toEqual([VERDICT_ADMIT, VERDICT_REJECT, 1]);
     port.used = 0;
     cpu.admit([mod, inst]); // inst 排在最前，judge 先判定 mod
-    expect([mod.verdict, inst.verdict, inst.starve]).toEqual([VERDICT_ADMIT, VERDICT_ADMIT, 0]);
+    expect([mod.verdict, inst.verdict]).toEqual([VERDICT_ADMIT, VERDICT_ADMIT]);
+    // 连续落选次数在结算确认仍为准入时归零（审计 DV-04）。
+    cpu.settle([mod, inst]);
+    expect(inst.starve).toBe(0);
   });
 
   test('LC-02：同层依赖先判定；依赖落选时依赖方落选并计数，但不衰减', () => {
@@ -247,4 +250,19 @@ test('ultrareview 第 3 项：被紧急刹车跳过的进程不记样本、不�
   cpu.settle([job]);
   expect([job.verdict, job.starve, job.cost]).toEqual([VERDICT_REJECT, 1, 5]);
   expect(cpu.summary()).toMatchObject({ admitted: 0, rejected: 1, tiers: { economy: 1 } });
+});
+
+test('审计 DV-04：连续被紧急刹车时连续落选次数逐 tick 累加，预算落选后又被刹车也继续累加；运行完一次后归零', () => {
+  const job = node('job', 'economy', 1);
+  const cpu = createCpu(fake);
+  const seen: number[] = [];
+  for (let i = 0; i < 3; i += 1) {
+    cpu.beginTick(); cpu.admit([job]); cpu.brake(job); cpu.settle([job]); seen.push(job.starve);
+  }
+  port.used = 100; // 预算放不下：因预算落选
+  cpu.beginTick(); cpu.admit([job]); cpu.settle([job]); seen.push(job.starve);
+  port.used = 0;
+  cpu.beginTick(); cpu.admit([job]); cpu.brake(job); cpu.settle([job]); seen.push(job.starve);
+  cpu.beginTick(); cpu.admit([job]); cpu.settle([job]); seen.push(job.starve);
+  expect(seen).toEqual([1, 2, 3, 4, 5, 0]);
 });

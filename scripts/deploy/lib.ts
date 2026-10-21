@@ -372,13 +372,15 @@ export const accountHistory = (file: unknown, key: string): Activation[] => {
 };
 
 /**
- * @description 追加一条切换记录，只保留最近 HISTORY_LIMIT 条。
+ * @description 追加一条切换记录，只保留最近 HISTORY_LIMIT 条。起点与终点相同的切换（重新激活当前生效分支，
+ * 覆盖生效分支的 upload --activate 每次都会产生）不改变生效分支，不写入：否则反复覆盖会把真实切换挤出窗口，
+ * 回滚目标与删除保护随之丢失（审计 DV-06）。已写入的这类旧记录仍由 activeStack 在回放时跳过。
  * @param history 已有记录。
  * @param record 新记录。
  * @returns 新数组；不修改输入。
  */
 export const appendActivation = (history: readonly Activation[], record: Activation): Activation[] =>
-  [...history, record].slice(-HISTORY_LIMIT);
+  record.from === record.to ? [...history] : [...history, record].slice(-HISTORY_LIMIT);
 
 /**
  * @description 回放切换历史，得到"生效栈"：普通切换把新分支压栈，回滚出栈。某次普通切换的起点与栈顶不同，

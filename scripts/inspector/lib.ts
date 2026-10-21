@@ -51,7 +51,7 @@ export interface InspectArgs {
 export const USAGE = [
   '用法：npm run inspect -- <命令> --account <账户> [--shard <shard>]',
   '  marker                项目标记与 Memory 状态',
-  '  sizes                 Memory 总长度与各单元的序列化长度',
+  '  sizes                 Memory 重新序列化后的总长度与各单元的序列化长度',
   '  get <点分路径>         某个路径下的值，例如 leviathan.part.boot.control',
   '  segment <页号>         一页 segment 的页头与正文（0–99）',
   '只读：不写入 Memory 或 segment。每条命令都访问服务器，须显式给出 --account。',
@@ -228,14 +228,17 @@ export const unitSizes = (root: Record<string, unknown>): { readonly path: strin
 /**
  * @description 生成 sizes 命令的输出。
  * @param read 整个 Memory 的读取结果。
- * @returns 多行文本：总长度与上限的比例，以及各单元的长度。
+ * @returns 多行文本：重新序列化后的总长度与上限的比例，以及各单元的长度。
  */
 export const formatSizes = (read: MemoryRead): string => {
   if (read.status === 'unreadable') return `Memory 无法读取：${read.reason}`;
   if (read.status === 'missing') return 'Memory 为空';
   if (!isObject(read.value)) return 'Memory 的根不是对象，无法统计（Memory 状态 CORRUPT）';
+  // 服务器先解析原文再重新序列化，原文的空白与转义写法不保留（审计 DV-07）。本项目 kernel 写入的就是紧凑的
+  // JSON.stringify 结果，两者相同；外来或手工编辑过的 Memory 原文可能更长。
   const total = JSON.stringify(read.value).length;
-  const lines = [`Memory 总长度 ${total} 个字符，占上限 ${(total / MEMORY_LIMIT * 100).toFixed(1)}%`];
+  const lines = [`Memory 重新序列化后的长度 ${total} 个字符，占上限 ${(total / MEMORY_LIMIT * 100).toFixed(1)}%`,
+    '（服务器返回的是解析后的数据：本项目写入的 Memory 与原文长度相同，外来或手工编辑过的 Memory 原文可能更长）'];
   for (const { path, length } of unitSizes(read.value)) lines.push(`${String(length).padStart(9)}  ${path}`);
   return lines.join('\n');
 };

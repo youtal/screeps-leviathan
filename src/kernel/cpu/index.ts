@@ -139,7 +139,8 @@ export interface CpuHost {
   brake(node: CpuNode): void;
   /**
    * @description tick 收尾：以本 tick 的 spent 更新被准入进程的平滑耗用，汇总各层耗用，清零 spent。
-   * 各层耗用按全部进程的 spent 累加，包括已运行部分阶段后被刹车跳过的进程；样本只取自被准入并运行完的进程。
+   * 各层耗用按全部进程的 spent 累加，包括已运行部分阶段后被刹车跳过的进程；样本只取自被准入并运行完的进程，
+   * 这些进程的连续落选次数在此归零（准入时不归零，因为之后仍可能被 brake 改记为落选，审计 DV-04）。
    * @param nodes 与 admit 相同的进程集合。
    * @returns 无返回值。
    */
@@ -250,7 +251,7 @@ export const createCpu = (port: CpuPort): CpuHost => {
     const cost = node.sampled ? node.cost : 0;
     if (expected + cost > poolEnd) return reject(node, true);
     expected += cost;
-    node.starve = 0;
+    // 连续落选次数不在这里归零：本 tick 可能还会被紧急刹车改记为落选（brake），归零推迟到 settle 确认仍为准入时（审计 DV-04）。
     node.verdict = VERDICT_ADMIT;
     return VERDICT_ADMIT;
   };
@@ -322,6 +323,7 @@ export const createCpu = (port: CpuPort): CpuHost => {
         tiers[node.tier] += node.spent;
         if (node.verdict === VERDICT_ADMIT) {
           admitted += 1;
+          node.starve = 0;
           const sample = node.spent;
           node.cost = node.sampled ? node.cost + CPU_EMA_ALPHA * (sample - node.cost) : sample;
           node.sampled = true;

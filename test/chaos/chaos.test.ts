@@ -225,9 +225,13 @@ const runChaos = (seed: number) => {
 
   /**
    * @description 模拟 global reset：新的入口闭包与 kernel，推算状态随 heap 一同清零。
+   * @param kind 来源：随机扰动、halt 之后的重建、扰动结束后的固定 reset；只有随机扰动计入 stats.resets（审计 DV-08）。
    * @returns 无返回值。
    */
-  const reset = () => { loop = newEntry(); guardFails = 0; trippedAt = undefined; uncovered = 0; stats.resets += 1; };
+  const reset = (kind: 'random' | 'halt' | 'final') => {
+    loop = newEntry(); guardFails = 0; trippedAt = undefined; uncovered = 0;
+    if (kind === 'random') stats.resets += 1;
+  };
 
   /**
    * @description 推进一个 tick 并检查不变量。
@@ -261,13 +265,16 @@ const runChaos = (seed: number) => {
     const fallbackDue = trippedAt !== undefined && state.t - trippedAt >= SAFE_MODE_TICKS - 1;
     expect({ where, fallback: seen.fallback }).toEqual({ where, fallback: fallbackDue });
     if (seen.fallback) stats.fallback += 1;
-    if (state.limit < 20 && !ran.has('worker') && (faults.get('worker') ?? 0) === 0) stats.starved += 1;
+    // 因 CPU 不足未运行：CPU 被压低、worker 未熔断且本 tick 结算后连续落选次数大于 0（预算落选或被刹车），
+    // 而不是因为已熔断而不运行（审计 DV-08）。
+    const worker = h.kernel.ops.status().modules.find((m) => m.id === 'worker');
+    if (state.limit < 20 && !ran.has('worker') && worker?.state === 'running' && worker.starve > 0) stats.starved += 1;
 
     for (const [id, left] of faults) faults.set(id, Math.max(0, left - 1));
     if (halt) {
       // 本 tick 的结果整体作废：已提交的计数不变，随后进入新的 global。
       stats.halts += 1;
-      reset();
+      reset('halt');
     } else {
       for (const id of ran) committed.set(id, committed.get(id)! + 1);
       uncovered = ran.has('guard') || seen.fallback ? 0 : uncovered + 1;
@@ -288,7 +295,7 @@ const runChaos = (seed: number) => {
     if ((faults.get('worker') ?? 0) === 0 && rand() < 0.03) faults.set('worker', 1 + Math.floor(rand() * 6));
     if (state.limit === 20 && rand() < 0.01) { state.limit = 2; state.bucket = 0; }
     else if (state.limit < 20 && rand() < 0.03) { state.limit = 20; state.bucket = 10000; }
-    if (rand() < 0.01) reset();
+    if (rand() < 0.01) reset('random');
     step(rand() < 0.005);
   }
 
@@ -296,7 +303,7 @@ const runChaos = (seed: number) => {
   faults.clear();
   state.limit = 20;
   state.bucket = 10000;
-  reset();
+  reset('final');
   const recovered = new Set<string>();
   for (let i = 0; i < RECOVER_TICKS; i += 1) {
     step(false);
@@ -314,7 +321,7 @@ test.each(SEEDS)('种子 %i：reset、halt、模块故障与压低 CPU 的扰动
   expect(stats.maxUncovered).toBeLessThanOrEqual(UNCOVERED_LIMIT);
 });
 
-test('扰动序列确实触发了保底接管、经济层因 CPU 不足未运行、reset 与 halt', () => {
+test('扰动序列确实触发了保底接管、经济层因 CPU 不足未运行（未熔断且落选）、随机 reset 与 halt', () => {
   const all = SEEDS.map(runChaos);
   const sum = (key: keyof ReturnType<typeof runChaos>) => all.reduce((n, s) => n + s[key], 0);
   expect(sum('fallback')).toBeGreaterThan(0);

@@ -93,6 +93,8 @@ const verdict = (mode: BootMode, strength: Strength, kase: string, evidence: str
 /**
  * @description 判定当前局面（11.7 的判定顺序；第 4 节）。force 不为空时以人工指定为准：FRESH_START 为一次性指定，
  * Memory 为 EMPTY 时初始化，否则备份后清空（用于确认 11.4 b′ 等情形的清空）；其他模式只在能初始化时初始化，不清空。
+ * Memory 版本高于代码（OURS_NEWER）时人工指定 FRESH_START 也不清空，改判 AMBIGUOUS（11.4 e、11.8，审计 DV-01）：
+ * 这种 Memory 通常属于回滚前的新版本，清空会丢掉新版本的数据。
  * @param facts 本 tick 的世界事实。
  * @param memory Memory 视图。
  * @param force 人工指定的模式（boot.force），没有时为 null。
@@ -101,6 +103,9 @@ const verdict = (mode: BootMode, strength: Strength, kase: string, evidence: str
 export const assess = (facts: BootFacts, memory: MemoryView, force: BootMode | null): Verdict => {
   const mem = `Memory：${memory.state}`;
   if (force !== null) {
+    if (force === 'FRESH_START' && memory.state === 'OURS_NEWER') {
+      return verdict('AMBIGUOUS', 'strong', 'force', ['人工指定（boot.force）', mem, 'Memory 的 schema 高于代码，禁止清空（11.4 e），未执行 FRESH_START'], 'none');
+    }
     const action: Action = force === 'FRESH_START' ? (memory.state === 'EMPTY' ? 'initialize' : 'clear')
       : memory.initializable ? 'initialize' : 'none';
     return verdict(force, 'strong', 'force', ['人工指定（boot.force）', mem], action);

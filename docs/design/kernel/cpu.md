@@ -60,7 +60,7 @@ judge(p)：
   层条件不满足 → 空闲（本 tick 本来就不运行，不计落选）
   先 judge p 的所属模块（p 为实例时）与同层的 requires 模块；
     任一为"落选" → 落选，连续落选次数 +1
-  expected + 预计耗用 ≤ poolEnd → 准入，expected += 预计耗用，连续落选次数归零
+  expected + 预计耗用 ≤ poolEnd → 准入，expected += 预计耗用（连续落选次数在 settle 确认仍为准入时归零）
   否则 → 落选，连续落选次数 +1，预计耗用 ← 预计耗用 × (1 − CPU_EMA_ALPHA)
 ```
 
@@ -158,7 +158,7 @@ interface CpuHost {
   beginTick(): void;                         // tick 起点：计算 B、R、poolEnd、hardEnd
   admit(nodes: readonly CpuNode[]): void;    // 判定全部进程；nodes 为执行顺序，不可运行的进程判为空闲
   brake(node: CpuNode): void;                // 紧急刹车跳过的进程改记为落选，连续落选次数加 1
-  settle(nodes: readonly CpuNode[]): void;   // 以 spent 更新平滑耗用，汇总各层耗用
+  settle(nodes: readonly CpuNode[]): void;   // 以 spent 更新平滑耗用，汇总各层耗用；仍为准入的进程连续落选次数归零
   hardEnd(): number;                         // 紧急刹车的读数上限
   summary(): CpuTickSummary;                 // 预算、预留、各层耗用、准入与落选数
 }

@@ -86,7 +86,7 @@ W、safe mode 时钟、`placementTick` 与情形 a–e 完全按 11.4 计算，`
 | d：OURS，`S.id ∈ fp.spawnIds` 或 `lastRun ≥ placementTick` | NORMAL | 无 |
 | e：OURS_NEWER | AMBIGUOUS | 禁止清空 |
 
-c′ 的其余条件不满足时（例如 `r ∈ fp.rooms`），证据不足以判为开局，判为 AMBIGUOUS（中）。此后到下一次完整判定之前不写 `fp`，`lastRun` 照常写：写入 `fp` 会把 S 记进指纹，下一次判定即落入 d 判为 NORMAL，未经确认就认领上一局的 Memory；`lastRun` 不能冻结，系统实际在运行，冻结会伪造"停运超过 `GAP`"的证据，使之后的判定改为 c′ 的开局并清空。
+c′ 的其余条件不满足时（例如 `r ∈ fp.rooms`），证据不足以判为开局，判为 AMBIGUOUS（中）。项目标记的模式为 AMBIGUOUS 期间不写 `fp`，`lastRun` 照常写（第 7 节）：写入 `fp` 会把 S 记进指纹，之后世界回到开局状态时即落入 d 判为 NORMAL，未经确认就认领上一局的 Memory；`lastRun` 不能冻结，系统实际在运行，冻结会伪造"停运超过 `GAP`"的证据，使之后的判定改为 c′ 的开局并清空。这一条件随持久化的模式而定：世界暂时离开开局状态（判定落入"11.7 OURS 保持 AMBIGUOUS"）或经过 global reset，指纹同样不变。
 
 ### 4.3 M1 尚未交付的分支
 
@@ -110,7 +110,7 @@ interface Verdict {
 
 ## 5. 运行时机（11.1）
 
-- **完整判定**：本 kernel 实例的第一个 tick；廉价不变量突变；人工 `boot.force` 之后的下一 tick（`boot.assess` 只观察，不触发）；进行中的备份或待确认的中证据（需要连续判定）。
+- **完整判定**：本 kernel 实例的第一个 tick；廉价不变量突变；人工 `boot.force` 或修改 `boot.dryRun` 之后的下一 tick（`boot.assess` 只观察，不触发）；进行中的备份或待确认的中证据（需要连续判定）。
 - **廉价不变量**：spawn 数、`Game.structures` 数量、`Game.creeps` 数量、项目标记是否存在（Memory 是否 ready）。突变的定义：spawn 数变化；建筑数在 0 与非 0 之间变化或减少一半以上；creep 数在 0 与非 0 之间变化或减少一半以上；Memory 的 ready 状态变化。creep 数的日常增减不触发完整判定。
 - 读取三个数量各为一次 `Object.keys(...).length`，每 tick 的成本与对象数成正比，但不分配事实对象。
 
@@ -122,14 +122,16 @@ interface Verdict {
 
 1. 证据：强证据一次，或中证据连续两次完整判定的 `case` 一致（heap 中的计数，global reset 后重新累计）；
 2. 备份：`port.backup()` 返回 `done`；返回 `pending` 时本 tick 为暂停 tick，下一 tick 继续；返回 `failed` 时不清空，判为 AMBIGUOUS 并通知；
-3. 配置：`autoClear` 为 true，且不在 `dryRun` 中（第 8 节）；
+3. 配置：不在 `dryRun` 中；自动判定的清空还要求 `autoClear` 为 true（第 8 节）。`autoClear` 只约束自动清空：`boot.force('FRESH_START')` 本身就是人工确认，不受它约束，否则 `autoClear` 关闭时 b′ 的"经确认后再清空"只能改设置重新部署；
 4. 顺序：本 kernel 实例的普通模块已 setup 时，先 `port.softReset()`，新实例重新判定后再备份与清空（11.4 附加规则 1，kernel 以前置条件强制）。
+
+Memory 版本高于代码（OURS_NEWER，11.4 e）时禁止清空，人工指定 `FRESH_START` 也不例外：改判 AMBIGUOUS 并说明原因，不调用备份与清空。这种 Memory 通常来自回滚前的新版本，应由新版本按两步迁移处理（13.3）。
 
 清空在同一 tick 依次执行 `clearMemory()`、`clearInterShard()`，再写入项目标记（第 7 节）。
 
 清空尚待执行（中证据等待确认、软重置、备份进行中）时不写项目标记的任何字段，下一 tick 继续完整判定。重生的证据正是"spawn 不在指纹中、`lastRun` 早于放置"，若在新实例或下一次判定读到之前更新 `lastRun` 与 `fp`，判定会改为 NORMAL（附录 C 用例 15）。
 
-清空被前置条件 2 或 3 拦下时，判为 AMBIGUOUS（中）并照常写入 `mode`。若 Memory 属于本系统（重生 c、c′ 或人工指定），`lastRun` 与 `fp` 冻结到下一次完整判定：照常维护会让之后的判定落入 11.4 d 判为 NORMAL，等于绕过 `autoClear` 认领上一局的 Memory。冻结状态保存在 heap，global reset 后首个 tick 的完整判定按事实重新得出：W 仍成立时再次拦下并冻结，W 不再成立时由第 4.3 节的"保持 AMBIGUOUS"等待人工确认。
+清空被前置条件 2 或 3 拦下时，判为 AMBIGUOUS（中）并照常写入 `mode`。若 Memory 属于本系统（重生 c、c′ 或人工指定），`lastRun` 与 `fp` 冻结到下一次完整判定：照常维护会让之后的判定落入 11.4 d 判为 NORMAL，等于绕过 `autoClear` 认领上一局的 Memory。`release` 不是证据，照常写入。冻结状态保存在 heap，global reset 后首个 tick 的完整判定按事实重新得出：W 仍成立时再次拦下并冻结，W 不再成立时由第 4.3 节的"保持 AMBIGUOUS"等待人工确认。
 
 ### 6.2 其他操作
 
@@ -148,8 +150,9 @@ interface Verdict {
 | `epoch`、`sig`、`schema`、`shard` | 由 bootPort 在初始化与清空时生成，boot 不写 |
 
 - 模式为 RECOVERY 时不更新 `fp`：指纹保留损失前的资产，作为恢复的比较基准；资产恢复到指纹的一半以上后判为 NORMAL，再恢复更新。
+- 模式为 AMBIGUOUS 时不更新 `fp`：资产归属尚未经人工确认，指纹保持最后一次确认时的内容（第 4.2 节）。
 - `fp` 在每次完整判定之后更新，资产逐步减少时基准随之下调，RECOVERY 只识别相对上一次判定的大幅损失。
-- 清空尚待执行时不写任何字段；本系统 Memory 的清空被闸门拦下后不写 `lastRun` 与 `fp`（第 6.1 节）；开局世界中本系统 Memory 判为 AMBIGUOUS 后不写 `fp`（第 4.2 节）。
+- 清空尚待执行时不写任何字段；本系统 Memory 的清空被闸门拦下后不写 `lastRun` 与 `fp`，`release` 照常写（第 6.1 节）。
 - `lastRun` 每 tick 写入使 `sys` 每 tick 变脏，每 tick 编码一次项目标记（约 200 个字符）并拼接根文本。M2 起业务数据本来就几乎每 tick 变化，额外成本只有标记的编码。
 - `fp.rooms` 为本方 controller 所在的房间名，`fp.spawnIds` 为本方 spawn 的 id，`fp.creepCount` 为 creep 数。
 
@@ -159,7 +162,7 @@ interface Verdict {
 
 ```ts
 interface BootSettings {
-  readonly autoClear: boolean;   // 11.8 的 boot.autoClear；默认 true（2026-10-20 用户预先批准）
+  readonly autoClear: boolean;   // 11.8 的 boot.autoClear：是否允许自动判定的清空；默认 true（2026-10-20 用户预先批准）
   readonly dryRun: boolean;      // 部署到新环境前先设为 true，观察判定结果；默认 false
 }
 ```
@@ -169,8 +172,8 @@ interface BootSettings {
 | 命令 | 作用 |
 | --- | --- |
 | `boot.assess()` | 读取当前事实完整判定一次，返回模式、强度、情形与证据，不执行、不发布 |
-| `boot.force(mode)` | 人工指定模式（强证据），下一 tick 生效：发布该模式并按第 6 节执行；`boot.force()` 取消。指定保存在 boot 的分区 `part.boot.control` 中，跨 global reset 保留；Memory 不可用时只在 heap 中保留 |
-| `boot.dryRun` | 读写设置，覆盖 `BootSettings.dryRun`，只存于 heap |
+| `boot.force(mode)` | 人工指定模式（强证据），下一 tick 生效：发布该模式并按第 6 节执行（不受 `autoClear` 约束，OURS_NEWER 时仍禁止清空）；`boot.force()` 取消。指定保存在 boot 的分区 `part.boot.control` 中，跨 global reset 保留；Memory 不可用时只在 heap 中保留 |
+| `boot.dryRun` | 读写设置，覆盖 `BootSettings.dryRun`，只存于 heap；修改后下一 tick 重新完整判定，关闭时随即按第 6 节执行判定的动作。软重置与 global reset 后回到设置中的值 |
 
 ## 9. 装配
 
@@ -190,7 +193,7 @@ app.assembly 以 `createBoot({ identity, release, settings, time, facts, counts,
 
 ## 11. 验证
 
-- **单元测试**：附录 C 用例 1–6、14–16 按原期望；用例 7–13 在 M1 按第 4.3 节期望 AMBIGUOUS；第 3.1 节的两种情形；闸门的每个前置条件（中证据一次不清空、备份 pending 与 failed、`autoClear` 关闭、dryRun、已 setup 时先软重置）；本系统 Memory 的清空被拦下后冻结 `lastRun` 与 `fp`、重建后仍判为 AMBIGUOUS；c′ 判为 AMBIGUOUS 后不写 `fp`、`lastRun` 照常前进，重建后仍为 AMBIGUOUS；廉价不变量的突变阈值；项目标记各字段的写入时机；模式变化的通知只发一次；控制台命令。
+- **单元测试**：附录 C 用例 1–6、14–16 按原期望；用例 7–13 在 M1 按第 4.3 节期望 AMBIGUOUS；第 3.1 节的两种情形；闸门的每个前置条件（中证据一次不清空、备份 pending 与 failed、`autoClear` 关闭、dryRun、已 setup 时先软重置）；本系统 Memory 的清空被拦下后冻结 `lastRun` 与 `fp`、重建后仍判为 AMBIGUOUS；c′ 判为 AMBIGUOUS 后不写 `fp`、`lastRun` 照常前进，重建后及世界离开又回到开局状态后仍为 AMBIGUOUS；冻结期间照常写 `release`；关闭 dryRun 后下一 tick 重新判定且不覆盖重生证据；OURS_NEWER 时人工指定不清空，`autoClear` 关闭时人工确认仍可清空；廉价不变量的突变阈值；项目标记各字段的写入时机；模式变化的通知只发一次；控制台命令。
 - **私服场景**（bootPort 设计第 7 节、13.2）：
   - kernel-smoke：放置 spawn 后判为 FRESH_START 并初始化（M1 验收标准第 1 条）；已初始化存储在证据不足时判为 AMBIGUOUS、不清空；
   - boot-judgment：外来 Memory 的开局判为 b′ 并初始化，经 `boot.force('FRESH_START')` 确认后软重置、备份、回读并清空；有资产而 Memory 为空时判为 AMBIGUOUS 并初始化；
