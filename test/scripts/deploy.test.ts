@@ -2,7 +2,7 @@
  * 文件摘要：部署工具（scripts/deploy/lib.ts 与 api.ts）的单元测试。
  * 覆盖参数解析、账户选择与校验（含令牌不外泄）、分支名与版本分支规则、模块表整理、
  * 上传规划、按本机切换历史选择回滚目标（审计 PA-13）、分支删除的前置检查（PA-20），
- * 以及 API 客户端的请求形状与失败处理（fetch 以假实现替换，不访问网络）。
+ * 以及 API 客户端的请求形状与失败处理，含 inspector 使用的 Memory 与 segment 只读请求（fetch 以假实现替换，不访问网络）。
  */
 import { createApi } from '../../scripts/deploy/api';
 import {
@@ -242,6 +242,19 @@ describe('createApi', () => {
     expect(calls[0].url).toBe('https://screeps.com/api/user/branches');
     expect((calls[0].init.headers as Record<string, string>)['X-Token']).toBe(TOKEN);
     expect(calls[0].url).not.toContain(TOKEN);
+  });
+  test('inspector 的只读请求：Memory 与 segment 都是 GET，查询参数按需附带，返回 data 字段原样', async () => {
+    const api = createApi(account, fakeFetch({ ok: 1, data: 'gz:AAAA' }));
+    expect(await api.getMemory('leviathan.sys', 'shard3')).toBe('gz:AAAA');
+    expect(await api.getMemory()).toBe('gz:AAAA');
+    expect(await api.getSegment(80)).toBe('gz:AAAA');
+    expect(calls.map(({ url, init }) => `${init.method} ${url}`)).toEqual([
+      'GET https://screeps.com/api/user/memory?path=leviathan.sys&shard=shard3',
+      'GET https://screeps.com/api/user/memory',
+      'GET https://screeps.com/api/user/memory-segment?segment=80',
+    ]);
+    expect(calls.every(({ url, init }) => init.body === undefined && !url.includes(TOKEN))).toBe(true);
+    expect(await createApi(account, fakeFetch({ ok: 1 })).getMemory('missing')).toBeUndefined();
   });
   test('上传、新建分支、切换生效分支与删除分支的请求体', async () => {
     const api = createApi(account, fakeFetch({ ok: 1 }));

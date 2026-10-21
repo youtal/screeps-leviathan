@@ -1,5 +1,6 @@
 /**
- * 文件摘要：Screeps 代码分支 API 的客户端，供 cli.ts 使用。
+ * 文件摘要：Screeps 网页 API 的客户端：代码分支接口供部署工具（cli.ts）使用，Memory 与 segment 的只读接口供
+ * inspector（scripts/inspector/）使用。
  *
  * 所属位置：scripts/deploy/，开发工具，不进入游戏构建产物。
  * 封装的接口（均以 X-Token 请求头鉴权）：
@@ -8,7 +9,11 @@
  * - POST /api/user/code：覆盖已存在分支的代码（分支不存在时服务器报错）；
  * - POST /api/user/clone-branch：以给定模块新建分支（服务器限制每个账户的分支数量）；
  * - POST /api/user/set-active-branch：切换世界（activeWorld）的生效分支；
- * - POST /api/user/delete-branch：删除分支（服务器对生效分支静默不删、仍返回成功，调用方须先检查并回读确认）。
+ * - POST /api/user/delete-branch：删除分支（服务器对生效分支静默不删、仍返回成功，调用方须先检查并回读确认）；
+ * - GET  /api/user/memory?path=&shard=：读取 Memory（只读）；
+ * - GET  /api/user/memory-segment?segment=&shard=：读取一页 segment（只读）。
+ * Memory 与 segment 接口的行为依据 @screeps/backend 3.3.0 的 lib/game/api/user.js：成功响应由 q-json-response 包装为
+ * `{ ok: 1, ...结果 }`。官服实现未开源，这两个接口在官服上的响应形状尚未核实（计划在官服非生效分支验证时以只读请求核实）。
  * 副作用：发起真实网络请求。fetch 由调用方注入，测试中替换为假实现。
  * 令牌只放在请求头中，不出现在 URL、日志或错误消息里。
  */
@@ -63,6 +68,23 @@ export interface ScreepsApi {
    * @throws {Error} 请求失败、超时、响应不是 JSON 或 ok !== 1。
    */
   deleteBranch(branch: string): Promise<void>;
+  /**
+   * @description 读取 Memory（GET /api/user/memory），只读。服务器先对存储的文本执行 JSON.parse，再按点分路径逐段取值。
+   * @param path 点分路径，例如 `leviathan.sys`；省略时读取整个 Memory。键本身含 `.` 时无法表达。
+   * @param shard 官服的 shard 名；省略时不附带该参数（私服后端忽略它）。
+   * @returns 响应的 data 字段原样：`'gz:' + base64(gzip(JSON))`；路径不存在时为 undefined；
+   * 文本无法解析或中间路径缺失时为 `'Incorrect memory path'`。由 inspector 的 lib.ts 解码。
+   * @throws {Error} 请求失败、超时、响应不是 JSON 或 ok !== 1。
+   */
+  getMemory(path?: string, shard?: string): Promise<unknown>;
+  /**
+   * @description 读取一页 segment（GET /api/user/memory-segment），只读。
+   * @param id 页号 0–99。
+   * @param shard 官服的 shard 名；省略时不附带该参数。
+   * @returns 响应的 data 字段原样：页的原始文本；从未写过的页为空串或 null。
+   * @throws {Error} 请求失败、超时、响应不是 JSON 或 ok !== 1（页号非法时服务器返回错误）。
+   */
+  getSegment(id: number, shard?: string): Promise<unknown>;
 }
 
 /**
@@ -188,6 +210,31 @@ export const createApi = (account: Account, fetchImpl: typeof fetch = fetch, tim
      */
     async deleteBranch(branch) {
       await request('POST', '/delete-branch', { body: { branch } });
+    },
+    /**
+     * @description 读取 Memory，返回 data 字段原样。
+     * @param path 点分路径；省略时读取整个 Memory。
+     * @param shard shard 名；省略时不附带。
+     * @returns data 字段。
+     * @throws {Error} 请求失败。
+     */
+    async getMemory(path, shard) {
+      const query: Record<string, string> = {};
+      if (path !== undefined) query.path = path;
+      if (shard !== undefined) query.shard = shard;
+      return (await request('GET', '/memory', { query })).data;
+    },
+    /**
+     * @description 读取一页 segment，返回 data 字段原样。
+     * @param id 页号。
+     * @param shard shard 名；省略时不附带。
+     * @returns data 字段。
+     * @throws {Error} 请求失败。
+     */
+    async getSegment(id, shard) {
+      const query: Record<string, string> = { segment: String(id) };
+      if (shard !== undefined) query.shard = shard;
+      return (await request('GET', '/memory-segment', { query })).data;
     },
   };
 };

@@ -35,8 +35,8 @@ import {
   serverOrigin,
   versionBranch,
 } from './lib.ts';
+import { readSecret } from './secret.ts';
 
-const SECRET_FILE = '.secret.json';
 /** 本机的生效切换历史：{ [账户名@服务器地址]: 切换记录数组 }，不进入版本控制。 */
 const HISTORY_FILE = '.deploy-history.json';
 const MAIN_FILE = 'dist/main.js';
@@ -49,22 +49,6 @@ const MAP_FILE = 'dist/main.js.map';
  * @throws {Error} git 以非零状态退出。
  */
 const git = (...args: string[]): string => execFileSync('git', args, { encoding: 'utf8' }).trim();
-
-/**
- * @description 读取并解析当前目录的 .secret.json；内容可能含令牌，只在内存中使用，不输出。
- * @returns 解析后的 JSON 值，交给 lib.ts 校验。
- * @throws {Error} 文件不存在或不是合法 JSON（消息不包含文件内容）。
- */
-const readSecret = (): unknown => {
-  if (!existsSync(SECRET_FILE)) {
-    throw new Error(`未找到 ${SECRET_FILE}；参照 .secret.json.example 创建`);
-  }
-  try {
-    return JSON.parse(readFileSync(SECRET_FILE, 'utf8'));
-  } catch {
-    throw new Error(`${SECRET_FILE} 不是合法的 JSON`);
-  }
-};
 
 /**
  * @description 读取部署历史文件；文件不存在时为空对象。
