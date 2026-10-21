@@ -10,7 +10,8 @@
  * 暂停 tick（boot 的备份尚未完成或登记了软重置）同样跳过 setup 与业务钩子，但照常提交，返回 paused，
  * 使开局判定与清空之间没有业务动作改变证据（docs/design/kernel/bootPort.md 第 3 节）。
  * CPU（docs/design/kernel/cpu.md）：准入在本 tick 内固定，只有被准入的进程运行；阶段循环在相邻钩子之间只读一次
- * Game.cpu.getUsed()，前一个钩子的结束读数就是后一个的开始读数；读数到达 hardEnd 后跳过剩余的非生存层钩子（紧急刹车）。
+ * Game.cpu.getUsed()，前一个钩子的结束读数就是后一个的开始读数；读数到达 hardEnd 后跳过剩余的非生存层钩子（紧急刹车），
+ * 被跳过的进程经 cpu.brake 改记为落选，不记样本、连续落选次数加 1。
  * 错误边界：每次钩子调用独立 try/catch；连续失败 BREAKER_THRESHOLD 次熔断，同一进程失败只记录到熔断为止；
  * setup 失败或清单校验被拒绝即初始化失败，本 global 不重试。熔断、初始化失败或运维暂停的模块，
  * 连同经 requires 依赖它的模块一同暂停。
@@ -319,9 +320,12 @@ export const createKernel = (options: KernelOptions): Kernel => {
         if (!runtime.runnable) continue;
         const survival = runtime.tier === 'survival';
         if (runtime.verdict === VERDICT_ADMIT) {
-          if (!survival && brake(last)) continue;
           const hook = runtime.hooks?.[name];
-          if (hook) {
+          // 被刹车跳过的进程改记为落选（ultrareview 第 3 项）：不记样本、不计准入，下一 tick 优先；
+          // 它的实例随后在实例循环中逐个跳过并记录。
+          if (hook && !survival && brake(last)) {
+            cpu.brake(runtime);
+          } else if (hook) {
             guarded(runtime, `${runtime.def.id}.${name}`, hook, runtime.hooks);
             runtime.ctx.measure.end(name, last);
             const now = game.cpuUsed();
@@ -338,7 +342,7 @@ export const createKernel = (options: KernelOptions): Kernel => {
           const instanceHook = record.hooks[name];
           if (!instanceHook || record.broken || record.since >= phase) continue;
           if (record.verdict !== VERDICT_ADMIT && record.verdict !== VERDICT_NONE) continue;
-          if (!survival && brake(last)) break;
+          if (!survival && brake(last)) { cpu.brake(record); continue; }
           guarded(record, `${record.key}.${name}`, instanceHook, record.hooks);
           record.measure?.end(name, last);
           const now = game.cpuUsed();

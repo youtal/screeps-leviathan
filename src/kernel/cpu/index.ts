@@ -3,7 +3,8 @@
  *
  * 所属位置：src/kernel/cpu/，kernel 内部模块，只由 kernel.lifecycle 与 kernel.context 使用。
  * 每 tick 流程：beginTick 计算预算 B、收尾预留 R 与两个读数上限 → 普通模块 setup 之后 admit 对全部进程判定一次
- * （准入、空闲、落选），结果在本 tick 内固定 → 阶段循环由 lifecycle 在钩子之间读数，把耗用累加到进程的 spent →
+ * （准入、空闲、落选），结果在本 tick 内固定，只有被紧急刹车跳过的进程由 brake 改记为落选（ultrareview 第 3 项）→
+ * 阶段循环由 lifecycle 在钩子之间读数，把耗用累加到进程的 spent →
  * settle 用本 tick 样本更新平滑耗用并汇总各层耗用。
  * 判定（judge）先递归判定进程的所属模块与 requires 依赖：落选者排在前面时，依赖可能尚未判定（审计 LC-02）。
  * 依赖"空闲"（层条件不满足）不阻挡依赖方，"落选"才阻挡。因预算落选时把预计值乘以 1 − α，
@@ -22,6 +23,14 @@ export const BUCKET_DRAIN = 1000;
 export const PLANNING_BUCKET = 1500;
 /** 维护层进程的执行周期（tick），按进程键错峰。 */
 export const MAINTENANCE_PERIOD = 10;
+
+/**
+ * @description 维护层进程的错峰相位：进程键的稳定哈希对 MAINTENANCE_PERIOD 取模。进程键不变，节点在构造时算一次，
+ * 准入时不再逐 tick 重算哈希（ultrareview 第 8 项）；hashString 非负，(time + 相位) 与 (time + 哈希) 对周期同余。
+ * @param key 进程键。
+ * @returns 0 到 MAINTENANCE_PERIOD − 1 的整数；`(Game.time + 相位) % MAINTENANCE_PERIOD === 0` 的 tick 满足维护层的层条件。
+ */
+export const maintenancePhase = (key: string): number => hashString(key) % MAINTENANCE_PERIOD;
 /** 平滑系数：每个新样本的权重。 */
 export const CPU_EMA_ALPHA = 0.2;
 /** 收尾预留占 B 的比例与下限（附录 B）。 */
@@ -69,8 +78,10 @@ export interface CpuPort {
  * 计量字段只由 kernel.cpu 与 lifecycle 修改。
  */
 export interface CpuNode {
-  /** 进程键：模块为模块 id，实例为 `<模块 id>:<实例键>`；用于维护层错峰。 */
+  /** 进程键：模块为模块 id，实例为 `<模块 id>:<实例键>`。 */
   readonly key: string;
+  /** 维护层的错峰相位，构造时取 maintenancePhase(key)，之后不变；其他层不使用。 */
+  readonly phase: number;
   readonly tier: Tier;
   /** 实例的所属模块；模块为 undefined。 */
   readonly owner: CpuNode | undefined;
@@ -119,7 +130,16 @@ export interface CpuHost {
    */
   admit(nodes: readonly CpuNode[]): void;
   /**
+   * @description 阶段执行中，紧急刹车跳过了一个本 tick 被准入的进程（或本 tick 新增、按预热运行的实例）：
+   * 改记为落选，本 tick 不记样本、不计准入，连续落选次数加 1，下一 tick 优先判定；预计值不衰减，
+   * 放不下的是本 tick 的整体读数而不是它自己（ultrareview 第 3 项，cpu.md 第 3.2 节"紧急刹车"）。同一 tick 重复调用只计一次。
+   * @param node 被跳过的进程。
+   * @returns 无返回值；修改节点的 verdict 与 starve。
+   */
+  brake(node: CpuNode): void;
+  /**
    * @description tick 收尾：以本 tick 的 spent 更新被准入进程的平滑耗用，汇总各层耗用，清零 spent。
+   * 各层耗用按全部进程的 spent 累加，包括已运行部分阶段后被刹车跳过的进程；样本只取自被准入并运行完的进程。
    * @param nodes 与 admit 相同的进程集合。
    * @returns 无返回值。
    */
@@ -196,7 +216,7 @@ export const createCpu = (port: CpuPort): CpuHost => {
    * @returns 满足时为 true；不满足时本 tick 空闲。
    */
   const layerOk = (node: CpuNode): boolean => {
-    if (node.tier === 'maintenance') return (time + hashString(node.key)) % MAINTENANCE_PERIOD === 0;
+    if (node.tier === 'maintenance') return (time + node.phase) % MAINTENANCE_PERIOD === 0;
     if (node.tier === 'planning') return bucket >= PLANNING_BUCKET;
     return true;
   };
@@ -280,6 +300,16 @@ export const createCpu = (port: CpuPort): CpuHost => {
       }
     },
     /**
+     * @description 记录被紧急刹车跳过的进程，语义见 CpuHost.brake。
+     * @param node 被跳过的进程。
+     * @returns 无返回值。
+     */
+    brake(node) {
+      if (node.verdict === VERDICT_REJECT) return;
+      node.verdict = VERDICT_REJECT;
+      node.starve += 1;
+    },
+    /**
      * @description 更新平滑耗用并汇总，语义见 CpuHost.settle。
      * @param nodes 全部进程。
      * @returns 无返回值。
@@ -289,12 +319,12 @@ export const createCpu = (port: CpuPort): CpuHost => {
       let admitted = 0;
       let rejected = 0;
       for (const node of nodes) {
+        tiers[node.tier] += node.spent;
         if (node.verdict === VERDICT_ADMIT) {
           admitted += 1;
           const sample = node.spent;
           node.cost = node.sampled ? node.cost + CPU_EMA_ALPHA * (sample - node.cost) : sample;
           node.sampled = true;
-          tiers[node.tier] += sample;
         } else if (node.verdict === VERDICT_REJECT) {
           rejected += 1;
         }

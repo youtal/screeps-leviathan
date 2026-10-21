@@ -85,14 +85,19 @@ const readHistoryFile = (): Record<string, unknown> => {
 /**
  * @description 切换世界的生效分支，然后重新读取分支列表，确认服务器上的生效分支确实已变更；
  * 确认后把这次切换追加到本机的部署历史。切换前的生效分支在切换前读取，首次切换也能记下账户原有的分支。
+ * 部署历史在切换之前读取并校验（ultrareview 第 4 项）：文件损坏时在改变服务器之前失败，不会出现线上已切换、
+ * 命令却报错且没有记录的情况。
  * @param api 绑定目标账户的客户端。
  * @param account 目标账户，用于定位部署历史。
  * @param branch 要切换到的分支名。
  * @param rollback 是否为 rollback 命令的切换。
  * @returns 无返回值；成功时输出切换结果并写部署历史。
- * @throws {Error} 请求失败，或切换后生效分支与目标不一致。
+ * @throws {Error} 部署历史不合法（切换前），请求失败，或切换后生效分支与目标不一致。
  */
 const activateAndConfirm = async (api: ScreepsApi, account: Account, branch: string, rollback: boolean): Promise<void> => {
+  const file = readHistoryFile();
+  const key = historyKey(account);
+  const history = accountHistory(file, key);
   const before = activeWorldBranch(await api.listBranches());
   await api.setActiveWorld(branch);
   const active = activeWorldBranch(await api.listBranches());
@@ -100,9 +105,7 @@ const activateAndConfirm = async (api: ScreepsApi, account: Account, branch: str
     throw new Error(`切换后生效分支为 ${active ?? '（无）'}，不是 ${branch}`);
   }
   console.log(`生效分支已切换为 ${branch}`);
-  const file = readHistoryFile();
-  const key = historyKey(account);
-  file[key] = appendActivation(accountHistory(file, key), { time: new Date().toISOString(), from: before, to: branch, rollback });
+  file[key] = appendActivation(history, { time: new Date().toISOString(), from: before, to: branch, rollback });
   writeFileSync(HISTORY_FILE, `${JSON.stringify(file, null, 2)}\n`);
 };
 

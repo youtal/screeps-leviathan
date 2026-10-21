@@ -180,6 +180,18 @@ describe('rollbackTarget', () => {
   test('期间在工具之外切换过时，生效栈从下一次记录的切换重新开始', () => {
     expect(activeStack([switched('a', 'b'), switched('x', 'y')])).toEqual(['x', 'y']);
   });
+  test('ultrareview 第 1 项：重新激活当前生效分支不入栈，回滚仍回到上一个不同的分支，删除保护仍指向它', () => {
+    const history = [switched('default', 'v0.1.13'), switched('v0.1.13', 'v0.1.14'), switched('v0.1.14', 'v0.1.14')];
+    expect(activeStack(history)).toEqual(['default', 'v0.1.13', 'v0.1.14']);
+    const list = server(['default', 'v0.1.13', 'v0.1.14'], 'v0.1.14');
+    expect(rollbackTarget(history, list)).toEqual({ from: 'v0.1.14', to: 'v0.1.13' });
+    expect(deleteBranchProblem(list, history, 'v0.1.13')).toContain('回滚目标');
+  });
+  test('ultrareview 第 5 项：配对的切换已被截断的回滚记录不把被回滚掉的分支当作回滚目标', () => {
+    const history = [switched('v0.1.20', 'v0.1.19', true), switched('v0.1.19', 'v0.1.21'), switched('v0.1.21', 'v0.1.19', true)];
+    expect(activeStack(history)).toEqual(['v0.1.19']);
+    expect(() => rollbackTarget(history, server(['v0.1.19', 'v0.1.20', 'v0.1.21'], 'v0.1.19'))).toThrow('没有早于');
+  });
 });
 
 describe('部署历史', () => {
