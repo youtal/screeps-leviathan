@@ -26,6 +26,8 @@ interface ErrorMapper {
 
 - **数据来源**：部署工具把 source map 上传为模块 `main.js.map`（`module.exports = {...}`，已去掉 `sourcesContent`）。装配方注入加载函数，游戏中为 `require('main.js.map')`。加载失败（模拟器、测试或未上传映射）时只输出原始堆栈。
 - **帧格式**：只处理位置为 `main:<行>:<列>` 的帧，其余帧原样保留。映射后的格式为 `at <函数名> (<源文件>:<行>:<列>)`，源文件路径规范为相对仓库根目录的 `src/...`。
+  - 平台事实：driver 以 `{filename: 模块名}` 编译每个模块，帧中的文件名因此为 `main`；编译前在模块代码第 1 行之前拼接 `(function __module(module,exports){ `（36 个字符，不换行），第 1 行的列号随之偏移，第 2 行起不受影响（driver 5.3.0 的 `lib/runtime/runtime-driver.js` 的 `evalCode`）。映射不校正这一偏移，构建产物的第 1 行只有 `'use strict';`，由私服场景检查。
+  - 运行时自身的帧（例如 `__mainLoop:1:52`、`<runtime>:…`）不在 main 模块中，原样保留。
 - **解码**：首次需要映射时，按 Source Map v3 规则解码一次 `mappings`（Base64 VLQ 相对编码：生成列在每个 `;` 处归零，只在同一生成行内累加；源文件索引、原始行、原始列与名称索引跨行延续累加），每个生成行保存为按生成列排序的紧凑整数数组，之后按列二分查找。解码成本与 `mappings` 长度成正比，每个 global 至多一次；解码失败时本 global 内不再尝试。
 - **CPU 保护**：
   - bucket 低于 `ERROR_MAP_BUCKET`（默认 1000），或本 tick 剩余 CPU 低于收尾预留时，不解码、不映射，输出原始堆栈并注明"未映射"。收尾预留与 [cpu](./cpu.md) 共用 `RESERVE_MIN` 与 `RESERVE_RATIO`，但以 `Game.cpu.limit` 为基数：errorMapper 也在 kernel 之外（入口、保底循环）格式化异常，那时没有本 tick 的预算 B；两者只在 bucket 偏离目标时略有差异，影响的只是是否映射；
@@ -43,4 +45,4 @@ interface ErrorMapper {
 - 映射不可用或 bucket 不足时退回原始堆栈；
 - 缓存命中时不重复解码。
 
-真实堆栈格式在私服场景中复核。
+私服场景 error-mapping 在真实运行时中复核：同一加载错误先在 bucket 不足时输出原始堆栈，再在新的 global 中经 `require('main.js.map')` 映射。场景以独立实现的 Source Map v3 解码换算原始帧，逐帧与映射结果比对；原始帧在实际运行的产物文本中，首帧指向 `new Error(`，其余帧指向函数调用；没有映射数据的帧保持原样；产物第 1 行没有可执行代码。
