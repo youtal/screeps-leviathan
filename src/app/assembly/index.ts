@@ -45,13 +45,15 @@ export interface GameServices {
 
 /**
  * @description 选择日志输出端。官服的 console.log 会把内容整体转成 HTML 实体，彩色前缀会显示为标签原文；
- * console.logUnsafe 原样下发，由客户端渲染。存在 logUnsafe 时用它并允许上色，否则用 console.log 且不上色。
- * 只输出 logger 拼出的行：作用域与正文已在 logger 出口转义，HTML 只来自 logger 自己的前缀。
- * @returns 输出端，以及它能否渲染 HTML。
+ * console.logUnsafe 原样下发，由客户端按 HTML 渲染。要上色且存在 logUnsafe 时用它，否则用 console.log 且不上色。
+ * logger 只在上色时转义作用域与正文，所以不上色时不能用 logUnsafe：未转义的正文与堆栈（可能含外来名称）会被当作 HTML
+ * 渲染（审计 S-22）；不上色时交给 console.log，由平台编码。上色时 HTML 只来自 logger 自己的前缀。
+ * @param color 使用者设置是否要求上色（loggerSettings.color）。
+ * @returns 输出端，以及它是否渲染 HTML（为 true 时 logger 上色并转义）。
  */
-export const consoleSink = (): { readonly sink: LogSink; readonly html: boolean } => {
+export const consoleSink = (color: boolean): { readonly sink: LogSink; readonly html: boolean } => {
   const unsafe = console.logUnsafe;
-  if (typeof unsafe === 'function') {
+  if (color && typeof unsafe === 'function') {
     return {
       /**
        * @description 经 console.logUnsafe 输出一行，内容按 HTML 渲染。
@@ -139,7 +141,7 @@ export const createGameServices = (): GameServices => {
      */
     remaining: () => game.tickLimit() - game.cpuUsed() - Math.max(RESERVE_MIN, game.limit() * RESERVE_RATIO),
   });
-  const output = consoleSink();
+  const output = consoleSink(loggerSettings.color);
   const logRoot = createLogRoot({
     sink: output.sink,
     time: game.time,
@@ -150,7 +152,7 @@ export const createGameServices = (): GameServices => {
      */
     format: (error) => errors.format(error),
     levels: loggerSettings.levels,
-    color: output.html && loggerSettings.color,
+    color: output.html,
   });
   return { game, logRoot };
 };

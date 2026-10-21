@@ -3,7 +3,8 @@
  * 覆盖：开局初始化（11.4 a）；外来 Memory 的备份与清空（b）；运行中途重生先软重置、新实例再备份清空（附录 C 用例 15）；
  * 中证据须两次判定一致（c′）；dryRun；autoClear 关闭与备份失败时改判 AMBIGUOUS；M1 接手分支初始化后保持 AMBIGUOUS、
  * boot.force 的生效与跨重建保留；廉价不变量；项目标记的维护（lastRun、release、fp 与 RECOVERY 时不更新）；
- * 模式变化只通知一次；控制台命令；审计 DV-01、DV-02、DV-03、DV-10 的回归。
+ * 模式变化只通知一次；控制台命令；审计 DV-01、DV-02、DV-03、DV-10 的回归；审计 S-07–S-11 与附录 X-01 的回归
+ * （tick 断档、冻结持久化、一次性人工指定、软重置不重复通知、读回的人工指定校验，以及中证据闸门与突变阈值）。
  */
 import { type BootFacts, createBoot } from '@/app/boot';
 import type { BootDefinition } from '@/contracts/boot';
@@ -302,7 +303,7 @@ test('control 分区申请失败：异常传播为 boot 失败，boot.force 返�
   expect(boot.force('NORMAL')).toContain('分区声明冲突');
 });
 
-test('M1 接手分支：有资产而 Memory 为空 → AMBIGUOUS 并初始化；重建后保持，boot.force 生效并跨重建保留，取消后恢复自动判定', () => {
+test('M1 接手分支：有资产而 Memory 为空 → AMBIGUOUS 并初始化；重建后保持；boot.force 只作用于下一次判定，之后恢复自动判定（审计 S-09）', () => {
   const b = bootHarness({ world: RUNNING });
   b.step();
   expect(b.sys().mode).toMatchObject({ mode: 'AMBIGUOUS', strength: 'medium' });
@@ -316,11 +317,10 @@ test('M1 接手分支：有资产而 Memory 为空 → AMBIGUOUS 并初始化；
   boot.force('NORMAL');
   b.step();
   expect(b.sys().mode).toMatchObject({ mode: 'NORMAL', strength: 'strong' });
-  expect(JSON.parse(b.h.platform.memory).leviathan.part.boot.control.data.force).toBe('NORMAL');
-  b.h.rebuild();
-  b.step();
   expect(b.sys().mode.evidence).toContain('人工指定（boot.force）');
-  (b.h.globals.boot as { force: () => string }).force();
+  // 采用后清除：之后的判定按自动规则进行，确认一步完成，不需要再 boot.force() 取消。
+  expect(JSON.parse(b.h.platform.memory).leviathan.part.boot.control.data.force).toBeNull();
+  b.h.rebuild();
   b.step();
   expect(b.sys().mode).toMatchObject({ mode: 'NORMAL' });
   expect(b.sys().mode.evidence).not.toContain('人工指定（boot.force）');
@@ -376,4 +376,155 @@ test('控制台：boot.assess() 只判定不发布；boot.dryRun 读写设置，
   boot.dryRun = 'yes';
   expect(boot.dryRun).toBe(true);
   expect(b.h.lines.some((l) => l.includes('boot.dryRun 写入被拒绝'))).toBe(true);
+});
+
+/** 已运行的本系统 Memory：指纹中有房间 W1N1 的 spawn s0。 */
+const OURS_MEMORY = READY_MEMORY.replace('"rooms":[]', '"rooms":["W1N1"]').replace('"spawnIds":[]', '"spawnIds":["s0"]');
+
+describe('审计 S-07：tick 断档时完整判定', () => {
+  test('同一实例中 tick 不连续时完整判定一次；相邻 tick 不判定', () => {
+    const b = bootHarness({ memory: OURS_MEMORY, world: RUNNING });
+    b.step(); b.step(); b.step();
+    expect(b.state.factReads).toBe(1);
+    b.state.t += 5;
+    b.step();
+    expect(b.state.factReads).toBe(2);
+    b.step();
+    expect(b.state.factReads).toBe(2);
+  });
+
+  test('M1 稳态下同一 global 中重生、三个数量都不变：断档触发完整判定，登记软重置，不覆盖 lastRun', () => {
+    const b = bootHarness({ memory: OURS_MEMORY, world: opening(undefined, 's0', 'W1N1') });
+    b.step(); b.step();
+    expect(b.sys()).toMatchObject({ lastRun: 2, mode: { mode: 'NORMAL' } });
+    // 玩家没有对象的期间代码不运行；重新放置的 spawn 与旧局的数量相同（1 个 spawn、2 个建筑、0 个 creep）。
+    b.state.t = 60;
+    b.state.world = opening(19990, 's9', 'W5N5');
+    expect(b.step()).toBe('paused');
+    expect(b.h.kernel.resetRequested()).toBe(true);
+    expect(b.sys().lastRun).toBe(2);
+  });
+});
+
+describe('审计 S-08：冻结持久化', () => {
+  /**
+   * @description 开局世界中 creep 数为 n 的事实：新 spawn s9 在 W5N5，safe mode 时钟表明 10 tick 前放置。
+   * @param n creep 数。
+   * @returns 事实。
+   */
+  const respawned = (n: number): BootFacts => ({ ...opening(19990, 's9', 'W5N5'), creepCount: n });
+
+  test('清空被拦下后 creep 0 → 1 → 0：lastRun 与 fp 保持冻结，不判为 NORMAL', () => {
+    const b = bootHarness({ memory: OURS_MEMORY, world: respawned(0), settings: { autoClear: false } });
+    b.state.t = 1000;
+    b.step();
+    expect(b.sys()).toMatchObject({ lastRun: 1, mode: { mode: 'AMBIGUOUS' } });
+    b.state.world = respawned(1);
+    b.step(); b.step();
+    expect(b.sys()).toMatchObject({ lastRun: 1, fp: { spawnIds: ['s0'] }, mode: { mode: 'AMBIGUOUS' } });
+    b.state.world = respawned(0);
+    b.step();
+    expect(b.sys()).toMatchObject({ lastRun: 1, fp: { spawnIds: ['s0'] }, mode: { mode: 'AMBIGUOUS' } });
+  });
+
+  test('creep 为 1 时重建实例（模拟 global reset），冻结仍从 control 分区读回', () => {
+    const b = bootHarness({ memory: OURS_MEMORY, world: respawned(0), settings: { autoClear: false } });
+    b.state.t = 1000;
+    b.step();
+    b.state.world = respawned(1);
+    b.step();
+    b.h.rebuild();
+    b.step(); b.step();
+    expect(b.sys()).toMatchObject({ lastRun: 1, mode: { mode: 'AMBIGUOUS' } });
+    expect(JSON.parse(b.h.platform.memory).leviathan.part.boot.control.data.frozen).toBe(true);
+    b.state.world = respawned(0);
+    b.step();
+    expect(b.sys()).toMatchObject({ lastRun: 1, fp: { spawnIds: ['s0'] }, mode: { mode: 'AMBIGUOUS' } });
+  });
+
+  test('人工确认 boot.force(NORMAL) 后解除冻结，lastRun 恢复写入', () => {
+    const b = bootHarness({ memory: OURS_MEMORY, world: respawned(1), settings: { autoClear: false } });
+    b.state.t = 1000;
+    b.state.world = respawned(0);
+    b.step();
+    (b.h.globals.boot as { force: (mode: string) => string }).force('NORMAL');
+    b.step();
+    expect(b.sys()).toMatchObject({ lastRun: 1002, mode: { mode: 'NORMAL' } });
+    expect(JSON.parse(b.h.platform.memory).leviathan.part.boot.control.data).toEqual({ force: null, frozen: false });
+  });
+});
+
+test('审计 S-10：运行中途重生经软重置，FRESH_START 只通知一次', () => {
+  const b = bootHarness({ memory: OURS_MEMORY, world: RUNNING });
+  run(b, 3);
+  b.state.t = 1000;
+  b.state.world = opening(19990, 's9', 'W5N5');
+  run(b, 5);
+  expect(b.sys()).toMatchObject({ epoch: 1, mode: { mode: 'FRESH_START' } });
+  expect(b.notices.filter((n) => n.includes('FRESH_START'))).toHaveLength(1);
+});
+
+describe('审计 S-11：读回的人工指定须为合法模式', () => {
+  /**
+   * @description 在本系统 Memory 中放入 control 分区。
+   * @param version 分区版本。
+   * @param data 分区数据。
+   * @returns Memory 文本。
+   */
+  const withControl = (version: number, data: object): string => {
+    const root = JSON.parse(OURS_MEMORY);
+    root.leviathan.sys.mode = { mode: 'NORMAL', strength: 'strong', since: 1, evidence: [] };
+    root.leviathan.part.boot = { control: { version, data } };
+    return JSON.stringify(root);
+  };
+
+  test.each([[1, { force: 'BOGUS' }], [2, { force: 'BOGUS', frozen: false }]])('版本 %i 的非法值按没有指定处理，sys 照常持久化', (version, data) => {
+    const b = bootHarness({ memory: withControl(version, data), world: RUNNING });
+    b.step(); b.step();
+    expect(b.sys()).toMatchObject({ lastRun: 2, mode: { mode: 'NORMAL', strength: 'strong' } });
+    expect(JSON.parse(b.h.platform.memory).leviathan.part.boot.control.data.force).toBeNull();
+  });
+
+  test('版本 1 的合法指定迁移后保留，并被下一次判定采用一次', () => {
+    const b = bootHarness({ memory: withControl(1, { force: 'RECOVERY' }), world: RUNNING });
+    b.step();
+    expect(b.sys().mode).toMatchObject({ mode: 'RECOVERY', evidence: expect.arrayContaining(['人工指定（boot.force）']) });
+    expect(JSON.parse(b.h.platform.memory).leviathan.part.boot.control).toEqual({ version: 2, data: { force: null, frozen: false } });
+  });
+});
+
+describe('附录 X-01：中证据闸门与突变阈值', () => {
+  test('中证据只判定一次时，即使备份已完成也不清空，等待下一次判定确认（最终清空见 11.4 c′ 的用例）', () => {
+    const memory = READY_MEMORY.replace('"rooms":[]', '"rooms":["W9N9"]').replace('"spawnIds":[]', '"spawnIds":["s0"]');
+    const b = bootHarness({ memory, world: opening(undefined), wrap: (def) => ({
+      /**
+       * @description 以备份立即完成的端口调用原 setup，使闸门成为唯一阻止清空的条件。
+       * @param ctx kernel 提供的 boot 上下文。
+       * @returns 原 boot 钩子。
+       */
+      setup: (ctx) => def.setup(Object.create(ctx, { port: { value: { ...ctx.port,
+        /**
+         * @description 备份立即完成。
+         * @returns done。
+         */
+        backup: () => 'done' } } })),
+    }) });
+    b.state.t = 499;
+    b.step();
+    // 去掉闸门时，备份已完成且普通模块尚未 setup，本 tick 即清空（epoch 变为 1）。
+    expect(b.sys().epoch).toBe(0);
+  });
+
+  test.each([
+    ['建筑数减少一半以上', { structCount: 2 }],
+    ['creep 数减少一半以上', { creepCount: 1 }],
+    ['建筑数归零', { structCount: 0 }],
+  ])('%s触发完整判定', (_, change) => {
+    const b = bootHarness({ memory: OURS_MEMORY, world: RUNNING });
+    b.step(); b.step();
+    expect(b.state.factReads).toBe(1);
+    b.state.world = { ...RUNNING, ...change };
+    b.step();
+    expect(b.state.factReads).toBe(2);
+  });
 });

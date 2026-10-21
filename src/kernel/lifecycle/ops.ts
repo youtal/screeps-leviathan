@@ -7,6 +7,8 @@
  * 暂停只跳过钩子（不参与准入），不释放实例、不重新 setup。
  * KernelOps 供 app.ops 使用：状态快照、修改开关、恢复熔断、取得进程的 Logger；它只调用本文件与运行记录，
  * 不向 app 暴露 kernel 的实现对象。统计页的状态快照（buildStatsSnapshot）也在这里生成，与状态快照读取同一批运行记录。
+ * 被清单拒绝的模块没有运行记录，单独以 RejectedModule 列表交给这里：状态快照与统计页把它们列为初始化失败并附原因，
+ * 启停标志不把它们的记录报成未知模块（审计 S-12）。
  * 状态：分区访问器在 Memory 首次就绪、普通模块 setup 之前取得（attach），随 kernel 实例存在；
  * 已告警的记录键保存在闭包中，每个键只告警一次。
  */
@@ -47,6 +49,16 @@ const SWITCHES_SPEC: UnitSpec<Switches> = Object.freeze({
 /** 模块的运维状态（ops.status 显示）。 */
 export type ModuleStatusState = 'pending' | 'running' | 'paused' | 'blocked' | 'broken' | 'failed';
 
+/** 被清单规划拒绝的模块（kernel.process 的 planModules）：没有运行记录，不 setup、不运行。 */
+export interface RejectedModule {
+  /** 模块 id；为空时为"（空 id）"，与规划结果的键一致。 */
+  readonly id: string;
+  /** 清单中声明的层级。 */
+  readonly tier: Tier;
+  /** 拒绝原因。 */
+  readonly reason: string;
+}
+
 /** 一个模块的状态。 */
 export interface ModuleStatus {
   readonly id: string;
@@ -61,6 +73,8 @@ export interface ModuleStatus {
   readonly starve: number;
   readonly instances: number;
   readonly brokenInstances: number;
+  /** 被清单拒绝时的原因（state 为 failed）；其他模块为 undefined。 */
+  readonly reason?: string;
 }
 
 /** kernel 的状态快照：最近一次 tick 结束时的状态。 */
@@ -86,9 +100,9 @@ export interface KernelOps {
   /**
    * @description 修改一个模块的运维覆盖，下一 tick 生效。
    * @param id 模块 id。
-   * @param value pause 或 run；undefined 清除覆盖、恢复清单默认值。
+   * @param value pause 或 run；undefined 清除覆盖、恢复清单默认值。清除接受任何 id，包括已移除、被拒绝与生存层模块的记录。
    * @returns 无返回值。
-   * @throws {Error} 未知模块、生存层模块，或 Memory 不可用（empty、加载失败、普通模块尚未 setup）。
+   * @throws {Error} 设置覆盖时为未知模块或生存层模块；Memory 不可用（empty、加载失败、普通模块尚未 setup）。
    */
   setSwitch(id: string, value: Switch | undefined): void;
   /**
@@ -116,7 +130,8 @@ export interface SwitchesHost {
    */
   attach(): void;
   /**
-   * @description 每 tick 准入前计算每个模块的 paused；记录了生存层或未知模块时各告警一次。
+   * @description 每 tick 准入前计算每个模块的 paused；记录了生存层、未知模块或非法值时各告警一次。
+   * 非法值（不是 pause 或 run，只可能来自手工编辑 Memory）按没有记录处理，取清单的 startPaused（审计 S-14）。
    * @returns 无返回值。
    */
   refresh(): void;
@@ -141,16 +156,18 @@ export interface SwitchesHost {
  * @param deps Memory、模块运行记录与告警日志。
  * @param deps.memory kernel.memory 宿主实例。
  * @param deps.byId { [模块 id]: 运行记录 }。
+ * @param deps.rejected 被清单拒绝的模块 id；它们的记录不报未知模块，可经清除删去。
  * @param deps.log kernel 作用域的日志。
  * @returns 宿主接口。
  */
 export const createSwitches = (deps: {
   readonly memory: MemoryHost;
   readonly byId: ReadonlyMap<string, ModuleRuntime>;
+  readonly rejected: ReadonlySet<string>;
   readonly log: Logger;
 }): SwitchesHost => {
   let switches: Accessor<Switches> | undefined;
-  // 已告警的记录键：生存层的 pause 记录与未知模块 id，每个只告警一次。
+  // 已告警的记录键：生存层的 pause 记录、未知模块 id 与非法值，每个只告警一次；清除记录时一并移除，重新写入后可再告警。
   const warned = new Set<string>();
 
   /**
@@ -175,7 +192,14 @@ export const createSwitches = (deps: {
     refresh() {
       const data = table();
       for (const runtime of deps.byId.values()) {
-        const value = data?.[runtime.def.id];
+        let value: unknown = data?.[runtime.def.id];
+        if (value !== undefined && value !== 'pause' && value !== 'run') {
+          if (!warned.has(runtime.def.id)) {
+            warned.add(runtime.def.id);
+            deps.log.warn(`启停标志中 ${runtime.def.id} 的记录 ${JSON.stringify(value)} 不是 pause 或 run，按没有记录处理`);
+          }
+          value = undefined;
+        }
         if (runtime.def.tier === 'survival') {
           runtime.paused = false;
           if (value === 'pause' && !warned.has(runtime.def.id)) {
@@ -190,7 +214,9 @@ export const createSwitches = (deps: {
       for (const id of Object.keys(data)) {
         if (!deps.byId.has(id) && !warned.has(id)) {
           warned.add(id);
-          deps.log.warn(`启停标志中记录了未知模块 ${id}，已忽略（不删除，避免装配暂时缺少该模块时丢失运维意图）`);
+          deps.log.warn(deps.rejected.has(id)
+            ? `启停标志中记录了被清单拒绝的模块 ${id}，模块未启动，记录不生效（可用 ops.unset 清除）`
+            : `启停标志中记录了未知模块 ${id}，已忽略（不删除，避免装配暂时缺少该模块时丢失运维意图；可用 ops.unset 清除）`);
         }
       }
     },
@@ -211,12 +237,19 @@ export const createSwitches = (deps: {
      * @throws {Error} 未知模块、生存层模块或 Memory 不可用。
      */
     set(id, value) {
+      if (value === undefined) {
+        // 清除接受任何 id（审计 S-15）：已移除、被拒绝与生存层模块的记录只能这样删去，否则每个实例都重复告警，
+        // 同 id 的模块重新加入时旧的 pause 静默生效。
+        if (!switches || !deps.memory.ready()) throw new Error('Memory 不可用（empty、加载失败或普通模块尚未 setup），启停标志无法写入');
+        switches.delete([id]);
+        warned.delete(id);
+        return;
+      }
       const runtime = deps.byId.get(id);
       if (!runtime) throw new Error(`未知模块 ${id}`);
-      if (runtime.def.tier === 'survival') throw new Error(`${id} 是生存层模块，不能暂停；需要停用时应通过发布或回滚`);
+      if (runtime.def.tier === 'survival') throw new Error(`${id} 是生存层模块，不接受 ${value} 覆盖；需要停用时应通过发布或回滚`);
       if (!switches || !deps.memory.ready()) throw new Error('Memory 不可用（empty、加载失败或普通模块尚未 setup），启停标志无法写入');
-      if (value === undefined) switches.delete([id]);
-      else switches.set([id], value);
+      switches.set([id], value);
     },
   };
 };
@@ -260,6 +293,8 @@ export interface KernelOpsDeps {
   readonly byId: ReadonlyMap<string, ModuleRuntime>;
   /** 运行记录，按执行顺序。 */
   readonly runtimes: readonly ModuleRuntime[];
+  /** 被清单拒绝的模块，按清单顺序；状态快照把它们排在运行记录之后。 */
+  readonly rejected: readonly RejectedModule[];
   readonly switches: SwitchesHost;
   readonly cpu: CpuHost;
   readonly memory: MemoryHost;
@@ -303,7 +338,7 @@ export const createKernelOps = (deps: KernelOpsDeps): KernelOps => ({
       tick: deps.time(), health: deps.health(), mode: deps.mode(), release: deps.release,
       memory: deps.memory.ready() ? 'ready' : deps.memory.failed() ? 'failed' : 'empty',
       budget: summary.budget, reserve: summary.reserve,
-      modules: deps.runtimes.map((r) => {
+      modules: [...deps.runtimes.map((r): ModuleStatus => {
         let brokenInstances = 0;
         for (const record of r.instances.values()) if (record.broken) brokenInstances += 1;
         return {
@@ -311,7 +346,11 @@ export const createKernelOps = (deps: KernelOpsDeps): KernelOps => ({
           startPaused: r.def.startPaused === true, cost: r.sampled ? r.cost : undefined, starve: r.starve,
           instances: r.instances.size, brokenInstances,
         };
-      }),
+      }), ...deps.rejected.map((m): ModuleStatus => ({
+        // 被拒模块从未 setup，按初始化失败显示并附原因（审计 S-12，ops 设计第 2 节）。
+        id: m.id, tier: m.tier, state: 'failed', switch: deps.switches.value(m.id), startPaused: false,
+        cost: undefined, starve: 0, instances: 0, brokenInstances: 0, reason: m.reason,
+      }))],
     };
   },
   /**
@@ -353,15 +392,17 @@ export const createKernelOps = (deps: KernelOpsDeps): KernelOps => ({
  * @description 生成统计页的状态快照（stats 设计第 2 节）：平滑耗用最高的进程、熔断与暂停的模块、Memory 体积
  * （总量、各空间与体积最大的 owner）与待写页数。
  * 只在统计窗口写出时调用，成本为 O(进程数 × log)。
- * @param deps 运行记录、Memory、segments、版本号与模式。
+ * @param deps 运行记录、被拒模块、Memory、segments、版本号与模式。
  * @param deps.runtimes 运行记录。
+ * @param deps.rejected 被清单拒绝的模块，计入 down（审计 S-12）。
  * @param deps.memory kernel.memory 宿主实例。
  * @param deps.segments segments 宿主（只读待写页数）。
  * @param deps.release 版本号。
  * @param deps.mode 当前模式视图。
  * @returns 状态快照。
  */
-export const buildStatsSnapshot = (deps: { readonly runtimes: readonly ModuleRuntime[]; readonly memory: MemoryHost;
+export const buildStatsSnapshot = (deps: { readonly runtimes: readonly ModuleRuntime[];
+  readonly rejected: readonly RejectedModule[]; readonly memory: MemoryHost;
   readonly segments: Pick<SegmentsHost, 'pending'>; readonly release: string; readonly mode: BootModeView }): StatsSnapshot => {
   const sampled: (readonly [string, number])[] = [];
   for (const runtime of deps.runtimes) {
@@ -379,7 +420,7 @@ export const buildStatsSnapshot = (deps: { readonly runtimes: readonly ModuleRun
   }
   return {
     release: deps.release, mode: deps.mode.mode, top: sampled.slice(0, STATS_TOP),
-    down: deps.runtimes.filter((r) => r.state === 'failed' || r.broken).map((r) => r.def.id),
+    down: [...deps.runtimes.filter((r) => r.state === 'failed' || r.broken).map((r) => r.def.id), ...deps.rejected.map((m) => m.id)],
     paused: deps.runtimes.filter((r) => r.paused).map((r) => r.def.id),
     memory, segPending: deps.segments.pending(),
   };

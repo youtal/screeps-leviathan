@@ -9,13 +9,16 @@
 /** CPU 层级，按准入优先级从高到低：生存、经济、维护、规划。 */
 export type Tier = 'survival' | 'economy' | 'maintenance' | 'planning';
 
-/** 绑定到一个进程的 CPU 预算视图。 */
+/**
+ * 进程所在层的 CPU 预算视图：同层的进程共用一个份额（cpu 设计第 4 节）。
+ * remaining 不扣除本 tick 其他已准入、尚未运行的同层进程的预计耗用，shouldYield 只保证调用方自身不越过本层上限（审计 S-17）。
+ */
 export interface CpuBudget {
   /** 进程所属的层级。 */
   readonly tier: Tier;
   /**
-   * @description 查询本进程本 tick 剩余可用的 CPU，用于决定还能处理多少工作。
-   * @returns 剩余 CPU；已用尽时为 0 或负数。
+   * @description 查询本进程所在层本 tick 剩余可用的 CPU（同层进程共用），用于决定还能处理多少工作。
+   * @returns 本层上限减去当前读数；已用尽时为 0 或负数。
    */
   remaining(): number;
   /**

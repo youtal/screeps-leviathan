@@ -140,13 +140,13 @@ const projectNamespace = (marker = {}) => ({
 /**
  * @description 已初始化存储经正常循环运行后的预期内容（不含项目标记）：kernel 在普通模块首次 setup 前申请启停标志分区
  * part.kernel.switches（docs/design/app/ops.md 第 3.2 节），app.boot 在 Memory 就绪后申请人工指定分区 part.boot.control
- * （docs/design/app/boot.md 第 8 节）；项目标记由 boot 按 6.7 更新，用 withoutSys 去掉后再比较。
+ * （docs/design/app/boot.md 第 8、9 节，版本 2 的初始数据为 {force: null, frozen: false}）；项目标记由 boot 按 6.7 更新，用 withoutSys 去掉后再比较。
  * @param {object} memory 初始 Memory，其中 leviathan 为 projectNamespace() 的结果。
  * @returns {object} 预期的 Memory，去掉了 leviathan.sys。
  */
 const withRuntimePartitions = (memory) => withoutSys({ ...memory, leviathan: { ...memory.leviathan,
   part: { ...memory.leviathan.part, kernel: { switches: { version: 1, data: {} } },
-    boot: { control: { version: 1, data: { force: null } } } } } });
+    boot: { control: { version: 2, data: { force: null, frozen: false } } } } } });
 
 /**
  * @description 去掉本项目命名空间中的项目标记，供不关心 sys 的整体比较使用。

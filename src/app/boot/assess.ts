@@ -202,7 +202,7 @@ const opening = (facts: BootFacts, memory: MemoryView, w: Opening, mem: string):
  */
 const ours = (facts: BootFacts, marker: ProjectMarker, mem: string): Verdict => {
   if (marker.mode.mode === 'AMBIGUOUS') {
-    return verdict('AMBIGUOUS', marker.mode.strength, '11.7 OURS 保持 AMBIGUOUS', [mem, '项目标记的模式为 AMBIGUOUS，等待人工 boot.force'], 'none');
+    return verdict('AMBIGUOUS', marker.mode.strength, '11.7 OURS 保持 AMBIGUOUS', [mem, '项目标记的模式为 AMBIGUOUS，等待人工以 boot.force(mode) 确认'], 'none');
   }
   const rooms = facts.controllers.length;
   const spawns = facts.spawns.length;

@@ -146,7 +146,7 @@ interface Measure {
 
 interface CpuBudget {
   readonly tier: Tier;
-  remaining(): number;                        // 本进程本 tick 剩余可用 CPU
+  remaining(): number;                        // 本进程所在层本 tick 剩余可用 CPU（同层进程共用）
   shouldYield(): boolean;                     // 长计算每批检查一次，为 true 时保存游标并返回
 }
 ```

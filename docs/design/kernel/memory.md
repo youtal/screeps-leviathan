@@ -65,7 +65,7 @@ Memory 只持久化纯 JSON 数据，不承担一般对象的序列化适配。�
 
 ## v1：平台接管与提交
 
-宿主每 tick 在任何 Memory 读取之前完成接管，用 `Object.defineProperty` 替换惰性访问器为空临时对象，不触发原 getter。接管由独立导出的 `takeoverMemory(target)` 完成：它与具体实例无关、不解析文本，临时对象带有接管标记，同一 tick 内重复调用无副作用。入口每 tick 最先调用它，冷却期或装配失败只运行保底循环时同样适用（[内核骨架](./README.md) 第 6 节）；`beginTick` 内部也调用它，识别同 tick 已完成的接管。发现原访问器已被读取时拒绝接管。每个 global 只解析一次真实文本。
+宿主每 tick 在任何 Memory 读取之前完成接管，用 `Object.defineProperty` 替换惰性访问器为空临时对象，不触发原 getter。接管由独立导出的 `takeoverMemory(target)` 完成：它与具体实例无关、不解析文本，临时对象带有接管标记，同一 tick 内重复调用无副作用。入口每 tick 最先调用它，冷却期或装配失败只运行保底循环时同样适用（[内核骨架](./README.md) 第 6 节）；`beginTick` 内部也调用它，识别同 tick 已完成的接管。发现原访问器已被读取时拒绝接管。每个 global 只解析一次真实文本。解析结果只检查非有限数：`JSON.parse` 只产生普通对象与稠密数组，属性都是可枚举的数据属性，没有 symbol 键与循环，唯一可能违反纯数据规则的是溢出为 ±Infinity 的数字（如 `1e400`），所以这项检查与完整校验的结论相同，成本只是一次遍历。
 
 平台依据：[engine game.js](https://github.com/screeps/engine/blob/master/src/game/game.js) 安装可配置的惰性 Memory 访问器；[driver runtime.js](https://github.com/screeps/driver/blob/master/lib/runtime/runtime.js) 在 RawMemory.set 时丢弃解析缓存，并在用户回调结束后校验 segment、最终返回 Memory。模块不读写内部 `_parsed`。源码核实不代替真实私服验证。
 

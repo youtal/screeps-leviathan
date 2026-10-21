@@ -5,9 +5,12 @@
  * 所属位置：src/main.ts，构建入口（rollup.config.mjs 的 input）。
  * 每 tick：先接管全局 Memory（使引擎内部写入只落在临时对象上，保底循环的 spawnCreep 也依赖这一点）；
  * 处于停用冷却期时只运行保底循环；否则运行 kernel，抛错时丢弃实例、下一 tick 重新装配，本 tick 改由保底循环运行；
- * 连续 KERNEL_CRASH_LIMIT 次失败（kernel 抛错，或连续暂停超过 PAUSE_LIMIT 后仍登记软重置）后停用正常循环 KERNEL_COOLDOWN tick；
+ * 连续 KERNEL_CRASH_LIMIT 次失败（kernel 抛错、上一 tick 被 CPU 硬终止，或连续暂停超过 PAUSE_LIMIT 后仍登记软重置）后停用正常循环 KERNEL_COOLDOWN tick；
  * 连续 SAFE_MODE_TICKS 个 tick 计为 degraded 时，在正常循环之后追加保底循环，直到恢复。
- * CPU 硬终止无法被 catch 接管，失败计数只统计可捕获的异常与超限的软重置。
+ * CPU 硬终止（内核设计第 6 节）：终止不执行 catch 与 finally，公开 driver 在超时后保留 VM 与 heap，下一 tick 继续调用同一个 loop。
+ * 入口在装配与 kernel.tick 期间置 running，正常结束或进入 catch 时清除；下一 tick 发现它仍为 true，说明上一 tick 被终止，
+ * kernel 可能停在任意中间状态：丢弃实例，按一次失败计数，本 tick 运行保底，下一 tick 从已提交的文本重新装配
+ * （被终止的 tick 不保存 Memory 与 segment，重建得到的就是终止前的持久状态；审计 S-01–S-06）。
  * 软重置：boot 登记后 tick 正常结束时销毁 kernel，下一 tick 重新装配；连续暂停未超过 PAUSE_LIMIT 时不计为失败。
  * boot 抛错的 tick 登记的软重置已由 kernel 作废，不会到达这里（docs/design/kernel/bootPort.md 第 3 节）。
  * 暂停 tick（paused）不改变 degraded 计数，使开局备份期间保底循环不会抢先孵化；连续暂停超过 PAUSE_LIMIT 后
@@ -16,7 +19,7 @@
  * 接管通知（13.4，审计 LC-07）：保底循环在本 tick 运行、而上一 tick 没有运行时视为接管开始，经 Game.notify 发出纯文本通知；
  * 距上次通知不足 FALLBACK_NOTIFY_GAP 时不再通知。入口状态（审计 LC-04）：经 entryStatus() 交给装配方，
  * kernel 不可用时 ops.status() 以它说明正常循环为什么没在运行。
- * 状态：kernel 实例、连续失败、degraded 与暂停计数、冷却截止 tick、最近一次失败、上一 tick 是否运行保底与上次通知的 tick
+ * 状态：kernel 实例、本 tick 是否在运行 kernel、连续失败、degraded 与暂停计数、冷却截止 tick、最近一次失败、上一 tick 是否运行保底与上次通知的 tick
  * 保存在 createEntry 的闭包中（heap），跨软重置累计，global reset 后重新计数。
  * 模块重新执行（内核设计第 6 节）：引擎在 require.cache.main 失效或代码时间戳变化时，会在同一个 global 中重新执行
  * main（@screeps/engine src/game/game.js），模块作用域里的状态随之重建。入口因此登记在全局注册表 globalThis[ENTRY_KEY]：
@@ -153,6 +156,9 @@ export const createEntry = (deps: EntryDeps): EntryLoop => {
   let nextNotice = 1;
   // 已被新构建的入口取代：不再运行。
   let disposed = false;
+  // 装配或 kernel.tick 正在进行：进入 try 时置 true，try 正常走完或进入 catch 时清除。CPU 硬终止不执行 catch，
+  // 所以下一 tick 开始时仍为 true 即说明上一 tick 被终止；只在 heap 中，global reset 后为 false（没有可沿用的实例）。
+  let running = false;
   let crashes = 0;
   let degraded = 0;
   let paused = 0;
@@ -205,8 +211,9 @@ export const createEntry = (deps: EntryDeps): EntryLoop => {
   };
 
   /**
-   * @description 计入一次失败（kernel 抛错，或连续暂停超过上限后 boot 仍登记软重置）；连续达到 KERNEL_CRASH_LIMIT 次时
-   * 进入停用冷却并清零计数。两类失败都会使下一 tick 重新装配并完整解析 Memory，冷却把这项成本限制在每 KERNEL_COOLDOWN tick 一次。
+   * @description 计入一次失败（kernel 抛错、上一 tick 被硬终止，或连续暂停超过上限后 boot 仍登记软重置）；连续达到
+   * KERNEL_CRASH_LIMIT 次时进入停用冷却并清零计数。每类失败都会使下一 tick 重新装配并完整解析 Memory；持续失败时，
+   * 冷却把这项成本限制为每 KERNEL_CRASH_LIMIT + KERNEL_COOLDOWN tick 至多 KERNEL_CRASH_LIMIT 次（审计 S-24）。
    * @returns 无返回值；达到上限时设置冷却截止 tick 并报告。
    */
   const countCrash = (): void => {
@@ -216,6 +223,22 @@ export const createEntry = (deps: EntryDeps): EntryLoop => {
     cooldownUntil = deps.time() + KERNEL_COOLDOWN + 1;
     crashes = 0;
     deps.report(`正常循环连续 ${KERNEL_CRASH_LIMIT} 次失败，停用 ${KERNEL_COOLDOWN} tick，期间只运行保底循环`);
+  };
+
+  /**
+   * @description 处理上一 tick 的硬终止：丢弃可能停在任意中间状态的实例，按一次失败计数。先清除标记与引用再清理，
+   * 清理本身再被终止时，下一 tick 也不会重复处理同一个实例。
+   * @returns 无返回值；kernel 置为 undefined，degraded 清零，记录失败并计数。
+   */
+  const discardTerminated = (): void => {
+    running = false;
+    const stale = kernel;
+    kernel = undefined;
+    degraded = 0;
+    deps.report('上一 tick 未正常结束（CPU 硬终止），丢弃 kernel 实例，本 tick 改由保底循环运行；下一 tick 重新装配');
+    recordFailure('上一 tick 未正常结束（CPU 硬终止）');
+    try { stale?.dispose(); } catch (error) { deps.report('丢弃被终止的 kernel 时清理失败', error); }
+    countCrash();
   };
 
   /**
@@ -231,10 +254,16 @@ export const createEntry = (deps: EntryDeps): EntryLoop => {
     }
     let fallback = false;
     let reason = '停用冷却';
-    if (deps.time() < cooldownUntil) {
+    if (running) {
+      // 与抛错相同：本 tick 只运行保底，下一 tick 再装配，不在同一 tick 内重复成本最高的装配与解析。
+      discardTerminated();
+      fallback = true;
+      reason = '上一 tick 被硬终止';
+    } else if (deps.time() < cooldownUntil) {
       fallback = true;
     } else {
       try {
+        running = true;
         kernel ??= deps.assemble(entryStatus);
         const health = kernel.tick();
         // 未超过上限的暂停 tick 既不计数也不运行保底：备份期间保底孵化会破坏开局证据（11.4）。
@@ -257,7 +286,10 @@ export const createEntry = (deps: EntryDeps): EntryLoop => {
             countCrash();
           }
         }
+        // 软重置的清理也在检测范围内：清理被终止时同样丢弃实例，而不是在下一 tick 调用已部分销毁的 kernel。
+        running = false;
       } catch (error) {
+        running = false;
         deps.report('正常循环抛错，本 tick 改由保底循环运行；下一 tick 重新装配', error);
         recordFailure('正常循环抛错', error);
         try { kernel?.dispose(); } catch { /* 实例可能已不一致，清理失败不再处理。 */ }

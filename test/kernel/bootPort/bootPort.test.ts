@@ -1,7 +1,7 @@
 /**
  * 文件摘要：kernel.bootPort 与 lifecycle 集成的单元测试，以 Memory/segment 严格平台模拟与假 GamePort 驱动整个 kernel。
  * 覆盖：端口只在 boot 钩子期间有效；summary；initialize 与 clearMemory 的前置条件、标记初值与 epoch；
- * 备份的分页、跨 tick 写出、回读校验、重写与失败；暂停 tick 不 setup、不运行业务阶段、返回 paused；
+ * 备份的分页（不拆开代理对，审计 S-27）、跨 tick 写出、回读校验、重写与失败；暂停 tick 不 setup、不运行业务阶段、返回 paused；
  * Memory 已就绪时“软重置 → 备份 → 清空”在新实例中完成；boot 抛错时软重置登记作废；clearInterShard；sys 写入。
  */
 import type { BootContext, BootDefinition } from '@/contracts/boot';
@@ -231,6 +231,30 @@ describe('backup', () => {
     expect(states).toEqual(['pending', 'pending', 'done']);
     expect(backupOf(h).header?.e).toBe(6);
     expect(JSON.parse(h.platform.memory).leviathan.sys.epoch).toBe(6);
+  });
+
+  test('审计 S-27：切分点落在代理对上时，代理对留在下一页，每页都不含孤立代理，拼回与原文相等', () => {
+    // 第 BACKUP_CHUNK 个码元（下标 BACKUP_CHUNK - 1）恰为 😀 的高位代理。
+    const text = `{"x":"${'a'.repeat(BACKUP_CHUNK - 7)}😀b"}`;
+    expect(text.charCodeAt(BACKUP_CHUNK - 1)).toBe(0xd83d);
+    const states: string[] = [];
+    const h = kernelHarness({ modules: [], memory: text, boot: scripted((ctx) => { states.push(ctx.port.backup()); }) });
+    for (let i = 0; i < 3; i += 1) h.tick();
+    expect(states).toEqual(['pending', 'pending', 'done']);
+    const first = decodePage(h.platform.segment(80)!)!.body;
+    const second = decodePage(h.platform.segment(81)!)!.body;
+    expect([first.length, second.startsWith('😀')]).toEqual([BACKUP_CHUNK - 1, true]);
+    expect(backupOf(h).body).toBe(text);
+  });
+
+  test('审计 S-27：少取码元使实际页数超出备份区时为 failed', () => {
+    // 长度恰为容量，第一个切分点落在代理对上：第一页少取一个码元，余下的需要 10 页，共 11 页。
+    const text = `${'a'.repeat(BACKUP_CHUNK - 1)}😀${'a'.repeat(BACKUP_CAPACITY - BACKUP_CHUNK - 1)}`;
+    expect(text.length).toBe(BACKUP_CAPACITY);
+    const states: string[] = [];
+    const h = kernelHarness({ modules: [], memory: text, boot: scripted((ctx) => { states.push(ctx.port.backup()); }) });
+    expect(h.tick()).toBe('degraded');
+    expect(states).toEqual(['failed']);
   });
 
   test('空文本无需备份；超过备份区容量为 failed，均不暂停', () => {

@@ -8,7 +8,7 @@
 import { assemble, createGameServices } from '@/app/assembly';
 import * as lifecycle from '@/kernel/lifecycle';
 import { ENTRY_KEY, loop } from '@/main';
-import { memorySettings, profilerSettings } from '@/settings';
+import { loggerSettings, memorySettings, profilerSettings } from '@/settings';
 import { createMemoryPlatform } from '../platform/memory';
 
 const marker = {
@@ -107,6 +107,27 @@ test('日志输出端：存在 console.logUnsafe 时经它输出并上色，否�
   expect(unsafe).toEqual(['<span style="color:#95a5a6">[7] INFO</span> m: a&lt;b']);
   expect(plain).toEqual(['[7] INFO m: a<b']);
   jest.restoreAllMocks();
+});
+
+test('审计 S-22：存在 console.logUnsafe 而关闭上色时，经 console.log 输出纯文本，正文不按 HTML 渲染', () => {
+  installGame(8);
+  const unsafe: string[] = [];
+  const plain: string[] = [];
+  jest.spyOn(console, 'log').mockImplementation((line: unknown) => { plain.push(String(line)); });
+  const host = console as { logUnsafe?: (line: string) => void };
+  host.logUnsafe = (line) => { unsafe.push(line); };
+  const logger = loggerSettings as { color: boolean };
+  const color = logger.color;
+  logger.color = false;
+  try {
+    createGameServices().logRoot.scope('m').info('<b>x</b>');
+  } finally {
+    logger.color = color;
+    delete host.logUnsafe;
+    jest.restoreAllMocks();
+  }
+  expect(unsafe).toEqual([]);
+  expect(plain).toEqual(['[8] INFO m: <b>x</b>']);
 });
 
 test('PA-04：装配把使用者设置中的 Memory 抽查数与实例计时注入 kernel', () => {

@@ -1,6 +1,7 @@
 /**
  * 文件摘要：持久化访问接口（src/contracts/memory.ts）的类型测试。
- * 断言在类型检查阶段生效（npm run typecheck 与 ts-jest 都会检查本文件）：合法路径推导出正确的值类型，
+ * 断言在类型检查阶段生效，由 npm run typecheck 检查（tsconfig.test.json 继承 isolatedModules，ts-jest 只转译、不做类型检查，
+ * 审计附录 X-03）：合法路径推导出正确的值类型，
  * 非法路径、超过 8 段的路径与 interface 声明的数据类型被拒绝（以 @ts-expect-error 标注，未报错即检查失败）。
  * 运行时只确认类型断言函数存在，不调用任何 Accessor。
  */

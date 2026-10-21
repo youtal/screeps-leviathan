@@ -1,7 +1,8 @@
 /**
  * 文件摘要：kernel.console 的单元测试，以隔离的全局目标与记录型 Logger 驱动。
  * 覆盖：注册即安装；help 内容；命令与设置的调用；处理函数抛错时返回错误文本并记录日志；结果格式化与截断；
- * 与已有全局、命名空间内重名的冲突；销毁后换为桩对象、离线命令（审计 LC-04）；新实例覆盖桩对象。
+ * 与已有全局、命名空间内重名的冲突；销毁后换为桩对象、离线命令（审计 LC-04）；新实例覆盖桩对象；
+ * 结果、错误文本、help 与设置的字符串值按 HTML 转义，换行保持原样（审计 S-23）。
  */
 import type { Logger } from '@/contracts/log';
 import { CONSOLE_RESULT_LIMIT, OFFLINE_RESULT, createConsole, formatResult } from '@/kernel/console';
@@ -117,4 +118,17 @@ test('模块重新执行：上一轮执行或 0.1.16 留下的命名空间不算
   again.registry('ops').command('status', '', () => '第三轮');
   expect((target.ops as Space).status()).toBe('第三轮');
   expect(errors).toHaveLength(1);
+});
+
+test('审计 S-23：结果、错误文本、help 与设置的字符串值按 HTML 转义，换行保持原样', () => {
+  const { target, host } = setup();
+  const reg = host.registry('ops');
+  reg.command('show', 'ops.show(key)：<模块 id>:<实例键> & 其他', () => 'a<b>&c\n第二行');
+  reg.command('boom', '抛错', () => { throw new Error('未知进程 <x>'); });
+  reg.setting('name', '名称', () => '<i>', () => undefined);
+  const ops = target.ops as Space;
+  expect(ops.show()).toBe('a&lt;b&gt;&amp;c\n第二行');
+  expect(ops.boom()).toBe('错误：未知进程 &lt;x&gt;');
+  expect(ops.help()).toBe('ops.show()  ops.show(key)：&lt;模块 id&gt;:&lt;实例键&gt; &amp; 其他\nops.boom()  抛错\nops.name  名称');
+  expect(ops.name).toBe('&lt;i&gt;');
 });

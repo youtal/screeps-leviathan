@@ -3,7 +3,8 @@
  * 输入任意值，拒绝 JSON 无法无损表示的结构；复制时不共享可变引用。
  * 只接受普通对象/数组，不调用 getter 或 toJSON；字段可以缺省，但显式 undefined 与数组空洞均拒绝。
  * 递归集合仅记录当前祖先链，共享但不循环的子对象合法；每次调用结束释放，无跨 tick 状态。
- * 设计见 docs/design/kernel/memory.md。复杂度与值大小成正比，仅在实际写入/脏编码时使用。
+ * 设计见 docs/design/kernel/memory.md。复杂度与值大小成正比：validateJson 与 copyJson 用于写入、迁移与脏编码；
+ * 加载只用 checkParsed（审计 S-24）：JSON.parse 的产物只可能在非有限数上违反规则，完整校验的其余检查恒定通过。
  */
 import type { Json } from "@/contracts/memory";
 
@@ -90,6 +91,28 @@ const walk = (value: unknown, copy: boolean, ancestors: Set<object>): Json => {
 export const validateJson = (value: unknown): void => {
   walk(value, false, new Set());
 };
+/**
+ * @description 加载时校验 JSON.parse 的产物，拒绝语义与 validateJson 相同（审计 S-24）。JSON.parse 只产生普通对象与稠密数组，
+ * 属性都是可枚举的数据属性，没有 symbol 键与循环，唯一可能违反纯数据规则的是溢出为 ±Infinity 的数字（如 1e400），
+ * 所以只检查非有限数。不读描述符、不建祖先集合，对象用 for-in 遍历以免为每个容器分配键数组；
+ * JSON.parse 产物的原型为 Object.prototype，没有可枚举的继承属性，"__proto__" 键是自有属性，照常被遍历。
+ * @param value JSON.parse 的返回值；传入其他来源的值时不保证与 validateJson 等价。
+ * @returns 无返回值；正常结束表示校验通过。
+ * @throws {TypeError} 含非有限数。
+ */
+export const checkParsed = (value: unknown): void => {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new TypeError("不是合法 JSON 值");
+    return;
+  }
+  if (value === null || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) checkParsed(value[i]);
+    return;
+  }
+  for (const key in value) checkParsed((value as Record<string, unknown>)[key]);
+};
+
 /**
  * @description 校验并复制 JSON 树，隔离调用方持有的引用；共享子对象按树展开。
  * @template T 输入及副本的静态类型；运行时仍按 JSON 约束校验。

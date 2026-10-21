@@ -189,6 +189,7 @@ export interface CreepSpec {
   capacity?: number;
   spawning?: boolean;
   hits?: number;
+  fatigue?: number;
 }
 
 /**
@@ -201,12 +202,13 @@ export interface CreepSpec {
  * @param spec.capacity 携带容量，默认 50；无 CARRY 的 creep 应设为 0。
  * @param spec.spawning 是否在孵化中，默认 false；孵化中的 creep 不出现在 FIND_MY_CREEPS 中。
  * @param spec.hits 当前生命值，默认 100（上限 100）。
+ * @param spec.fatigue 疲劳值，默认 0；大于 0 时本 tick 不能移动。
  * @returns creep 替身。
  */
 export const creep = (spec: CreepSpec): FakeObject => {
-  const { name, at, body, energy = 0, capacity = 50, spawning = false, hits = 100 } = spec;
+  const { name, at, body, energy = 0, capacity = 50, spawning = false, hits = 100, fatigue = 0 } = spec;
   const self: FakeObject = {
-    id: `creep-${name}`, name, pos: at, spawning, hits, hitsMax: 100, my: true,
+    id: `creep-${name}`, name, pos: at, spawning, hits, hitsMax: 100, my: true, fatigue,
     store: store(energy, capacity),
     /**
      * @description 统计指定类型的有效部件数；替身不模拟受损，全部部件都有效。
@@ -241,7 +243,8 @@ export const structure = (type: string, at: FakePos, extra: Record<string, unkno
     Object.assign(self, {
       name: id, spawning: extra.spawning ?? null,
       /**
-       * @description 模拟引擎的 spawnCreep：即使不传 memory 选项，也会读写全局 Memory.creeps[name]（engine structures.js），再记录动作。
+       * @description 模拟引擎的 spawnCreep：即使不传 memory 选项，也会读写全局 Memory.creeps[name]；成功时在 Game.creeps 中放入
+       * 位于 spawn 坐标、spawning 恒为 true 的占位 creep，不改 spawn.spawning（engine 4.3.2 structures.js 第 1132–1160 行），再记录动作。
        * @param body 身体部件列表。
        * @param name creep 名称。
        * @returns OK。
@@ -251,6 +254,8 @@ export const structure = (type: string, at: FakePos, extra: Record<string, unkno
         const memory = (globalThis as unknown as { Memory: { creeps?: Record<string, unknown> } }).Memory;
         memory.creeps ??= {};
         memory.creeps[name] = {};
+        const game = (globalThis as unknown as { Game: { creeps: Record<string, FakeObject> } }).Game;
+        game.creeps[name] = creep({ name, at, body, spawning: true });
         return record(body);
       },
       /**
@@ -328,7 +333,9 @@ export const installWorld = (spec: WorldSpec): World => {
     const controller = { id: `controller-${name}`, my: true, level: r.level ?? 3, ticksToDowngrade: r.ticksToDowngrade ?? 19000, pos: pos(25, 25, name) };
     const structures = r.structures ?? [];
     const lists: Record<number, unknown[]> = {
-      102: (r.creeps ?? []).filter((c) => !c.spawning), 103: r.hostiles ?? [], 104: r.sources ?? [], 105: r.sources ?? [],
+      // FIND_SOURCES_ACTIVE 只含能量大于 0 的 source（未设 energy 的替身按活跃处理），FIND_SOURCES 含全部。
+      102: (r.creeps ?? []).filter((c) => !c.spawning), 103: r.hostiles ?? [],
+      104: (r.sources ?? []).filter((s) => ((s.energy as number | undefined) ?? 1) > 0), 105: r.sources ?? [],
       106: r.dropped ?? [], 107: structures, 108: structures.filter((s) => s.my !== false),
       112: structures.filter((s) => s.structureType === 'spawn'), 114: r.sites ?? [], 116: r.minerals ?? [],
       118: r.tombstones ?? [], 123: r.ruins ?? [],

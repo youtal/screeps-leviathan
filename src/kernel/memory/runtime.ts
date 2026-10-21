@@ -9,7 +9,7 @@
  */
 import type { ProjectMarker, RawMemorySummary } from '@/contracts/boot';
 import type { Json } from '@/contracts/memory';
-import { checkKey, copyJson, isObject, validateJson } from './json';
+import { checkKey, checkParsed, copyJson, isObject } from './json';
 import { checkMarker, summarize, UNPARSED_SUMMARY } from './marker';
 import type { Space, Unit, UnitRecord } from './unit';
 
@@ -180,7 +180,8 @@ export const recordId = (space: Space, key: string): string => JSON.stringify([s
  * @throws {Error} 根不是对象，或本项目命名空间的结构、身份、schema 或单元包络非法。
  */
 const load = (state: Runtime, root: unknown): void => {
-  validateJson(root);
+  // root 只来自 JSON.parse（或空白文本的 {}），checkParsed 与完整校验等价（审计 S-24）。
+  checkParsed(root);
   if (!isObject(root)) throw new Error('Memory 根结构非法');
   if (!Object.hasOwn(root, state.options.namespace)) { state.root = root as Record<string, Json>; return; }
   const data = root[state.options.namespace];

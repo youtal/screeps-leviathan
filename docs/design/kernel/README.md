@@ -140,7 +140,7 @@ kernel.context 为每个模块派生一个 `ModuleContext`，在整个 global �
 - 输出格式：`[<tick>] <级别> <作用域>: <正文>`，经 `LogSink` 输出。
 - **级别**：debug、info、success（游戏内关键状态转移成功）、warn、error。
 - **双层开关**：第一层是日志根对象的默认值，`createLogRoot` 的 `levels` 必须为每个级别给出，缺一即报错；默认值由装配方从 `src/settings.ts` 的 `loggerSettings` 读取后注入，可由 `setDefault` 修改（供运维命令使用）。第二层是作用域覆盖值，业务模块经 `ctx.log.configLevel({ [级别]: 开关 })` 一次设置一个或多个级别，值为 `undefined` 时恢复默认。实例作用域以所属模块作用域为父，继承其覆盖值。级别关闭时，函数形式的正文不求值。
-- **上色**：官服的 `console.log` 会把输出整体转成 HTML 实体，标签显示为原文；`console.logUnsafe` 原样下发，由客户端按 HTML 渲染。装配方存在 `logUnsafe` 时以它为输出端并按使用者设置开启上色，不存在时以 `console.log` 为输出端且不上色。上色时前缀 `[<tick>] <级别>` 按级别着色（debug 天青、info 灰、success 绿、warn 橙、error 红），同时转义作用域与正文中的 `&`、`<`、`>`，否则堆栈里的 `<anonymous>` 等文本会被当成标签吞掉；正文中的换行改为 `<br>`，否则多行堆栈会被折叠成一行。不开启时输出纯文本，供测试与不渲染 HTML 的使用方。
+- **上色**：官服的 `console.log` 会把输出整体转成 HTML 实体，标签显示为原文；`console.logUnsafe` 原样下发，由客户端按 HTML 渲染。使用者设置开启上色且存在 `logUnsafe` 时，装配方以它为输出端并上色；否则以 `console.log` 为输出端且不上色，即使存在 `logUnsafe` 也不用它：不上色的行不转义，经 `logUnsafe` 输出时正文与堆栈会被当作 HTML 渲染。上色时前缀 `[<tick>] <级别>` 按级别着色（debug 天青、info 灰、success 绿、warn 橙、error 红），同时转义作用域与正文中的 `&`、`<`、`>`，否则堆栈里的 `<anonymous>` 等文本会被当成标签吞掉；正文中的换行改为 `<br>`。官服客户端渲染日志前本身也会把 `\n` 换成 `<br>`（[console](./console.md#5-调用) 第 5 节"转义"），这一步与之等价，保留它使输出不依赖客户端的这一行为。不上色时输出纯文本，由平台编码，也供测试与不渲染 HTML 的使用方。
 - `error` 附带经 `ErrorMapper` 规范化的堆栈。映射受 CPU 保护，规则见 [errorMapper](./errorMapper.md)。
 - 同一进程连续失败时最多记录到熔断为止，熔断后只记一次熔断日志，避免刷屏。
 
@@ -171,14 +171,14 @@ kernel.context 为每个模块派生一个 `ModuleContext`，在整个 global �
 | 暂停（paused） | boot 本 tick 的备份尚未完成或登记了软重置（第 2 节）；不运行业务阶段，也不计为 degraded | — |
 | `SAFE_MODE_TICKS`（即 N） | 连续处于 degraded 的 tick 数达到此值后，每 tick 在正常循环之后追加运行保底循环，直到恢复 | 3 |
 | `PAUSE_LIMIT` | 连续暂停的 tick 数上限，跨软重置累计；超过后暂停 tick 计为 degraded，保底循环得以接管。备份一次重写加软重置最多约 7 tick | 10 |
-| `KERNEL_CRASH_LIMIT` | 连续失败的次数上限；失败指 kernel 抛出可捕获异常，或连续暂停超过 `PAUSE_LIMIT` 后 boot 仍登记软重置。达到后停用正常循环 | 3 |
+| `KERNEL_CRASH_LIMIT` | 连续失败的次数上限；失败指 kernel 抛出可捕获异常、上一 tick 被 CPU 硬终止，或连续暂停超过 `PAUSE_LIMIT` 后 boot 仍登记软重置。达到后停用正常循环 | 3 |
 | `KERNEL_COOLDOWN` | 停用冷却期：触发停用的那个 tick 之后的这么多个 tick 只运行保底循环，之后重新装配 | 100 tick |
 | `FALLBACK_NOTIFY_GAP` | 两次"保底循环接管"通知之间的最小间隔 | 1000 tick |
 
 - **先接管 Memory**：引擎的 `spawnCreep` 即使不传 `memory` 选项也会访问 `Memory.creeps`，保底循环也会孵化。装配可能失败，冷却期也不装配 kernel，所以入口在任何其他工作之前先完成接管，使这类引擎内部写入只落在临时对象上，不触发真实 Memory 的解析与写回。takeover 由 kernel.memory 提供，入口不直接操作全局 Memory（架构 4.2 的持久化边界）；Memory 实例的 `beginTick` 识别同 tick 已完成的接管，不视为接管过晚。
 - **抛错后重建**：异常可能使 kernel 内部状态不一致，所以抛错后丢弃实例，下一 tick 重新装配；Memory 从 RawMemory 重新加载，未提交的 heap 修改随之丢弃。
 - **软重置**：boot 经 `port.softReset()` 登记后，本 tick 为暂停 tick，跳过业务阶段但照常提交；入口销毁实例，下一 tick 重新装配。全部进程实例与模块级 heap 缓存随旧实例丢弃，Memory 从已提交的文本重新加载，效果等同于一次 global reset（5.5）。
-- **冷却期**：持续抛错时每 tick 重新装配会反复解析 Memory。冷却期把这项成本限制在每 100 tick 一次。
+- **冷却期**：持续失败时每 tick 重新装配会反复解析 Memory。冷却期把这项成本限制为每 `KERNEL_CRASH_LIMIT + KERNEL_COOLDOWN`（103）tick 至多 `KERNEL_CRASH_LIMIT` 次。
 - **模块重新执行**：引擎每 tick 检查 `require.cache.main`，它不是对象、`loop` 不是函数或代码时间戳变化时，新建 `require` 与空的模块缓存，但沿用同一个全局对象，在其上重新执行 main（engine 4.3.2 `src/game/game.js`）。这时模块作用域里的状态全部重建，而 `globalThis` 上的对象保留。官服上每 tick 都发生这一情况（架构附录 A 的 F21）：2026-10-21 在官服测试账户上的诊断中，330 个 tick 内新建了 331 个 `require`，每 tick 结束时 `require.cache.main` 仍是对象、`loop` 仍是本入口导出的函数，而 `require.timestamp` 是 `Date` 对象。另两个条件都满足，所以触发条件是代码时间戳的比较：平台每 tick 传入新的 `Date` 对象，`!=` 按引用比较恒为真（推断：官服对应部分未开源）。未处理时，入口与 kernel 每 tick 新建，开局备份等跨 tick 的流程永远完成不了，上一轮安装的控制台命名空间被当作外来对象。处理：
   - 入口登记在全局注册表 `globalThis[Symbol.for('leviathan.entry')]`，记录构建标识（构建注入的版本号加构建时刻，[bootPort](./bootPort.md) 第 6 节）。模块执行时，已有同一构建的入口则沿用，kernel 与跨 tick 的流程延续；构建不同（代码更新而未重置 global）时先销毁旧入口的 kernel，再新建入口；没有时新建并登记。不以引擎的代码时间戳为标识：它可能正是每 tick 变化的条件。
   - 控制台命名空间以注册符号标记，任何一轮模块执行安装的对象都识别为本模块所有（[console](./console.md#4-安装) 第 4 节）。
@@ -187,10 +187,14 @@ kernel.context 为每个模块派生一个 `ModuleContext`，在整个 global �
 - **代码时间戳**：为消除上述每 tick 的模块执行，main 在模块执行时把 `require.timestamp` 换成同一 `Date` 的字符串形式。下一 tick 引擎比较 `Date != 字符串` 时先把 `Date` 按默认提示转为字符串（`Date.prototype.toString`），同一时刻即相等，模块缓存保留；代码更新后时刻不同，照常重新加载。`toString` 精确到秒，两次上传相隔不足一秒的情形忽略。时间戳不是 `Date`（私服为字符串）时不处理。
   - 前提是平台只以 `!=` 使用这个字段。若平台另以 `Date` 方法读取它，替换会出错；这一点只能在官服实测确认：确认后"模块重新执行"的计数不再增长，入口注册表仍作为兜底保留。
 - **重置循环**：boot 的缺陷可能使每个新实例都再次登记软重置，效果与持续抛错相同。正常开局流程的暂停不超过 `PAUSE_LIMIT`，所以超限后的软重置按失败计数，与抛错共用冷却。超限期间暂停 tick 不清零失败计数，软重置与普通暂停交替时同样受限。boot 抛错的 tick 计为 degraded 而不是 paused，不受上述计数约束，所以这样的 tick 登记的软重置由 kernel 作废（第 2 节"boot 失败"），不触发重建。
-- **接管通知**（13.4）：保底循环在本 tick 运行、而上一 tick 没有运行时，视为一次接管开始。入口经 `Game.notify` 发出一条纯文本通知，写明 tick 与原因：正常循环抛错、停用冷却、连续 degraded，或暂停超限。
+- **接管通知**（13.4）：保底循环在本 tick 运行、而上一 tick 没有运行时，视为一次接管开始。入口经 `Game.notify` 发出一条纯文本通知，写明 tick 与原因：正常循环抛错、上一 tick 被硬终止、停用冷却、连续 degraded，或暂停超限。
   - 距上一次通知不足 `FALLBACK_NOTIFY_GAP` 时不再通知，避免反复抛错或健康状态来回切换时连续发信。
   - 间隔只记在入口的 heap 中，global reset 后可能提前再通知一次，这是可以接受的。
   - 通知失败（例如平台拒绝）只记录日志，不影响保底循环。
 - **入口状态**（供 [app.ops](../app/ops.md#4-宿主接口)）：入口保存最近一次失败的 tick 与说明（错误消息的第一行，截短），并经只读函数 `entryStatus()` 交给装配方。返回冷却剩余 tick、连续失败次数、连续 degraded 与暂停计数，以及最近一次失败。kernel 不可用时，`ops.status()` 以它回答"正常循环为什么没在运行"。
 - **重复提交**：正常循环部分执行后才转入保底时，同一 tick 可能已经提交过 intent。保底按 5.7 的约束不重复提交同一动作，但不保证避免与正常循环的动作冲突。
-- **CPU 硬终止**无法被 catch 接管（5.7）。计数只统计可捕获的异常。
+- **CPU 硬终止**无法被 catch 接管（5.7），但可以在下一 tick 识别。公开 driver 在 CPU 超时后只抛出 "Script execution timed out"，保留 VM 与 heap，下一 tick 继续调用同一个 `loop`（driver 5.3.0 `lib/runtime/make.js` 第 279–293 行只为 `Game.cpu.halt()`、isolate 销毁与 heap 耗尽清除 VM；`lib/runtime/runtime-driver.js` 第 101–106 行）；官服对应部分未开源，按同样的行为处理。终止不执行 catch 与 finally，可能落在 kernel 任何"先改状态、后完成"的窗口中：Memory 首次加载、模块 setup、分区登记、软重置登记之后、初始化之后，实例都可能停在不一致的状态。被终止的 tick 不保存 Memory 与 segment。处理：
+  - 入口在装配与 `kernel.tick()` 期间置 `running`，tick 正常走完（含软重置的清理）或进入 catch 时清除。下一 tick 开始时它仍为 true，就说明上一 tick 被终止。
+  - 这时丢弃实例：先清除标记与引用，再在错误边界中 dispose，清理本身再被终止时不会重复处理。记录最近一次失败，按一次失败计数，与抛错共用冷却；本 tick 只运行保底，下一 tick 从已提交的文本重新装配。重建得到的正是终止前的持久状态，所以不必逐个修补上述窗口。
+  - 终止只归因到 kernel 整体，不归因到进程：一个钩子确定性地越过 `tickLimit` 时，连续 `KERNEL_CRASH_LIMIT` 次后整个正常循环进入冷却，期间只运行保底。
+  - global reset 后标记为初值 false，新 global 中没有可沿用的实例，与此无关。
