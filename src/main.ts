@@ -22,6 +22,9 @@
  * main（@screeps/engine src/game/game.js），模块作用域里的状态随之重建。入口因此登记在全局注册表 globalThis[ENTRY_KEY]：
  * 同一构建（assembly 的 BUILD）的重新执行沿用已有入口，kernel 与跨 tick 的流程（如开局备份）得以延续；构建不同时
  * 先销毁旧入口的 kernel（卸下控制台命名空间）再新建。重新执行的次数在 1、10、100…… 次时各记录一条 info。
+ * 代码时间戳（内核设计第 6 节）：官服传入的代码时间戳是 Date 对象，引擎以 != 比较新旧时间戳，两个不同的 Date 对象
+ * 恒不相等，于是每 tick 重建模块缓存。模块执行时 stabilizeCodeTimestamp 把 require.timestamp 换成同一时刻的字符串，
+ * 下一 tick 引擎比较 Date 与字符串时先把 Date 转成字符串，同一时刻即相等，缓存得以保留；代码更新后时间戳不同，照常重新加载。
  * 切换逻辑写成 createEntry(deps)，测试以假依赖驱动；loop 由 resolveEntry 取得，模块加载时只读写 globalThis，不读取 Game。
  */
 import { BUILD, type GameServices, assemble, createGameServices } from '@/app/assembly';
@@ -353,6 +356,29 @@ const gameEntryDeps = (): EntryDeps => {
     },
   };
 };
+
+/**
+ * @description 规避官服每 tick 重建模块缓存（内核设计第 6 节"代码时间戳"）。引擎每 tick 以
+ * `runtimeData.userCodeTimestamp != require.timestamp` 判断代码是否更新（engine 4.3.2 src/game/game.js）。官服的时间戳是
+ * Date 对象，每 tick 是不同的对象，`!=` 按引用比较恒为真，于是每 tick 新建 require、在同一 global 中重新执行 main。
+ * 把 require.timestamp 换成同一 Date 的字符串形式后，`Date != 字符串` 先把 Date 按默认提示转为字符串（Date.prototype.toString）
+ * 再比较：同一时刻即相等，模块缓存保留；代码更新后时刻不同，照常重新加载。toString 精确到秒，两次上传相隔不足一秒的情形
+ * 可以忽略。时间戳不是 Date（私服为字符串）或没有 require 时不做任何事。
+ * 前提是平台只以 `!=` 使用这个字段；若平台另以 Date 方法读取它，替换会出错，所以只在官服实测确认后保留（第 6 节）。
+ * @param target 全局对象，游戏中为 globalThis。
+ * @returns 做了替换时为 true。
+ */
+export const stabilizeCodeTimestamp = (target: object): boolean => {
+  const req = (target as { require?: { timestamp?: unknown } }).require;
+  const timestamp = req?.timestamp;
+  // 用 Object.prototype.toString 判断，不依赖 instanceof：Date 构造器可能来自其他上下文。
+  if (!req || Object.prototype.toString.call(timestamp) !== '[object Date]') return false;
+  req.timestamp = String(timestamp);
+  return true;
+};
+
+// 引擎每新建一次 require 都会执行一次 main，所以每个新 require 恰好处理一次。
+stabilizeCodeTimestamp(globalThis);
 
 /** Screeps 每 tick 调用的入口；同一 global 中重新执行 main 时沿用同一构建已登记的入口。 */
 export const loop = resolveEntry(globalThis, BUILD, () => createEntry(gameEntryDeps()));

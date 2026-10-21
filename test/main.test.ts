@@ -9,6 +9,7 @@ import type { EntryStatus } from '@/app/ops';
 import type { Kernel, KernelHealth } from '@/kernel/lifecycle';
 import {
   ENTRY_KEY, type EntryLoop, FALLBACK_NOTIFY_GAP, KERNEL_COOLDOWN, KERNEL_CRASH_LIMIT, PAUSE_LIMIT, SAFE_MODE_TICKS, createEntry, resolveEntry,
+  stabilizeCodeTimestamp,
 } from '@/main';
 
 /**
@@ -265,5 +266,32 @@ describe('模块重新执行（内核设计第 6 节）', () => {
     run(3);
     expect(seen.disposed).toBe(1);
     expect(seen.ticks).toBe(2);
+  });
+});
+
+describe('代码时间戳（内核设计第 6 节）', () => {
+  /**
+   * @description 按引擎的写法判断代码是否更新（engine 4.3.2 src/game/game.js：userCodeTimestamp != require.timestamp）。
+   * @param runtime 本 tick 平台传入的代码时间戳。
+   * @param stored require 上记录的时间戳。
+   * @returns 引擎会新建 require 时为 true。
+   */
+  const engineRebuilds = (runtime: unknown, stored: unknown): boolean => runtime != stored;
+
+  test('官服的 Date 时间戳换成字符串后，同一时刻的新 Date 不再触发重建；代码更新后的新时刻仍触发', () => {
+    const at = Date.UTC(2026, 9, 21, 6, 53, 22);
+    const target = { require: { timestamp: new Date(at) as unknown } };
+    expect(engineRebuilds(new Date(at), target.require.timestamp)).toBe(true);
+    expect(stabilizeCodeTimestamp(target)).toBe(true);
+    expect(typeof target.require.timestamp).toBe('string');
+    expect(engineRebuilds(new Date(at), target.require.timestamp)).toBe(false);
+    expect(engineRebuilds(new Date(at + 5000), target.require.timestamp)).toBe(true);
+  });
+
+  test('时间戳不是 Date（私服为字符串）或没有 require 时不做任何事', () => {
+    const target = { require: { timestamp: '2026-10-21T06:52:07.762Z' } };
+    expect(stabilizeCodeTimestamp(target)).toBe(false);
+    expect(target.require.timestamp).toBe('2026-10-21T06:52:07.762Z');
+    expect(stabilizeCodeTimestamp({})).toBe(false);
   });
 });
