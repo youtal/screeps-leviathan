@@ -306,24 +306,31 @@ export const collectModules = (mainCode: string, mapText: string | null): Module
 export const activeWorldBranch = (branches: readonly Branch[]): string | null =>
   branches.find((branch) => branch.activeWorld === true)?.branch ?? null;
 
+/** 上传的一步：clone 以模块表新建分支（POST /api/user/clone-branch），upload 覆盖已有分支（POST /api/user/code）。 */
+export type UploadStep = 'clone' | 'upload';
+
 /**
- * @description 规划一次上传：目标分支已存在时覆盖其代码，否则新建分支。
+ * @description 规划一次上传：目标分支已存在时覆盖其代码，否则新建分支后再以同样的模块覆盖一次。
+ * 覆盖一次是为了代码时间戳的类型：backend 3.3.0 的 clone-branch 把时间戳写成 Date 对象，user/code 写成毫秒数；
+ * driver 每 tick 从数据库读出时间戳，engine 4.3.2 以 `!=` 与 require 上记录的值比较，Date 每 tick 是新对象，
+ * 比较恒为真，引擎于是每 tick 重新执行 main（docs/design/kernel/README.md 第 6 节）。毫秒数按值比较，没有这个问题。
  * 覆盖生效分支会立即改变线上运行的代码，因此只在调用方同时要求切换生效分支（--activate）时允许。
  * @param branches 服务器返回的分支列表。
  * @param target 目标分支名。
  * @param activate 是否在上传后切换生效分支。
- * @returns create 为 true 表示新建分支，false 表示覆盖已有分支。
+ * @returns create 为 true 表示新建分支；steps 为依次执行的请求，新建时为 clone 后接 upload，覆盖时只有 upload。
  * @throws {Error} 目标是生效分支且未给出 --activate。
  */
 export const planUpload = (
   branches: readonly Branch[],
   target: string,
   activate: boolean,
-): { readonly create: boolean } => {
+): { readonly create: boolean; readonly steps: readonly UploadStep[] } => {
   if (!activate && activeWorldBranch(branches) === target) {
     throw new Error(`${target} 是当前生效分支，覆盖它会立即改变线上代码；确需如此请加 --activate`);
   }
-  return { create: !branches.some((branch) => branch.branch === target) };
+  const create = !branches.some((branch) => branch.branch === target);
+  return { create, steps: create ? ['clone', 'upload'] : ['upload'] };
 };
 
 /** 一次生效分支切换的本机记录（.deploy-history.json 中按账户保存的数组元素）。 */

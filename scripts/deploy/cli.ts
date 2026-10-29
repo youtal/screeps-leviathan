@@ -4,7 +4,7 @@
  * 所属位置：scripts/deploy/，开发工具，不进入游戏构建产物；由 Node 的类型剥离直接运行，不经编译。
  * 用法见 lib.ts 的 USAGE。除 accounts 外，每条命令都必须用 --account 指定 .secret.json 中的账户。
  * 流程（upload）：校验账户与分支 → 运行 npm run build → 读取 dist/main.js 与 source map →
- * 新建或覆盖目标分支 → 回读校验 → 按 --activate 切换生效分支并确认。
+ * 新建目标分支并覆盖一次，或直接覆盖已有分支 → 回读校验 → 按 --activate 切换生效分支并确认。
  * 生效切换历史：activate、upload --activate、rollback 成功后，把"切换前、切换后"的生效分支追加到本机的
  * .deploy-history.json（按账户分开，不进入版本控制）；rollback 据此回到上一个生效分支（审计 PA-13）。
  * 换一台机器部署时没有历史，rollback 拒绝自动选择，须用 activate 指定。
@@ -152,13 +152,12 @@ const upload = async (api: ScreepsApi, account: Account, args: DeployArgs): Prom
   execFileSync('npm', ['run', 'build'], { stdio: 'inherit' });
   const modules = collectModules(readFileSync(MAIN_FILE, 'utf8'), existsSync(MAP_FILE) ? readFileSync(MAP_FILE, 'utf8') : null);
 
-  const { create } = planUpload(await api.listBranches(), target, args.activate);
+  const { create, steps } = planUpload(await api.listBranches(), target, args.activate);
   // 覆盖生效分支时上传本身就改变线上代码，所以部署历史在第一次写服务器之前校验（审计 DV-05）。
   const loaded = args.activate ? loadHistory(account) : undefined;
-  if (create) {
-    await api.cloneBranch(target, modules);
-  } else {
-    await api.uploadCode(target, modules);
+  // 新建分支后再覆盖一次，使代码时间戳为毫秒数而不是 Date（原因见 planUpload）。
+  for (const step of steps) {
+    await (step === 'clone' ? api.cloneBranch(target, modules) : api.uploadCode(target, modules));
   }
   const mismatched = mismatchedModules(modules, await api.getCode(target));
   if (mismatched.length > 0) {

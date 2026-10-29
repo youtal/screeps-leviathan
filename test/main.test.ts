@@ -9,10 +9,7 @@
 import { runInNewContext } from 'node:vm';
 import type { EntryStatus } from '@/app/ops';
 import type { Kernel, KernelHealth } from '@/kernel/lifecycle';
-import {
-  ENTRY_KEY, type EntryLoop, FALLBACK_NOTIFY_GAP, KERNEL_COOLDOWN, KERNEL_CRASH_LIMIT, PAUSE_LIMIT, SAFE_MODE_TICKS, createEntry, resolveEntry,
-  stabilizeCodeTimestamp,
-} from '@/main';
+import { FALLBACK_NOTIFY_GAP, KERNEL_COOLDOWN, KERNEL_CRASH_LIMIT, PAUSE_LIMIT, SAFE_MODE_TICKS, createEntry } from '@/main';
 
 /**
  * @description 创建可编排的入口：每次 kernel.tick 依次取 script 中的结果（'throw' 表示抛错，'reset' 表示登记软重置的暂停 tick，
@@ -29,7 +26,7 @@ const setup = (script: (KernelHealth | 'throw' | 'reset' | 'spin')[],
   options: { takeoverFails?: boolean; fallbackFails?: boolean; assembleFails?: boolean; thrown?: unknown } = {}) => {
   let time = 0;
   const seen = { assembled: 0, ticks: 0, disposed: 0, fallbacks: [] as number[], reports: [] as string[], notices: [] as string[],
-    infos: [] as string[], entry: undefined as (() => EntryStatus) | undefined };
+    entry: undefined as (() => EntryStatus) | undefined };
   const loop = createEntry({
     takeover: () => { if (options.takeoverFails) throw new Error('late'); },
     assemble: (entryStatus): Kernel => {
@@ -61,7 +58,6 @@ const setup = (script: (KernelHealth | 'throw' | 'reset' | 'spin')[],
     notify: (message) => { seen.notices.push(message); },
     time: () => time,
     report: (message) => { seen.reports.push(message); },
-    notice: (message) => { seen.infos.push(message); },
   });
   /**
    * @description 推进 n 个 tick。
@@ -199,7 +195,6 @@ test('LC-07：两次接管间隔不足 FALLBACK_NOTIFY_GAP 时只通知一次；
     notify: () => { throw new Error('平台拒绝'); },
     time: () => time,
     report: (message) => { reports.push(message); },
-    notice: () => undefined,
   });
   time = 1;
   loop();
@@ -264,85 +259,5 @@ describe('上一 tick 被 CPU 硬终止（审计 S-01–S-06）', () => {
     run(6);
     expect(seen.reports.filter((r) => r.includes('CPU 硬终止'))).toEqual([]);
     expect(seen.fallbacks).toEqual([2]);
-  });
-});
-
-describe('模块重新执行（内核设计第 6 节）', () => {
-  /**
-   * @description 构造只记录调用的入口替身。
-   * @param log 调用记录。
-   * @param name 入口名。
-   * @returns 入口。
-   */
-  const fake = (log: string[], name: string): EntryLoop => Object.assign(() => { log.push(`${name}.loop`); }, {
-    reevaluated: () => { log.push(`${name}.reevaluated`); },
-    dispose: () => { log.push(`${name}.dispose`); },
-  });
-
-  test('同一 global 中同一构建的重新执行沿用已登记的入口；构建不同时销毁旧入口再新建；登记不可枚举', () => {
-    const target = {};
-    const log: string[] = [];
-    let created = 0;
-    const create = (name: string) => () => { created += 1; return fake(log, name); };
-    const first = resolveEntry(target, 'b1', create('a'));
-    expect(resolveEntry(target, 'b1', create('x'))).toBe(first);
-    expect(created).toBe(1);
-    const next = resolveEntry(target, 'b2', create('b'));
-    expect(next).not.toBe(first);
-    expect(log).toEqual(['a.reevaluated', 'a.dispose']);
-    expect(Object.keys(target)).toEqual([]);
-    expect((target as Record<symbol, unknown>)[ENTRY_KEY]).toMatchObject({ build: 'b2' });
-  });
-
-  test('注册表中的值不完整时当作没有，直接新建', () => {
-    const target = { [ENTRY_KEY]: { build: 'b1' } };
-    const log: string[] = [];
-    resolveEntry(target, 'b1', () => fake(log, 'a'));
-    expect((target as Record<symbol, { build: string }>)[ENTRY_KEY].build).toBe('b1');
-    expect(log).toEqual([]);
-  });
-
-  test('沿用入口时 kernel 不重新装配；重新执行的次数在 1、10、100 次时各记录一条 info', () => {
-    const { run, seen, loop } = setup([]);
-    run(1);
-    for (let i = 0; i < 120; i += 1) { loop.reevaluated(); run(1); }
-    expect(seen.assembled).toBe(1);
-    expect(seen.infos.map((m) => /累计 (\d+) 次/.exec(m)?.[1])).toEqual(['1', '10', '100']);
-  });
-
-  test('dispose 销毁 kernel，之后 loop 不再运行', () => {
-    const { run, seen, loop } = setup([]);
-    run(2);
-    loop.dispose();
-    run(3);
-    expect(seen.disposed).toBe(1);
-    expect(seen.ticks).toBe(2);
-  });
-});
-
-describe('代码时间戳（内核设计第 6 节）', () => {
-  /**
-   * @description 按引擎的写法判断代码是否更新（engine 4.3.2 src/game/game.js：userCodeTimestamp != require.timestamp）。
-   * @param runtime 本 tick 平台传入的代码时间戳。
-   * @param stored require 上记录的时间戳。
-   * @returns 引擎会新建 require 时为 true。
-   */
-  const engineRebuilds = (runtime: unknown, stored: unknown): boolean => runtime != stored;
-
-  test('官服的 Date 时间戳换成字符串后，同一时刻的新 Date 不再触发重建；代码更新后的新时刻仍触发', () => {
-    const at = Date.UTC(2026, 9, 21, 6, 53, 22);
-    const target = { require: { timestamp: new Date(at) as unknown } };
-    expect(engineRebuilds(new Date(at), target.require.timestamp)).toBe(true);
-    expect(stabilizeCodeTimestamp(target)).toBe(true);
-    expect(typeof target.require.timestamp).toBe('string');
-    expect(engineRebuilds(new Date(at), target.require.timestamp)).toBe(false);
-    expect(engineRebuilds(new Date(at + 5000), target.require.timestamp)).toBe(true);
-  });
-
-  test('时间戳不是 Date（私服为字符串）或没有 require 时不做任何事', () => {
-    const target = { require: { timestamp: '2026-10-21T06:52:07.762Z' } };
-    expect(stabilizeCodeTimestamp(target)).toBe(false);
-    expect(target.require.timestamp).toBe('2026-10-21T06:52:07.762Z');
-    expect(stabilizeCodeTimestamp({})).toBe(false);
   });
 });

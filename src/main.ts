@@ -20,17 +20,13 @@
  * 距上次通知不足 FALLBACK_NOTIFY_GAP 时不再通知。入口状态（审计 LC-04）：经 entryStatus() 交给装配方，
  * kernel 不可用时 ops.status() 以它说明正常循环为什么没在运行。
  * 状态：kernel 实例、本 tick 是否在运行 kernel、连续失败、degraded 与暂停计数、冷却截止 tick、最近一次失败、上一 tick 是否运行保底与上次通知的 tick
- * 保存在 createEntry 的闭包中（heap），跨软重置累计，global reset 后重新计数。
- * 模块重新执行（内核设计第 6 节）：引擎在 require.cache.main 失效或代码时间戳变化时，会在同一个 global 中重新执行
- * main（@screeps/engine src/game/game.js），模块作用域里的状态随之重建。入口因此登记在全局注册表 globalThis[ENTRY_KEY]：
- * 同一构建（assembly 的 BUILD）的重新执行沿用已有入口，kernel 与跨 tick 的流程（如开局备份）得以延续；构建不同时
- * 先销毁旧入口的 kernel（卸下控制台命名空间）再新建。重新执行的次数在 1、10、100…… 次时各记录一条 info。
- * 代码时间戳（内核设计第 6 节）：官服传入的代码时间戳是 Date 对象，引擎以 != 比较新旧时间戳，两个不同的 Date 对象
- * 恒不相等，于是每 tick 重建模块缓存。模块执行时 stabilizeCodeTimestamp 把 require.timestamp 换成同一时刻的字符串，
- * 下一 tick 引擎比较 Date 与字符串时先把 Date 转成字符串，同一时刻即相等，缓存得以保留；代码更新后时间戳不同，照常重新加载。
- * 切换逻辑写成 createEntry(deps)，测试以假依赖驱动；loop 由 resolveEntry 取得，模块加载时只读写 globalThis，不读取 Game。
+ * 保存在 createEntry 的闭包中（heap），跨软重置累计，global reset 或模块重新执行后重新计数。
+ * 模块重新执行（内核设计第 6 节）：代码更新而 global 未重置时，引擎在同一个 global 中重新执行 main
+ * （@screeps/engine src/game/game.js），模块作用域里的状态随之重建：入口重新创建，kernel 从已提交的持久状态重新装配，
+ * 与 global reset 相同；上一轮安装的控制台命名空间由 kernel.console 识别并替换。入口不在全局对象上登记状态。
+ * 切换逻辑写成 createEntry(deps)，测试以假依赖驱动；模块加载时只创建入口，不读取 Game。
  */
-import { BUILD, type GameServices, assemble, createGameServices } from '@/app/assembly';
+import { type GameServices, assemble, createGameServices } from '@/app/assembly';
 import type { EntryStatus } from '@/app/ops';
 import { runFallback } from '@/fallback';
 import type { Kernel } from '@/kernel/lifecycle';
@@ -87,75 +83,15 @@ export interface EntryDeps {
    * @returns 无返回值；不得抛错。
    */
   report(message: string, error?: unknown): void;
-  /**
-   * @description 记录入口层面的一般信息（info 级），例如模块的重新执行。
-   * @param message 说明。
-   * @returns 无返回值；不得抛错。
-   */
-  notice(message: string): void;
 }
-
-/** 入口：每 tick 调用的 loop，附带供全局注册表使用的方法。 */
-export interface EntryLoop {
-  /**
-   * @description 每 tick 调用一次。
-   * @returns 无返回值。
-   */
-  (): void;
-  /**
-   * @description 同一 global 中 main 模块重新执行、沿用本入口时调用：累计次数，下一次 loop 时按 1、10、100…… 限频记录 info。
-   * @returns 无返回值。
-   */
-  reevaluated(): void;
-  /**
-   * @description 代码更新后丢弃本入口：销毁 kernel（卸下控制台命名空间）；之后再调用 loop 不做任何事。
-   * @returns 无返回值；不抛错。
-   */
-  dispose(): void;
-}
-
-/** 全局注册表的键。Symbol.for 在同一 global 中返回同一个符号，各轮模块执行都能找到同一条记录。 */
-export const ENTRY_KEY = Symbol.for('leviathan.entry');
-
-/** 全局注册表中的入口记录：创建它的构建标识与入口。 */
-interface EntryRecord {
-  readonly build: string;
-  readonly loop: EntryLoop;
-}
-
-/**
- * @description 取得本次模块执行使用的入口（内核设计第 6 节"模块重新执行"）。同一 global 中已有同一构建的入口时沿用，
- * 使 kernel 与跨 tick 的流程不因模块重新执行而中断；构建不同（代码更新）时先销毁旧入口再新建；没有时新建并登记。
- * @param target 登记入口的全局对象，游戏中为 globalThis。
- * @param build 当前构建的标识。
- * @param create 新建入口的函数；只在不能沿用时调用。
- * @returns 入口。
- */
-export const resolveEntry = (target: object, build: string, create: () => EntryLoop): EntryLoop => {
-  const registry = target as Record<symbol, unknown>;
-  const existing = registry[ENTRY_KEY] as Partial<EntryRecord> | undefined;
-  if (existing?.build === build && typeof existing.loop === 'function') {
-    existing.loop.reevaluated();
-    return existing.loop;
-  }
-  if (typeof existing?.loop?.dispose === 'function') existing.loop.dispose();
-  const loop = create();
-  Object.defineProperty(target, ENTRY_KEY, { value: { build, loop } satisfies EntryRecord, configurable: true, writable: true, enumerable: false });
-  return loop;
-};
 
 /**
  * @description 创建每 tick 调用的入口函数，在闭包中保存 kernel 实例与故障计数。
  * @param deps 外部依赖。
- * @returns 每 tick 调用一次的入口，附带 reevaluated 与 dispose。
+ * @returns 每 tick 调用一次的入口。
  */
-export const createEntry = (deps: EntryDeps): EntryLoop => {
+export const createEntry = (deps: EntryDeps): (() => void) => {
   let kernel: Kernel | undefined;
-  // 同一 global 中模块重新执行、沿用本入口的累计次数；达到 nextNotice 时记录一次，之后阈值乘 10。
-  let reevaluations = 0;
-  let nextNotice = 1;
-  // 已被新构建的入口取代：不再运行。
-  let disposed = false;
   // 装配或 kernel.tick 正在进行：进入 try 时置 true，try 正常走完或进入 catch 时清除。CPU 硬终止不执行 catch，
   // 所以下一 tick 开始时仍为 true 即说明上一 tick 被终止；只在 heap 中，global reset 后为 false（没有可沿用的实例）。
   let running = false;
@@ -245,13 +181,8 @@ export const createEntry = (deps: EntryDeps): EntryLoop => {
    * @description 每 tick 的入口流程，语义见文件摘要。
    * @returns 无返回值。
    */
-  const loop = (): void => {
-    if (disposed) return;
+  return (): void => {
     try { deps.takeover(); } catch (error) { deps.report('Memory 接管失败，引擎内部写入可能落到真实 Memory', error); }
-    if (reevaluations >= nextNotice) {
-      deps.notice(`main 模块在同一 global 中重新执行（累计 ${reevaluations} 次），沿用已有的入口与 kernel`);
-      while (nextNotice <= reevaluations) nextNotice *= 10;
-    }
     let fallback = false;
     let reason = '停用冷却';
     if (running) {
@@ -306,23 +237,6 @@ export const createEntry = (deps: EntryDeps): EntryLoop => {
       try { deps.fallback(); } catch (error) { deps.report('保底循环抛错', error); }
     }
   };
-
-  return Object.assign(loop, {
-    /**
-     * @description 记录一次沿用本入口的模块重新执行，语义见 EntryLoop.reevaluated。
-     * @returns 无返回值。
-     */
-    reevaluated: (): void => { reevaluations += 1; },
-    /**
-     * @description 销毁本入口的 kernel，语义见 EntryLoop.dispose。
-     * @returns 无返回值；kernel 清理失败只报告。
-     */
-    dispose: (): void => {
-      disposed = true;
-      try { kernel?.dispose(); } catch (error) { deps.report('代码更新时旧入口的 kernel 清理失败', error); }
-      kernel = undefined;
-    },
-  });
 };
 
 /**
@@ -374,43 +288,8 @@ const gameEntryDeps = (): EntryDeps => {
         console.log(`[main] ${message}`);
       }
     },
-    /**
-     * @description 经 main 作用域的日志记录 info；日志不可用时退回 console.log。
-     * @param message 说明。
-     * @returns 无返回值；不抛错。
-     */
-    notice: (message) => {
-      try {
-        get().logRoot.scope('main').info(message);
-      } catch {
-        console.log(`[main] ${message}`);
-      }
-    },
   };
 };
 
-/**
- * @description 规避官服每 tick 重建模块缓存（内核设计第 6 节"代码时间戳"）。引擎每 tick 以
- * `runtimeData.userCodeTimestamp != require.timestamp` 判断代码是否更新（engine 4.3.2 src/game/game.js）。官服的时间戳是
- * Date 对象，每 tick 是不同的对象，`!=` 按引用比较恒为真，于是每 tick 新建 require、在同一 global 中重新执行 main。
- * 把 require.timestamp 换成同一 Date 的字符串形式后，`Date != 字符串` 先把 Date 按默认提示转为字符串（Date.prototype.toString）
- * 再比较：同一时刻即相等，模块缓存保留；代码更新后时刻不同，照常重新加载。toString 精确到秒，两次上传相隔不足一秒的情形
- * 可以忽略。时间戳不是 Date（私服为字符串）或没有 require 时不做任何事。
- * 前提是平台只以 `!=` 使用这个字段；若平台另以 Date 方法读取它，替换会出错，所以只在官服实测确认后保留（第 6 节）。
- * @param target 全局对象，游戏中为 globalThis。
- * @returns 做了替换时为 true。
- */
-export const stabilizeCodeTimestamp = (target: object): boolean => {
-  const req = (target as { require?: { timestamp?: unknown } }).require;
-  const timestamp = req?.timestamp;
-  // 用 Object.prototype.toString 判断，不依赖 instanceof：Date 构造器可能来自其他上下文。
-  if (!req || Object.prototype.toString.call(timestamp) !== '[object Date]') return false;
-  req.timestamp = String(timestamp);
-  return true;
-};
-
-// 引擎每新建一次 require 都会执行一次 main，所以每个新 require 恰好处理一次。
-stabilizeCodeTimestamp(globalThis);
-
-/** Screeps 每 tick 调用的入口；同一 global 中重新执行 main 时沿用同一构建已登记的入口。 */
-export const loop = resolveEntry(globalThis, BUILD, () => createEntry(gameEntryDeps()));
+/** Screeps 每 tick 调用的入口；模块每执行一次创建一个。 */
+export const loop = createEntry(gameEntryDeps());
