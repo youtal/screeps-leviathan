@@ -2,5 +2,3 @@
 
 /** 测试中固定的版本号。 */
 export const release = '0.0.0-test';
-/** 测试中固定的构建标识。 */
-export const build = '0.0.0-test+stub';

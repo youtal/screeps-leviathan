@@ -23,13 +23,7 @@ import { createGamePlatform } from '@/kernel/memory';
 import { createProfiler } from '@/kernel/profiler';
 import { createGameSegmentsPlatform } from '@/kernel/segments';
 import { bootSettings, loggerSettings, memorySettings, profilerSettings } from '@/settings';
-import { build, release } from 'virtual:release';
-
-/**
- * 当前构建的标识（版本号加构建时刻），由构建注入。入口据此判断同一 global 中重新执行的 main 是否为同一份代码
- * （docs/design/kernel/README.md 第 6 节）；virtual:release 只允许本模块导入，所以经这里转交。
- */
-export const BUILD: string = build;
+import { release } from 'virtual:release';
 
 /** 本项目在 Memory 中的命名空间、签名与根 schema。 */
 export const MEMORY_IDENTITY = { namespace: 'leviathan', signature: 'leviathan', schema: 1 } as const;

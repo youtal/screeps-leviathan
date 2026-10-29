@@ -7,7 +7,7 @@
  */
 import { assemble, createGameServices } from '@/app/assembly';
 import * as lifecycle from '@/kernel/lifecycle';
-import { ENTRY_KEY, loop } from '@/main';
+import { loop } from '@/main';
 import { loggerSettings, memorySettings, profilerSettings } from '@/settings';
 import { createMemoryPlatform } from '../platform/memory';
 
@@ -40,9 +40,8 @@ const installGame = (time: number): void => {
 const notices: string[] = [];
 
 /**
- * @description 加载一份全新的入口模块，模拟一次新的 global：入口在模块级 heap 中持有 kernel，并登记在全局注册表
- * globalThis[ENTRY_KEY]（同一 global 中模块重新执行时沿用）。测试进程共用 globalThis，调用方须先移除上一段的
- * 控制台命名空间与注册表登记，否则相当于同一 global 中的模块重新执行。
+ * @description 加载一份全新的入口模块，模拟一次新的 global：入口在模块级 heap 中持有 kernel。测试进程共用 globalThis，
+ * 调用方须先移除上一段的控制台命名空间，否则相当于同一 global 中的模块重新执行。
  * @returns 新入口的 loop。
  */
 const freshLoop = (): (() => void) => {
@@ -65,9 +64,8 @@ test('真实 loop 连续运行：没有资产时判为 DORMANT 且不初始化�
   // 新的 global：入口重新装配 kernel，从这份存储加载 Memory。
   const text = JSON.stringify({ leviathan: { sys: marker, part: {}, rooms: {}, creeps: {}, flags: {} } });
   const ready = createMemoryPlatform({ target: globalThis, memory: text });
-  // 新 global 的全局作用域中没有上一段安装的控制台命名空间与入口登记；测试进程共用 globalThis，手动移除。
+  // 新 global 的全局作用域中没有上一段安装的控制台命名空间；测试进程共用 globalThis，手动移除。
   for (const name of ['boot', 'ops']) delete (globalThis as Record<string, unknown>)[name];
-  delete (globalThis as Record<symbol, unknown>)[ENTRY_KEY];
   const second = freshLoop();
   for (let t = 4; t <= 6; t += 1) {
     installGame(t);

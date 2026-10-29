@@ -21,8 +21,9 @@ export const CONSOLE_RESULT_LIMIT = 4000;
 export const OFFLINE_RESULT = 'kernel 未运行（重建或冷却中）';
 
 /**
- * 标记本模块安装的全局对象，用于区分游戏或其他代码的同名全局。用 Symbol.for 取全局注册的符号：引擎可能在同一个 global
- * 中重新执行 main（内核设计第 6 节"模块重新执行"），模块级的普通 Symbol 每轮执行都不同，会把上一轮装的命名空间误判为外来对象。
+ * 标记本模块安装的全局对象，用于区分游戏或其他代码的同名全局。用 Symbol.for 取全局注册的符号：代码更新而 global 未重置时，
+ * 引擎在同一个 global 中重新执行 main（内核设计第 6 节"模块重新执行"），模块级的普通 Symbol 每轮执行都不同，
+ * 会把上一轮装的命名空间误判为外来对象。
  */
 const MARK = Symbol.for('kernel.console');
 

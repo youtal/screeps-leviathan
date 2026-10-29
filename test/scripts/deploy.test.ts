@@ -130,13 +130,15 @@ const branches: Branch[] = [
 ];
 
 describe('planUpload', () => {
-  test('分支不存在时新建，存在时覆盖', () => {
-    expect(planUpload(branches, 'v0.3.0', false)).toEqual({ create: true });
-    expect(planUpload(branches, 'v0.1.0', false)).toEqual({ create: false });
+  test('分支存在时只覆盖', () => {
+    expect(planUpload(branches, 'v0.1.0', false)).toEqual({ create: false, steps: ['upload'] });
+  });
+  test('分支不存在时新建后再覆盖一次：clone-branch 写入 Date 时间戳，会使引擎每 tick 重新执行 main，user/code 改写为毫秒数', () => {
+    expect(planUpload(branches, 'v0.3.0', false)).toEqual({ create: true, steps: ['clone', 'upload'] });
   });
   test('覆盖生效分支必须同时要求切换生效分支', () => {
     expect(() => planUpload(branches, 'v0.1.11', false)).toThrow('--activate');
-    expect(planUpload(branches, 'v0.1.11', true)).toEqual({ create: false });
+    expect(planUpload(branches, 'v0.1.11', true)).toEqual({ create: false, steps: ['upload'] });
   });
 });
 
