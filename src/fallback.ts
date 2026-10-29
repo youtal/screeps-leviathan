@@ -22,12 +22,7 @@ const FB_PATH_LIMIT = 20;
 const FB_PATH_OPS = 1000;
 
 type FillTarget = StructureSpawn | StructureExtension | StructureTower;
-type Supply =
-  | Resource
-  | Tombstone
-  | Ruin
-  | StructureContainer
-  | StructureStorage;
+type Supply = Resource | Tombstone | Ruin | StructureContainer | StructureStorage;
 
 /** 一次 runFallback 调用的临时状态，调用结束即丢弃。 */
 interface TickState {
@@ -74,18 +69,11 @@ interface RoomInfo {
  */
 export const runFallback = (): void => {
   const ceiling = Game.cpu.bucket < 1000 ? Game.cpu.limit : Game.cpu.tickLimit;
-  const state: TickState = {
-    cap: ceiling - FB_CPU_RESERVE,
-    paths: 0,
-    reserved: new Map(),
-    names: new Set(),
-    matrices: new Map(),
-  };
+  const state: TickState = { cap: ceiling - FB_CPU_RESERVE, paths: 0, reserved: new Map(), names: new Set(), matrices: new Map() };
   const rooms: RoomInfo[] = [];
   for (const room of Object.values(Game.rooms)) {
     if (!cpuOk(state)) return;
-    if (room.controller?.my)
-      guard(`房间 ${room.name}`, () => rooms.push(collect(room)));
+    if (room.controller?.my) guard(`房间 ${room.name}`, () => rooms.push(collect(room)));
   }
   for (const info of rooms) {
     if (!cpuOk(state)) return;
@@ -108,8 +96,7 @@ export const runFallback = (): void => {
     guard(`工作 ${info.room.name}`, () => {
       info.upgrader = chooseUpgrader(info);
       const upgrader = info.upgrader;
-      if (upgrader)
-        guard(`creep ${upgrader.name}`, () => work(upgrader, info, state));
+      if (upgrader) guard(`creep ${upgrader.name}`, () => work(upgrader, info, state));
       queues.push([info, info.creeps.filter((c) => c !== upgrader)]);
     });
   }
@@ -168,57 +155,24 @@ const collect = (room: Room): RoomInfo => {
   const hostiles = room.find(FIND_HOSTILE_CREEPS);
   const mine = room.find(FIND_MY_STRUCTURES);
   const structures = room.find(FIND_STRUCTURES);
-  const towers = mine.filter(
-    (s): s is StructureTower => s.structureType === STRUCTURE_TOWER,
-  );
-  const spawns = mine.filter(
-    (s): s is StructureSpawn => s.structureType === STRUCTURE_SPAWN,
-  );
-  const extensions = mine.filter(
-    (s): s is StructureExtension => s.structureType === STRUCTURE_EXTENSION,
-  );
-  const needy = towers.filter(
-    (t) =>
-      hostiles.length > 0 ||
-      t.store.getUsedCapacity(RESOURCE_ENERGY) <
-        t.store.getCapacity(RESOURCE_ENERGY) / 2,
-  );
-  const stores = structures.filter(
-    (s): s is StructureContainer | StructureStorage =>
-      s.structureType === STRUCTURE_CONTAINER ||
-      s.structureType === STRUCTURE_STORAGE,
-  );
+  const towers = mine.filter((s): s is StructureTower => s.structureType === STRUCTURE_TOWER);
+  const spawns = mine.filter((s): s is StructureSpawn => s.structureType === STRUCTURE_SPAWN);
+  const extensions = mine.filter((s): s is StructureExtension => s.structureType === STRUCTURE_EXTENSION);
+  const needy = towers.filter((t) => hostiles.length > 0
+    || t.store.getUsedCapacity(RESOURCE_ENERGY) < t.store.getCapacity(RESOURCE_ENERGY) / 2);
+  const stores = structures.filter((s): s is StructureContainer | StructureStorage =>
+    s.structureType === STRUCTURE_CONTAINER || s.structureType === STRUCTURE_STORAGE);
   const controller = room.controller!;
   const sources = room.find(FIND_SOURCES);
-  const blocking = room
-    .find(FIND_MY_CONSTRUCTION_SITES)
-    .filter((s) =>
-      (OBSTACLE_OBJECT_TYPES as string[]).includes(s.structureType),
-    );
-  const threshold =
-    (CONTROLLER_DOWNGRADE[controller.level] ?? 0) * FB_DOWNGRADE_RATIO;
-  const emergency =
-    controller.ticksToDowngrade !== undefined &&
-    controller.ticksToDowngrade < threshold;
+  const blocking = room.find(FIND_MY_CONSTRUCTION_SITES)
+    .filter((s) => (OBSTACLE_OBJECT_TYPES as string[]).includes(s.structureType));
+  const threshold = (CONTROLLER_DOWNGRADE[controller.level] ?? 0) * FB_DOWNGRADE_RATIO;
+  const emergency = controller.ticksToDowngrade !== undefined && controller.ticksToDowngrade < threshold;
   return {
-    room,
-    controller,
-    hostiles,
-    towers,
-    spawns,
-    structures,
-    emergency,
+    room, controller, hostiles, towers, spawns, structures, emergency,
     creeps: room.find(FIND_MY_CREEPS),
-    obstacles: [
-      ...sources,
-      ...room.find(FIND_MINERALS),
-      controller,
-      ...blocking,
-    ].map((o) => o.pos),
-    fill:
-      hostiles.length > 0
-        ? [needy, spawns, extensions]
-        : [spawns, extensions, needy],
+    obstacles: [...sources, ...room.find(FIND_MINERALS), controller, ...blocking].map((o) => o.pos),
+    fill: hostiles.length > 0 ? [needy, spawns, extensions] : [spawns, extensions, needy],
     supply: [
       ...room.find(FIND_DROPPED_RESOURCES, {
         /**
@@ -228,9 +182,7 @@ const collect = (room: Room): RoomInfo => {
          */
         filter: (r) => r.resourceType === RESOURCE_ENERGY,
       }),
-      ...room.find(FIND_TOMBSTONES),
-      ...room.find(FIND_RUINS),
-      ...stores,
+      ...room.find(FIND_TOMBSTONES), ...room.find(FIND_RUINS), ...stores,
     ],
     sources: room.find(FIND_SOURCES_ACTIVE),
     allSources: sources,
@@ -245,20 +197,11 @@ const collect = (room: Room): RoomInfo => {
  */
 const chooseUpgrader = (info: RoomInfo): Creep | undefined => {
   if (!info.emergency) return undefined;
-  const workers = info.creeps.filter(
-    (c) => parts(c, WORK) > 0 && parts(c, CARRY) > 0,
-  );
-  const loaded = workers.filter(
-    (c) =>
-      c.store.getUsedCapacity(RESOURCE_ENERGY) > 0 &&
-      (parts(c, MOVE) > 0 || c.pos.inRangeTo(info.controller, 3)),
-  );
+  const workers = info.creeps.filter((c) => parts(c, WORK) > 0 && parts(c, CARRY) > 0);
+  const loaded = workers.filter((c) => c.store.getUsedCapacity(RESOURCE_ENERGY) > 0
+    && (parts(c, MOVE) > 0 || c.pos.inRangeTo(info.controller, 3)));
   const mobile = workers.filter((c) => parts(c, MOVE) > 0);
-  return (
-    info.controller.pos.findClosestByRange(
-      loaded.length > 0 ? loaded : mobile,
-    ) ?? undefined
-  );
+  return info.controller.pos.findClosestByRange(loaded.length > 0 ? loaded : mobile) ?? undefined;
 };
 
 /**
@@ -274,14 +217,8 @@ const defend = (tower: StructureTower, info: RoomInfo): void => {
     if (target) tower.attack(target);
     return;
   }
-  if (
-    tower.store.getUsedCapacity(RESOURCE_ENERGY) <
-    tower.store.getCapacity(RESOURCE_ENERGY) / 2
-  )
-    return;
-  const hurt = tower.pos.findClosestByRange(
-    info.creeps.filter((c) => c.hits < c.hitsMax),
-  );
+  if (tower.store.getUsedCapacity(RESOURCE_ENERGY) < tower.store.getCapacity(RESOURCE_ENERGY) / 2) return;
+  const hurt = tower.pos.findClosestByRange(info.creeps.filter((c) => c.hits < c.hitsMax));
   if (hurt) tower.heal(hurt);
 };
 
@@ -292,8 +229,7 @@ const defend = (tower: StructureTower, info: RoomInfo): void => {
  * @returns 可用时为 true。
  */
 const canHarvest = (creep: Creep, info: RoomInfo): boolean =>
-  parts(creep, WORK) > 0 &&
-  (parts(creep, MOVE) > 0 || info.sources.some((s) => creep.pos.isNearTo(s)));
+  parts(creep, WORK) > 0 && (parts(creep, MOVE) > 0 || info.sources.some((s) => creep.pos.isNearTo(s)));
 
 /**
  * @description 房间没有可用采集者、也没有正在孵化的带 WORK 接替者时，由空闲 spawn 用 200 能量孵化 [WORK, CARRY, MOVE]。
@@ -308,40 +244,28 @@ const canHarvest = (creep: Creep, info: RoomInfo): boolean =>
  */
 const spawnIfNeeded = (info: RoomInfo, state: TickState): void => {
   if (info.creeps.some((c) => canHarvest(c, info))) return;
-  const hatching = Object.values(Game.creeps).filter(
-    (c) => c.spawning && c.pos.roomName === info.room.name,
-  );
+  const hatching = Object.values(Game.creeps).filter((c) => c.spawning && c.pos.roomName === info.room.name);
   /**
    * @description 找出位于 spawn 坐标、正在孵化的 creep（含本 tick 刚调用 spawnCreep 的占位对象）。
    * @param s spawn。
    * @returns 正在孵化的 creep；没有时为 undefined。
    */
-  const at = (s: StructureSpawn): Creep | undefined =>
-    hatching.find((c) => c.pos.x === s.pos.x && c.pos.y === s.pos.y);
+  const at = (s: StructureSpawn): Creep | undefined => hatching.find((c) => c.pos.x === s.pos.x && c.pos.y === s.pos.y);
   const pending = info.spawns.some((s) => {
     const name = s.spawning?.name;
     const creep = name === undefined ? at(s) : Game.creeps[name];
     return creep !== undefined && parts(creep, WORK) > 0;
   });
   if (pending || info.room.energyAvailable < 200) return;
-  const spawn = info.spawns.find(
-    (s) => !s.spawning && at(s) === undefined && s.isActive(),
-  );
+  const spawn = info.spawns.find((s) => !s.spawning && at(s) === undefined && s.isActive());
   if (!spawn) return;
   // 身份用的 shard 名（架构 11.3 的 here）：有 InterShardMemory 时取 Game.shard.name，否则为 x。私服的 driver 会注入
   // Game.shard，名称是服务器主机名（F7），可能含 "-" 且随容器重建变化，所以不能用 Game.shard 是否存在来判断。
   // typeof 只做特性检测，不读写 InterShardMemory 的内容（5.7）。
-  const shard =
-    typeof InterShardMemory !== "undefined" && Game.shard
-      ? Game.shard.name
-      : "x";
+  const shard = typeof InterShardMemory !== 'undefined' && Game.shard ? Game.shard.name : 'x';
   const prefix = `fb-${shard}-${Game.time.toString(36)}-`;
   let seq = 0;
-  while (
-    Game.creeps[prefix + seq] !== undefined ||
-    state.names.has(prefix + seq)
-  )
-    seq += 1;
+  while (Game.creeps[prefix + seq] !== undefined || state.names.has(prefix + seq)) seq += 1;
   state.names.add(prefix + seq);
   spawn.spawnCreep([WORK, CARRY, MOVE], prefix + seq);
 };
@@ -364,17 +288,14 @@ const remaining = (state: TickState, id: string, actual: number): number => {
  * @returns 能量数量。
  */
 const supplyEnergy = (supply: Supply): number =>
-  "amount" in supply
-    ? supply.amount
-    : supply.store.getUsedCapacity(RESOURCE_ENERGY);
+  'amount' in supply ? supply.amount : supply.store.getUsedCapacity(RESOURCE_ENERGY);
 
 /**
  * @description 取补能目标的空余容量。
  * @param target spawn、extension 或 tower。
  * @returns 空余能量容量。
  */
-const fillFree = (target: FillTarget): number =>
-  target.store.getFreeCapacity(RESOURCE_ENERGY);
+const fillFree = (target: FillTarget): number => target.store.getFreeCapacity(RESOURCE_ENERGY);
 
 /**
  * @description 撤回 pick 的预留：creep 本 tick 没有提交动作或移动时调用，让其他 creep 仍能使用该目标（审计 S-19）。
@@ -398,20 +319,11 @@ const unpick = (state: TickState, id: string, amount: number): void => {
  * @param state 本 tick 状态。
  * @returns 选中的目标；没有可用目标时为 null。
  */
-const pick = <T extends _HasId & RoomObject>(
-  creep: Creep,
-  candidates: T[],
-  actual: (t: T) => number,
-  amount: number,
-  state: TickState,
-): T | null => {
+const pick = <T extends _HasId & RoomObject>(creep: Creep, candidates: T[], actual: (t: T) => number,
+  amount: number, state: TickState): T | null => {
   const open = candidates.filter((t) => remaining(state, t.id, actual(t)) > 0);
   const target = creep.pos.findClosestByRange(open);
-  if (target)
-    state.reserved.set(
-      target.id,
-      remaining(state, target.id, actual(target)) - amount,
-    );
+  if (target) state.reserved.set(target.id, remaining(state, target.id, actual(target)) - amount);
   return target;
 };
 
@@ -448,11 +360,7 @@ const work = (creep: Creep, info: RoomInfo, state: TickState): void => {
     return;
   }
   // 矿工体型按部件识别：规划的矿工为 WORK×5 加 MOVE，link 阶段加 1 CARRY（app.config 第 3 节）。被选为防降级升级者时以升级为先。
-  const miner =
-    hasWork &&
-    (!carry ||
-      (creep.getActiveBodyparts(WORK) >= 5 &&
-        creep.getActiveBodyparts(CARRY) <= 1));
+  const miner = hasWork && (!carry || (creep.getActiveBodyparts(WORK) >= 5 && creep.getActiveBodyparts(CARRY) <= 1));
   if (miner && creep !== info.upgrader && holdSource(creep, info)) return;
   if (!carry) {
     if (hasWork) mine(creep, info, state);
@@ -465,13 +373,10 @@ const work = (creep: Creep, info: RoomInfo, state: TickState): void => {
   }
   if (energy > 0) {
     // 采集中途不离开：紧挨活跃 source 且未装满时继续采集，否则每采到一次就往返一趟，几乎运不回能量。
-    const source =
-      hasWork && creep.store.getFreeCapacity(RESOURCE_ENERGY) > 0
-        ? info.sources.find((s) => creep.pos.isNearTo(s))
-        : undefined;
+    const source = hasWork && creep.store.getFreeCapacity(RESOURCE_ENERGY) > 0
+      ? info.sources.find((s) => creep.pos.isNearTo(s)) : undefined;
     if (source) creep.harvest(source);
-    else if (!deliver(creep, info, state) && hasWork)
-      upgrade(creep, info, state);
+    else if (!deliver(creep, info, state) && hasWork) upgrade(creep, info, state);
     return;
   }
   acquire(creep, info, state, hasWork);
@@ -486,46 +391,21 @@ const work = (creep: Creep, info: RoomInfo, state: TickState): void => {
  * @param hasWork 是否有有效 WORK。
  * @returns 无返回值。
  */
-const stationary = (
-  creep: Creep,
-  info: RoomInfo,
-  state: TickState,
-  hasWork: boolean,
-): void => {
+const stationary = (creep: Creep, info: RoomInfo, state: TickState, hasWork: boolean): void => {
   const energy = creep.store.getUsedCapacity(RESOURCE_ENERGY);
   const inRange = creep.pos.inRangeTo(info.controller, 3);
-  if (creep === info.upgrader && energy > 0 && inRange) {
-    creep.upgradeController(info.controller);
-    return;
-  }
+  if (creep === info.upgrader && energy > 0 && inRange) { creep.upgradeController(info.controller); return; }
   if (energy > 0) {
     const near = info.fill.flat().filter((t) => creep.pos.isNearTo(t));
     const target = pick(creep, near, fillFree, energy, state);
-    if (target) {
-      creep.transfer(target, RESOURCE_ENERGY);
-      return;
-    }
+    if (target) { creep.transfer(target, RESOURCE_ENERGY); return; }
   }
-  const source = hasWork
-    ? info.sources.find((s) => creep.pos.isNearTo(s))
-    : undefined;
-  if (source) {
-    creep.harvest(source);
-    return;
-  }
-  if (hasWork && energy > 0 && inRange) {
-    creep.upgradeController(info.controller);
-    return;
-  }
+  const source = hasWork ? info.sources.find((s) => creep.pos.isNearTo(s)) : undefined;
+  if (source) { creep.harvest(source); return; }
+  if (hasWork && energy > 0 && inRange) { creep.upgradeController(info.controller); return; }
   const free = creep.store.getFreeCapacity(RESOURCE_ENERGY);
   if (free <= 0) return;
-  const supply = pick(
-    creep,
-    info.supply.filter((s) => creep.pos.isNearTo(s)),
-    supplyEnergy,
-    free,
-    state,
-  );
+  const supply = pick(creep, info.supply.filter((s) => creep.pos.isNearTo(s)), supplyEnergy, free, state);
   if (supply) take(creep, supply);
 };
 
@@ -550,7 +430,7 @@ const mine = (creep: Creep, info: RoomInfo, state: TickState): void => {
  * @returns 无返回值。
  */
 const take = (creep: Creep, supply: Supply): void => {
-  if ("amount" in supply) creep.pickup(supply);
+  if ('amount' in supply) creep.pickup(supply);
   else creep.withdraw(supply, RESOURCE_ENERGY);
 };
 
@@ -563,18 +443,12 @@ const take = (creep: Creep, supply: Supply): void => {
  * @param canMine 是否允许采集 source。
  * @returns 无返回值。
  */
-const acquire = (
-  creep: Creep,
-  info: RoomInfo,
-  state: TickState,
-  canMine: boolean,
-): void => {
+const acquire = (creep: Creep, info: RoomInfo, state: TickState, canMine: boolean): void => {
   const free = creep.store.getFreeCapacity(RESOURCE_ENERGY);
   const supply = pick(creep, info.supply, supplyEnergy, free, state);
   if (supply) {
     if (creep.pos.isNearTo(supply)) take(creep, supply);
-    else if (!step(creep, supply.pos, 1, info, state))
-      unpick(state, supply.id, free);
+    else if (!step(creep, supply.pos, 1, info, state)) unpick(state, supply.id, free);
     return;
   }
   if (canMine) mine(creep, info, state);
@@ -593,8 +467,7 @@ const deliver = (creep: Creep, info: RoomInfo, state: TickState): boolean => {
     const target = pick(creep, group, fillFree, amount, state);
     if (!target) continue;
     if (creep.pos.isNearTo(target)) creep.transfer(target, RESOURCE_ENERGY);
-    else if (!step(creep, target.pos, 1, info, state))
-      unpick(state, target.id, amount);
+    else if (!step(creep, target.pos, 1, info, state)) unpick(state, target.id, amount);
     return true;
   }
   return false;
@@ -608,8 +481,7 @@ const deliver = (creep: Creep, info: RoomInfo, state: TickState): boolean => {
  * @returns 无返回值。
  */
 const upgrade = (creep: Creep, info: RoomInfo, state: TickState): void => {
-  if (creep.pos.inRangeTo(info.controller, 3))
-    creep.upgradeController(info.controller);
+  if (creep.pos.inRangeTo(info.controller, 3)) creep.upgradeController(info.controller);
   else step(creep, info.controller.pos, 3, info, state);
 };
 
@@ -627,11 +499,7 @@ const matrixFor = (info: RoomInfo, state: TickState): CostMatrix => {
   for (const s of info.structures) {
     if (s.structureType === STRUCTURE_ROAD) matrix.set(s.pos.x, s.pos.y, 1);
     else if (s.structureType === STRUCTURE_CONTAINER) continue;
-    else if (
-      s.structureType === STRUCTURE_RAMPART &&
-      ((s as StructureRampart).my || (s as StructureRampart).isPublic)
-    )
-      continue;
+    else if (s.structureType === STRUCTURE_RAMPART && ((s as StructureRampart).my || (s as StructureRampart).isPublic)) continue;
     else matrix.set(s.pos.x, s.pos.y, 255);
   }
   for (const p of info.obstacles) matrix.set(p.x, p.y, 255);
@@ -649,32 +517,18 @@ const matrixFor = (info: RoomInfo, state: TickState): CostMatrix => {
  * @param state 本 tick 状态，累计寻路次数。
  * @returns 提交了移动时为 true；调用方据此决定是否撤回预留。
  */
-const step = (
-  creep: Creep,
-  target: RoomPosition,
-  range: number,
-  info: RoomInfo,
-  state: TickState,
-): boolean => {
+const step = (creep: Creep, target: RoomPosition, range: number, info: RoomInfo, state: TickState): boolean => {
   if (creep.fatigue > 0 || state.paths >= FB_PATH_LIMIT) return false;
   state.paths += 1;
-  const result = PathFinder.search(
-    creep.pos,
-    { pos: target, range },
-    {
-      maxRooms: 1,
-      maxOps: FB_PATH_OPS,
-      plainCost: 2,
-      swampCost: 10,
-      /**
-       * @description 寻路只在本房进行：本房返回本 tick 缓存的成本矩阵，其他房间返回 false 表示不可通行。
-       * @param name 房间名。
-       * @returns 成本矩阵，或 false。
-       */
-      roomCallback: (name) =>
-        name === info.room.name ? matrixFor(info, state) : false,
-    },
-  );
+  const result = PathFinder.search(creep.pos, { pos: target, range }, {
+    maxRooms: 1, maxOps: FB_PATH_OPS, plainCost: 2, swampCost: 10,
+    /**
+     * @description 寻路只在本房进行：本房返回本 tick 缓存的成本矩阵，其他房间返回 false 表示不可通行。
+     * @param name 房间名。
+     * @returns 成本矩阵，或 false。
+     */
+    roomCallback: (name) => (name === info.room.name ? matrixFor(info, state) : false),
+  });
   const next = result.path[0];
   if (!next) return false;
   creep.move(creep.pos.getDirectionTo(next));
