@@ -179,13 +179,9 @@ kernel.context 为每个模块派生一个 `ModuleContext`，在整个 global �
 - **抛错后重建**：异常可能使 kernel 内部状态不一致，所以抛错后丢弃实例，下一 tick 重新装配；Memory 从 RawMemory 重新加载，未提交的 heap 修改随之丢弃。
 - **软重置**：boot 经 `port.softReset()` 登记后，本 tick 为暂停 tick，跳过业务阶段但照常提交；入口销毁实例，下一 tick 重新装配。全部进程实例与模块级 heap 缓存随旧实例丢弃，Memory 从已提交的文本重新加载，效果等同于一次 global reset（5.5）。
 - **冷却期**：持续失败时每 tick 重新装配会反复解析 Memory。冷却期把这项成本限制为每 `KERNEL_CRASH_LIMIT + KERNEL_COOLDOWN`（103）tick 至多 `KERNEL_CRASH_LIMIT` 次。
-- **模块重新执行**：引擎每 tick 检查 `require.cache.main`，它不是对象、`loop` 不是函数或代码时间戳变化时，新建 `require` 与空的模块缓存，但沿用同一个全局对象，在其上重新执行 main（engine 4.3.2 `src/game/game.js`）。这时模块作用域里的状态全部重建，而 `globalThis` 上的对象保留。官服上每 tick 都发生这一情况（架构附录 A 的 F21）：2026-10-21 在官服测试账户上的诊断中，330 个 tick 内新建了 331 个 `require`，每 tick 结束时 `require.cache.main` 仍是对象、`loop` 仍是本入口导出的函数，而 `require.timestamp` 是 `Date` 对象。另两个条件都满足，所以触发条件是代码时间戳的比较：平台每 tick 传入新的 `Date` 对象，`!=` 按引用比较恒为真（推断：官服对应部分未开源）。未处理时，入口与 kernel 每 tick 新建，开局备份等跨 tick 的流程永远完成不了，上一轮安装的控制台命名空间被当作外来对象。处理：
-  - 入口登记在全局注册表 `globalThis[Symbol.for('leviathan.entry')]`，记录构建标识（构建注入的版本号加构建时刻，[bootPort](./bootPort.md) 第 6 节）。模块执行时，已有同一构建的入口则沿用，kernel 与跨 tick 的流程延续；构建不同（代码更新而未重置 global）时先销毁旧入口的 kernel，再新建入口；没有时新建并登记。不以引擎的代码时间戳为标识：它可能正是每 tick 变化的条件。
-  - 控制台命名空间以注册符号标记，任何一轮模块执行安装的对象都识别为本模块所有（[console](./console.md#4-安装) 第 4 节）。
-  - 重新执行的累计次数在 1、10、100…… 次时各记录一条 info，线上可据此判断发生频率，不必执行控制台命令。
-  - 沿用入口时，本轮执行新建的模块级对象不被使用；模块执行本身的成本（定义函数与常量）仍会每次发生。诊断中官服上报每 tick 约 2 CPU，而 kernel 在 loop 内测得平均 0.47 CPU，差额主要是每 tick 的模块执行与平台开销（推断：官服只上报整数）。
-- **代码时间戳**：为消除上述每 tick 的模块执行，main 在模块执行时把 `require.timestamp` 换成同一 `Date` 的字符串形式。下一 tick 引擎比较 `Date != 字符串` 时先把 `Date` 按默认提示转为字符串（`Date.prototype.toString`），同一时刻即相等，模块缓存保留；代码更新后时刻不同，照常重新加载。`toString` 精确到秒，两次上传相隔不足一秒的情形忽略。时间戳不是 `Date`（私服为字符串）时不处理。
-  - 前提是平台只以 `!=` 使用这个字段。若平台另以 `Date` 方法读取它，替换会出错；这一点只能在官服实测确认：确认后"模块重新执行"的计数不再增长，入口注册表仍作为兜底保留。
+- **模块重新执行**：引擎每 tick 检查 `require.cache.main`，它不是对象、`loop` 不是函数或代码时间戳变化时，新建 `require` 与空的模块缓存，但沿用同一个全局对象，在其上重新执行 main（engine 4.3.2 `src/game/game.js`）。这时模块作用域里的状态全部重建，而全局对象上的属性保留。正常运行中这只发生在代码更新而 global 未重置时，效果与 global reset 相同：入口与 kernel 随模块重新创建，kernel 从已提交的持久状态重新装配。入口不在全局对象上登记状态：代码已经更新，旧实例不应继续运行，沿用它没有收益。
+  - 控制台命名空间以注册符号标记，上一轮模块执行安装的对象识别为本模块所有，并被新命名空间取代（[console](./console.md#4-安装) 第 4 节）。
+  - 代码时间戳必须按值比较（架构附录 A 的 F21）：backend 的 `clone-branch` 把时间戳写成 `Date`，driver 每 tick 从数据库读出的是新对象，`!=` 恒为真，引擎于是每 tick 重新执行 main，入口与 kernel 每 tick 新建，开局备份等跨 tick 的流程永远完成不了，每 tick 还要重新解析 Memory。`user/code` 写入毫秒数，没有这个问题，所以部署工具新建分支后再以同样的模块覆盖一次（`scripts/deploy/lib.ts` 的 `planUpload`）。入口不修改平台的 `require` 来规避这一条件。
 - **重置循环**：boot 的缺陷可能使每个新实例都再次登记软重置，效果与持续抛错相同。正常开局流程的暂停不超过 `PAUSE_LIMIT`，所以超限后的软重置按失败计数，与抛错共用冷却。超限期间暂停 tick 不清零失败计数，软重置与普通暂停交替时同样受限。boot 抛错的 tick 计为 degraded 而不是 paused，不受上述计数约束，所以这样的 tick 登记的软重置由 kernel 作废（第 2 节"boot 失败"），不触发重建。
 - **接管通知**（13.4）：保底循环在本 tick 运行、而上一 tick 没有运行时，视为一次接管开始。入口经 `Game.notify` 发出一条纯文本通知，写明 tick 与原因：正常循环抛错、上一 tick 被硬终止、停用冷却、连续 degraded，或暂停超限。
   - 距上一次通知不足 `FALLBACK_NOTIFY_GAP` 时不再通知，避免反复抛错或健康状态来回切换时连续发信。

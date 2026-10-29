@@ -1655,7 +1655,7 @@ F1–F7、F10–F18 依据公开发布的 Screeps 服务端组件：`@screeps/en
 | F18 | NPC 入侵：source 每次被采集时累计 `invaderHarvested`；房间累计量达到阈值（基准 `INVADERS_ENERGY_GOAL = 100000`）后生成袭击，并把阈值重置为基准的 0.7–1.3 倍，10% 概率再翻倍或减半；自有房间 RCL ≥ 4 时为大型入侵者；九成情况为 1 个，其余为 2–5 个，可能带 boost；由近战、远程、治疗组成；私服还要求同扇区存在入侵者据点。在别人占有或预定的房间里无法采集 | engine `src/processor/intents/creeps/harvest.js`；backend `lib/cronjobs.js` |
 | F19 | 官服的 JS 运行环境为 Node 24 | 项目确认的官服运行环境 |
 | F20 | CostMatrix 非零值替代地形成本，255 不可通行，0 回退到地形；公开 driver 在寻路访问格子时读取地形位图与成本表，不把成本写回矩阵。预填成本可省去零值回退，具体 CPU 收益须实测 | [官方 CostMatrix 文档](https://docs.screeps.com/api/#PathFinder.CostMatrix)；driver [pf.cc 的 look](https://github.com/screeps/driver/blob/master/native/src/pf.cc#L98)、[pf.h 的 room_info_t](https://github.com/screeps/driver/blob/master/native/src/pf.h#L198)（2026-10-19 核实的公开实现） |
-| F21 | 引擎每 tick 在 `require.cache.main` 无效或代码时间戳变化时新建 `require` 与模块缓存，沿用同一个全局对象重新执行 main；官服的代码时间戳为 `Date` 对象，以 `!=` 比较时每 tick 判为变化，于是每 tick 在同一 global 中重新执行 main，模块作用域的状态不能跨 tick 保留 | engine 4.3.2 `src/game/game.js`；2026-10-21 官服测试账户诊断（330 tick 新建 331 个 `require`，`timestamp` 为 `Date`；官服对应部分未开源，比较方式为推断） |
+| F21 | 引擎每 tick 在 `require.cache.main` 无效或代码时间戳变化时新建 `require` 与模块缓存，沿用同一个全局对象重新执行 main，模块作用域的状态随之重建。代码时间戳以 `!=` 与 `require` 上记录的值比较，driver 每 tick 从数据库读出它：`POST /api/user/code` 写入毫秒数，按值比较；`POST /api/user/clone-branch` 写入 `Date`，每 tick 读出的是新对象，比较恒为真，于是每 tick 在同一 global 中重新执行 main。新建的分支须再以 `user/code` 覆盖一次 | engine 4.3.2 `src/game/game.js`、driver 5.3.0 `lib/runtime/data.js`、backend 3.3.0 `lib/game/api/user.js`；2026-10-29 官服测试账户验证：只经 `clone-branch` 新建的分支时间戳为 `Date`，10 tick 内每 tick 新建 `require`；以 `user/code` 覆盖同样的模块后为数字，`require` 不再变化 |
 
 ---
 
