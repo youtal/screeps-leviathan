@@ -18,7 +18,9 @@
     "check:version": "node scripts/version/cli.ts check",
     "deploy": "node scripts/deploy/cli.ts",
     "inspect": "node scripts/inspector/cli.ts",
-    "test:scenarios": "node scripts/scenarios/cli.ts"
+    "test:scenarios": "node scripts/scenarios/cli.ts",
+    "build:bench": "rollup -c rollup.bench.config.mjs",
+    "bench": "node scripts/bench/cli.ts"
   },
   "devDependencies": {
     "@rollup/plugin-typescript": "12.3.0",

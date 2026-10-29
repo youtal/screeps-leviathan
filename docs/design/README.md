@@ -37,6 +37,12 @@
 | lib | [lib/hash.md](./lib/hash.md) | 稳定字符串哈希（校验位、错峰、分片） |
 | lib | [lib/naming.md](./lib/naming.md) | creep 名称的格式化与校验，spawn 名称词库 |
 | lib | [lib/geometry.md](./lib/geometry.md) | 房间坐标、坐标打包、方向与距离 |
+| lib | [lib/tables.md](./lib/tables.md) | 按 RCL 查询的建筑与控制器常量表 |
+| lib | [lib/body.md](./lib/body.md) | 身体组成：成本、体型展开与排列、用途分类、实际能力与移动速度 |
+| lib | [lib/combat.md](./lib/combat.md) | tower 距离衰减、creep 战斗能力与承受伤害 |
+| lib | [lib/grid.md](./lib/grid.md) | 网格原语：距离变换、多源 BFS、洪水填充、邻居枚举 |
+| lib | [lib/layout.md](./lib/layout.md) | 中央枢纽判定与 3×3 核心模板 |
+| lib | [lib/collections.md](./lib/collections.md) | 泛型优先队列、分桶队列与 LRU 缓存 |
 | world | [world/market.md](./world/market.md) | 物价模型 |
 | colony | [colony/inventory.md](./colony/inventory.md) | 资源库存控制 |
 | domains | [domains/industry/economics.md](./domains/industry/economics.md) | 产业规划 |
